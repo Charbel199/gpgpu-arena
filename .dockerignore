@@ -1,0 +1,15 @@
+# Build artifacts - don't copy host build cache into container
+build/
+cmake-build-*/
+
+# IDE
+.idea/
+.vscode/
+.git/
+
+# Compiled files
+*.o
+*.obj
+*.ptx
+*.cubin
+
