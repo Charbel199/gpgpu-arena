@@ -1,0 +1,31 @@
+services:
+  # Automatic: build and run
+  run:
+    build: .
+    volumes:
+      - .:/workspace/gpgpu-arena
+    working_dir: /workspace/gpgpu-arena
+    command: bash -c "rm -rf build && mkdir build && cd build && cmake .. && make -j$$(nproc) && ./arena"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Interactive: bash shell
+  shell:
+    build: .
+    volumes:
+      - .:/workspace/gpgpu-arena
+    working_dir: /workspace/gpgpu-arena
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
