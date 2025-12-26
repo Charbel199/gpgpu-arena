@@ -6,29 +6,102 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
+include(FetchContent)
+
 # ------------------------------------------------------------------------------
 # Find CUDA Toolkit (includes Driver API & CUPTI)
 # ------------------------------------------------------------------------------
 find_package(CUDAToolkit REQUIRED)
 
 # ------------------------------------------------------------------------------
-# Arena Executable (The "Referee" - your main harness)
+# Option: Build with GUI (Dear ImGui + ImPlot)
 # ------------------------------------------------------------------------------
-add_executable(arena
+option(BUILD_GUI "Build with Dear ImGui GUI" ON)
+
+if(BUILD_GUI)
+    # GLFW for windowing
+    FetchContent_Declare(
+        glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG 3.3.8
+    )
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(glfw)
+
+    # Dear ImGui
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG v1.90.1
+    )
+    FetchContent_MakeAvailable(imgui)
+
+    # ImPlot
+    FetchContent_Declare(
+        implot
+        GIT_REPOSITORY https://github.com/epezent/implot.git
+        GIT_TAG v0.16
+    )
+    FetchContent_MakeAvailable(implot)
+
+    # Find OpenGL
+    find_package(OpenGL REQUIRED)
+
+    # Build ImGui as a library
+    add_library(imgui_lib STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+        ${implot_SOURCE_DIR}/implot.cpp
+        ${implot_SOURCE_DIR}/implot_items.cpp
+    )
+    target_include_directories(imgui_lib PUBLIC
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
+        ${implot_SOURCE_DIR}
+        ${glfw_SOURCE_DIR}/include
+    )
+    target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
+    target_compile_definitions(imgui_lib PUBLIC IMGUI_IMPL_OPENGL_LOADER_GLAD=0)
+endif()
+
+# ------------------------------------------------------------------------------
+# Arena Executable
+# ------------------------------------------------------------------------------
+set(ARENA_SOURCES
     src/main.cpp
     src/arena/context.cpp
     src/arena/kernel_loader.cpp
     src/arena/profiler.cpp
 )
 
+if(BUILD_GUI)
+    list(APPEND ARENA_SOURCES
+        src/ui/app.cpp
+    )
+endif()
+
+add_executable(arena ${ARENA_SOURCES})
+
 target_include_directories(arena PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 
 target_link_libraries(arena PRIVATE
-    CUDA::cuda_driver    # Driver API (cuModuleLoad, cuLaunchKernel, etc.)
-    CUDA::cupti          # CUPTI for profiling metrics
+    CUDA::cuda_driver
+    CUDA::cupti
 )
+
+if(BUILD_GUI)
+    target_link_libraries(arena PRIVATE imgui_lib)
+    target_compile_definitions(arena PRIVATE ARENA_GUI_ENABLED)
+endif()
 
 # ------------------------------------------------------------------------------
 # Gladiator Kernels (compiled to PTX for dynamic loading)
@@ -83,16 +156,4 @@ endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
-
-# ------------------------------------------------------------------------------
-# Optional: Dear ImGui for the UI (Phase 3)
-# ------------------------------------------------------------------------------
-option(BUILD_UI "Build with Dear ImGui visualization" OFF)
-
-if(BUILD_UI)
-    # You'll add ImGui integration here later
-    # find_package(imgui REQUIRED)
-    # target_link_libraries(arena PRIVATE imgui::imgui)
-    message(STATUS "UI build enabled - ImGui integration pending")
-endif()
 
