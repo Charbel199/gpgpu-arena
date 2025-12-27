@@ -76,14 +76,18 @@ endif()
 # ------------------------------------------------------------------------------
 set(ARENA_SOURCES
     src/main.cpp
+    # Backend
     src/arena/context.cpp
     src/arena/kernel_loader.cpp
     src/arena/profiler.cpp
+    src/arena/benchmark.cpp
+    # Frontend
+    src/frontend/cli.cpp
 )
 
 if(BUILD_GUI)
     list(APPEND ARENA_SOURCES
-        src/ui/app.cpp
+        src/frontend/gui.cpp
     )
 endif()
 
