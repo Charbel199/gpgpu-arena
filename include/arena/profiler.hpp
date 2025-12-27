@@ -13,6 +13,12 @@ public:
     Profiler();
     ~Profiler();
 
+
+    struct ProfilerConfig {
+        int number_of_runs = 10;
+    };
+
+
     // Metrics we can collect
     struct KernelMetrics {
         // Timing
@@ -38,7 +44,7 @@ public:
 
     // Profile a kernel launch (wrap the launch in this)
     using KernelLaunchFn = std::function<void()>;
-    KernelMetrics profile(KernelLaunchFn launch_fn);
+    KernelMetrics profile(KernelLaunchFn launch_fn, ProfilerConfig config);
 
     // Get available metrics for the current device
     std::vector<std::string> available_metrics() const;
@@ -51,9 +57,6 @@ private:
     void init_cupti();
     void cleanup_cupti();
 
-    //missing set for enabled/disabled metrics
-    
-    CUpti_SubscriberHandle subscriber_;
     bool initialized_ = false;
 };
 

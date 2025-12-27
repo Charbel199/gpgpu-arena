@@ -39,7 +39,7 @@ BenchmarkResult Benchmark::run(const KernelInfo& kernel, const BenchmarkConfig& 
 
     try {
         CUmodule module = loader_.load_module(kernel.path);
-        CUfunction func = loader_.get_function(module, "matmul");
+        CUfunction func = loader_.get_function(module, "matmul"); //TODO: MAke this dynamic
 
         // Allocate
         size_t size_a = M * K * sizeof(float);
@@ -55,13 +55,17 @@ BenchmarkResult Benchmark::run(const KernelInfo& kernel, const BenchmarkConfig& 
         std::vector<float> h_b(K * N, 1.0f);
         ctx_.copy_to_device(d_a, h_a.data(), size_a);
         ctx_.copy_to_device(d_b, h_b.data(), size_b);
-
+        
+        // Distributing benchmark config to all the components
         // Launch config
         KernelLoader::LaunchConfig launch_config;
         launch_config.block_x = 16;
         launch_config.block_y = 16;
         launch_config.grid_x = (N + launch_config.block_x - 1) / launch_config.block_x;
         launch_config.grid_y = (M + launch_config.block_y - 1) / launch_config.block_y;
+        // PRofiler config
+        Profiler::ProfilerConfig profiler_config;
+        profiler_config.number_of_runs = config.number_of_runs;
 
         void* args[] = { &d_a, &d_b, &d_c, (void*)&M, (void*)&K, (void*)&N };
 
@@ -70,10 +74,10 @@ BenchmarkResult Benchmark::run(const KernelInfo& kernel, const BenchmarkConfig& 
             loader_.launch(func, launch_config, args);
         }
 
-        // Benchmark
+        // Benchmark, pass the profiler config to the profiler
         auto metrics = profiler_.profile([&]() {
             loader_.launch(func, launch_config, args);
-        });
+        }, profiler_config);
 
         // Calculate GFLOPS
         double flops = 2.0 * M * N * K;

@@ -28,6 +28,7 @@ struct BenchmarkResult {
 struct BenchmarkConfig {
     int matrix_size = 1024;
     int warmup_runs = 10;
+    int number_of_runs = 10;
 };
 
 class Benchmark {
