@@ -1,11 +1,13 @@
 services:
-  # CLI mode: build and run benchmarks
-  run:
+  # Interactive CLI (default)
+  arena:
     build: .
     volumes:
       - .:/workspace/gpgpu-arena
     working_dir: /workspace/gpgpu-arena
     command: bash -c "rm -rf build && mkdir build && cd build && cmake -DBUILD_GUI=OFF .. && make -j$$(nproc) && ./arena --cli"
+    stdin_open: true
+    tty: true
     deploy:
       resources:
         reservations:
@@ -14,7 +16,7 @@ services:
               count: all
               capabilities: [gpu]
 
-  # GUI mode: build and launch with graphical interface
+  # GUI mode
   gui:
     build: .
     volumes:
@@ -27,27 +29,6 @@ services:
       - __GLX_VENDOR_LIBRARY_NAME=nvidia
       - __NV_PRIME_RENDER_OFFLOAD=1
     command: bash -c "rm -rf build && mkdir build && cd build && cmake -DBUILD_GUI=ON .. && make -j$$(nproc) && ./arena --gui"
-    network_mode: host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-  # Interactive shell for development
-  shell:
-    build: .
-    volumes:
-      - .:/workspace/gpgpu-arena
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    working_dir: /workspace/gpgpu-arena
-    environment:
-      - DISPLAY=${DISPLAY}
-      - NVIDIA_DRIVER_CAPABILITIES=all
-      - __GLX_VENDOR_LIBRARY_NAME=nvidia
-      - __NV_PRIME_RENDER_OFFLOAD=1
     stdin_open: true
     tty: true
     network_mode: host
