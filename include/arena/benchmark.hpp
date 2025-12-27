@@ -44,6 +44,9 @@ public:
     std::vector<BenchmarkResult> run_all(const std::vector<KernelInfo>& kernels, 
                                           const BenchmarkConfig& config);
 
+    // Access context (for device info display)
+    const Context& context() const { return ctx_; }
+
 private:
     Context& ctx_;
     KernelLoader& loader_;
