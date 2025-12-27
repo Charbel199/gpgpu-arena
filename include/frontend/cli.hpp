@@ -1,0 +1,43 @@
+#pragma once
+
+#include "arena/benchmark.hpp"
+#include <vector>
+#include <map>
+#include <string>
+
+namespace frontend {
+
+class Cli {
+public:
+    Cli(arena::Benchmark& benchmark);
+
+    void run();
+
+private:
+    void print_banner();
+    void print_help();
+    bool execute(const std::string& line);
+
+    // Commands
+    void cmd_list();
+    void cmd_run(const std::string& arg);
+    void cmd_results();
+    void cmd_set(const std::string& what, int value);
+
+    void run_kernel(const arena::KernelInfo& kernel);
+    void refresh_kernels();
+
+    static std::string trim(const std::string& s);
+
+    // Backend
+    arena::Benchmark& benchmark_;
+
+    // State
+    std::vector<arena::KernelInfo> kernels_;
+    std::map<std::string, arena::BenchmarkResult> results_;
+    arena::BenchmarkConfig config_;
+};
+
+int run_cli(arena::Benchmark& benchmark);
+
+}
