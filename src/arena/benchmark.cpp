@@ -83,9 +83,16 @@ BenchmarkResult Benchmark::run(const KernelInfo& kernel, const BenchmarkConfig& 
         double flops = 2.0 * M * N * K;
         result.elapsed_ms = metrics.elapsed_ms;
         result.gflops = (flops / (metrics.elapsed_ms / 1000.0)) / 1e9;
+        
+        // From CUPTI Activity API
+        result.registers_per_thread = metrics.registers_per_thread;
+        result.shared_memory_bytes = metrics.shared_memory_per_block;
+        
+        // From CUPTI Profiler API (Phase 2)
         result.achieved_occupancy = metrics.achieved_occupancy;
         result.dram_read_gbps = metrics.dram_read_throughput_gbps;
         result.dram_write_gbps = metrics.dram_write_throughput_gbps;
+        
         result.success = true;
 
         // Cleanup

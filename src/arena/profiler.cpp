@@ -111,7 +111,7 @@ Profiler::KernelMetrics Profiler::profile(KernelLaunchFn launch_fn, ProfilerConf
         
         std::cout << "\n[CUPTI] Kernel: " << name << std::endl;
     }
-    
+    // TODO: Remove when properly integrated in CLI and GUI
     std::cout << "  Elapsed: " << metrics.elapsed_ms << " ms" << std::endl;
     std::cout << "  Registers/thread: " << metrics.registers_per_thread << std::endl;
     std::cout << "  Shared memory: " << metrics.shared_memory_per_block << " bytes" << std::endl;

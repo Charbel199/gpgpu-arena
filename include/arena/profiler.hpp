@@ -20,6 +20,7 @@ public:
 
 
     // Metrics we can collect
+    // TODO: Some consistency with Benchmark struct
     struct KernelMetrics {
         // Timing
         float elapsed_ms = 0.0f;
