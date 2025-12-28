@@ -1,19 +1,43 @@
 #include "arena/profiler.hpp"
 #include "arena/utils.hpp"
 #include <iostream>
+#include <cstdlib>
+#include <unordered_map>
+#include <string>
 
 namespace arena {
 
-namespace {
-    // CUPTI activity callback
-    void CUPTIAPI activity_callback(
-        CUpti_CallbackDomain domain,
-        CUpti_CallbackId callback_id,
-        const void* callback_info
-    ) {
-        // This will be expanded to capture kernel metrics
-        // For now, just a placeholder
+struct KernelActivityData {
+    uint64_t duration_ns = 0;
+    int registers_per_thread = 0;
+    int shared_memory = 0;
+};
+
+// Map of kernel name -> activity data
+static std::unordered_map<std::string, KernelActivityData> s_activity_results;
+
+static void CUPTIAPI bufferRequested(uint8_t **buffer, size_t *size, size_t *maxNumRecords) {
+    *size = 16 * 1024;
+    *buffer = (uint8_t*)malloc(*size);
+    *maxNumRecords = 0;
+}
+
+static void CUPTIAPI bufferCompleted(CUcontext ctx, uint32_t streamId, 
+                                      uint8_t *buffer, size_t size, size_t validSize) {
+    CUpti_Activity *record = nullptr;
+    
+    while (cuptiActivityGetNextRecord(buffer, validSize, &record) == CUPTI_SUCCESS) {
+        if (record->kind == CUPTI_ACTIVITY_KIND_KERNEL) {
+            CUpti_ActivityKernel4 *kernel = (CUpti_ActivityKernel4*)record;
+            
+            KernelActivityData& data = s_activity_results[kernel->name];
+            data.duration_ns = kernel->end - kernel->start;
+            data.registers_per_thread = kernel->registersPerThread;
+            data.shared_memory = kernel->staticSharedMemory + kernel->dynamicSharedMemory;
+        }
     }
+    
+    free(buffer);
 }
 
 Profiler::Profiler() {
@@ -27,92 +51,88 @@ Profiler::~Profiler() {
 void Profiler::init_cupti() {
     if (initialized_) return;
 
-    // Subscribe to CUPTI callbacks
-    CUptiResult result = cuptiSubscribe(
-        &subscriber_,
-        reinterpret_cast<CUpti_CallbackFunc>(activity_callback),
-        nullptr
-    );
-    
+    CUptiResult result = cuptiActivityRegisterCallbacks(bufferRequested, bufferCompleted);
     if (result != CUPTI_SUCCESS) {
-        std::cerr << "Warning: CUPTI initialization failed. "
-                  << "Profiling will be limited.\n";
+        std::cerr << "Warning: CUPTI Activity registration failed.\n";
         return;
     }
-
-    // Enable activity tracking for kernels
-    check_cupti(
-        cuptiActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL),
-        "cuptiActivityEnable (kernel)"
-    );
-
-    // Enable activity tracking for memory operations
-    check_cupti(
-        cuptiActivityEnable(CUPTI_ACTIVITY_KIND_MEMCPY),
-        "cuptiActivityEnable (memcpy)"
-    );
 
     initialized_ = true;
 }
 
 void Profiler::cleanup_cupti() {
     if (!initialized_) return;
-
-    cuptiActivityDisable(CUPTI_ACTIVITY_KIND_KERNEL);
-    cuptiActivityDisable(CUPTI_ACTIVITY_KIND_MEMCPY);
-    cuptiUnsubscribe(subscriber_);
     
+    cuptiActivityFlushAll(0);
     initialized_ = false;
 }
 
-Profiler::KernelMetrics Profiler::profile(KernelLaunchFn launch_fn) {
+Profiler::KernelMetrics Profiler::profile(KernelLaunchFn launch_fn, ProfilerConfig config) {
     KernelMetrics metrics;
 
-    // For Phase 1, we just do basic timing
-    // CUPTI metric collection will be added in Phase 2
+    // Clear previous results TODO: Do we need to clear everything ?
+    s_activity_results.clear();
 
-    // Create CUDA events for timing
+    // Enable activity tracking
+    cuptiActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL);
+
+    // Create CUDA events for timing (backup if Activity API fails)
     CUevent start, stop;
     cuEventCreate(&start, CU_EVENT_DEFAULT);
     cuEventCreate(&stop, CU_EVENT_DEFAULT);
 
-    // Time the kernel
     cuEventRecord(start, nullptr);
+
+    // Run the kernel
     launch_fn();
+
     cuEventRecord(stop, nullptr);
     cuEventSynchronize(stop);
 
+    // Get elapsed time from CUDA events
     cuEventElapsedTime(&metrics.elapsed_ms, start, stop);
 
     cuEventDestroy(start);
     cuEventDestroy(stop);
 
-    // TODO: Collect CUPTI metrics here in Phase 2
-    // Use cuptiProfilerBeginPass / cuptiProfilerEndPass
-    // Query specific metrics like sm__throughput.avg
+    // Flush activity buffers to trigger callbacks
+    cuptiActivityFlushAll(0);
+
+    // Disable activity tracking
+    cuptiActivityDisable(CUPTI_ACTIVITY_KIND_KERNEL);
+
+    // Collect results from activity map (safe: flush blocks until callbacks done)
+    if (!s_activity_results.empty()) {
+        // Get the first (usually only) kernel's data
+        const auto& [name, data] = *s_activity_results.begin();
+        metrics.elapsed_ms = data.duration_ns / 1e6f;
+        metrics.registers_per_thread = data.registers_per_thread;
+        metrics.shared_memory_per_block = data.shared_memory;
+        
+        std::cout << "\n[CUPTI] Kernel: " << name << std::endl;
+    }
+    
+    std::cout << "  Elapsed: " << metrics.elapsed_ms << " ms" << std::endl;
+    std::cout << "  Registers/thread: " << metrics.registers_per_thread << std::endl;
+    std::cout << "  Shared memory: " << metrics.shared_memory_per_block << " bytes" << std::endl;
 
     return metrics;
 }
 
 std::vector<std::string> Profiler::available_metrics() const {
-    // This would query CUPTI for available metrics on the current device
-    // For now, return commonly available metrics
     return {
-        "dram__bytes_read.sum",
-        "dram__bytes_write.sum",
-        "sm__warps_active.avg.pct_of_peak_sustained_active",
-        "smsp__inst_executed.sum",
-        "sm__throughput.avg.pct_of_peak_sustained_elapsed"
+        "elapsed_ms",
+        "registers_per_thread",
+        "shared_memory_per_block"
     };
 }
 
 void Profiler::enable_metric(const std::string& metric_name) {
-    // TODO: Enable specific CUPTI metrics
+    // Activity API metrics are always collected
 }
 
 void Profiler::disable_metric(const std::string& metric_name) {
-    // TODO: Disable specific CUPTI metrics
+    // Activity API metrics are always collected
 }
 
 }
-
