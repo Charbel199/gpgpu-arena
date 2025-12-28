@@ -16,11 +16,20 @@ struct KernelInfo {
 
 struct BenchmarkResult {
     std::string kernel_name;
+    
+    // Timing & compute
     float elapsed_ms = 0.0f;
     double gflops = 0.0;
+    
+    // From CUPTI Activity API
+    int registers_per_thread = 0;
+    int shared_memory_bytes = 0;
+    
+    // From CUPTI Profiler API (from documentation)
     double achieved_occupancy = 0.0;
     double dram_read_gbps = 0.0;
     double dram_write_gbps = 0.0;
+    
     bool success = false;
     std::string error;
 };
