@@ -154,7 +154,9 @@ void Cli::run_kernel(const arena::KernelInfo& kernel) {
     if (result.success) {
         std::cout << std::fixed << std::setprecision(3)
                   << result.elapsed_ms << " ms, "
-                  << std::setprecision(1) << result.gflops << " GFLOPS\n";
+                  << std::setprecision(1) << result.gflops << " GFLOPS"
+                  << " | regs=" << result.registers_per_thread
+                  << ", shmem=" << (result.shared_memory_bytes / 1024.0) << "KB\n";
     } else {
         std::cout << "FAILED: " << result.error << "\n";
     }
@@ -167,19 +169,23 @@ void Cli::cmd_results() {
     }
 
     std::cout << "\n";
-    std::cout << std::left << std::setw(25) << "Kernel"
-              << std::right << std::setw(12) << "Time (ms)"
-              << std::setw(12) << "GFLOPS" << "\n";
-    std::cout << std::string(49, '-') << "\n";
+    std::cout << std::left << std::setw(20) << "Kernel"
+              << std::right << std::setw(10) << "Time(ms)"
+              << std::setw(10) << "GFLOPS"
+              << std::setw(8) << "Regs"
+              << std::setw(12) << "ShMem(KB)" << "\n";
+    std::cout << std::string(60, '-') << "\n";
 
     for (const auto& [name, r] : results_) {
-        std::cout << std::left << std::setw(25) << name;
+        std::cout << std::left << std::setw(20) << name;
         if (r.success) {
             std::cout << std::right << std::fixed
-                      << std::setw(12) << std::setprecision(3) << r.elapsed_ms
-                      << std::setw(12) << std::setprecision(1) << r.gflops;
+                      << std::setw(10) << std::setprecision(3) << r.elapsed_ms
+                      << std::setw(10) << std::setprecision(1) << r.gflops
+                      << std::setw(8) << r.registers_per_thread
+                      << std::setw(12) << std::setprecision(2) << (r.shared_memory_bytes / 1024.0);
         } else {
-            std::cout << std::right << std::setw(24) << "FAILED";
+            std::cout << std::right << std::setw(40) << "FAILED";
         }
         std::cout << "\n";
     }

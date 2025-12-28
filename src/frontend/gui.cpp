@@ -207,12 +207,14 @@ void Gui::render_results_table() {
     ImGui::Text("Results");
     ImGui::Spacing();
 
-    if (ImGui::BeginTable("results", 3,
+    if (ImGui::BeginTable("results", 5,
         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
 
         ImGui::TableSetupColumn("Kernel");
         ImGui::TableSetupColumn("Time (ms)");
         ImGui::TableSetupColumn("GFLOPS");
+        ImGui::TableSetupColumn("Regs");
+        ImGui::TableSetupColumn("ShMem");
         ImGui::TableHeadersRow();
 
         for (const auto& k : kernels_) {
@@ -225,6 +227,14 @@ void Gui::render_results_table() {
             ImGui::Text("%.3f", k.result.elapsed_ms);
             ImGui::TableNextColumn();
             ImGui::Text("%.1f", k.result.gflops);
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", k.result.registers_per_thread);
+            ImGui::TableNextColumn();
+            if (k.result.shared_memory_bytes >= 1024) {
+                ImGui::Text("%.1fKB", k.result.shared_memory_bytes / 1024.0);
+            } else {
+                ImGui::Text("%dB", k.result.shared_memory_bytes);
+            }
         }
 
         ImGui::EndTable();
