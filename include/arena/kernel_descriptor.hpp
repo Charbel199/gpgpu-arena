@@ -48,7 +48,7 @@ public:
 // registry for kernel descriptors, used to register all kernels in the program
 class KernelRegistry {
 public:
-    static KernelRegistry& instance() {
+    static KernelRegistry& instance() { // one way to have a singleton in c++ (only one instance of the class)
         static KernelRegistry registry;
         return registry;
     }
