@@ -1,6 +1,7 @@
 #pragma once
 
 #include "arena/benchmark.hpp"
+#include "arena/kernel_descriptor.hpp"
 #include <vector>
 #include <map>
 #include <string>
@@ -20,12 +21,13 @@ private:
 
     // Commands
     void cmd_list();
+    void cmd_categories();
+    void cmd_select(const std::string& category);
     void cmd_run(const std::string& arg);
     void cmd_results();
     void cmd_set(const std::string& what, int value);
 
-    void run_kernel(const arena::KernelInfo& kernel);
-    void refresh_kernels();
+    void run_kernel(arena::KernelDescriptor* kernel);
 
     static std::string trim(const std::string& s);
 
@@ -33,7 +35,8 @@ private:
     arena::Benchmark& benchmark_;
 
     // State
-    std::vector<arena::KernelInfo> kernels_;
+    std::string current_category_;
+    std::vector<arena::KernelDescriptor*> current_kernels_;
     std::map<std::string, arena::BenchmarkResult> results_;
     arena::BenchmarkConfig config_;
 };
