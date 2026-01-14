@@ -1,13 +1,12 @@
 #include "arena/context.hpp"
 #include "arena/utils.hpp"
+#include <cuda.h>
 
 namespace arena {
 
 Context::Context(int device_id) {
-    // Initialize the CUDA Driver API
     check_cuda(cuInit(0), "cuInit");
 
-    // Get device count
     int device_count;
     check_cuda(cuDeviceGetCount(&device_count), "cuDeviceGetCount");
     
@@ -18,10 +17,8 @@ Context::Context(int device_id) {
         );
     }
 
-    // Get the device
     check_cuda(cuDeviceGet(&device_, device_id), "cuDeviceGet");
 
-    // Get device properties
     char name[256];
     check_cuda(cuDeviceGetName(name, sizeof(name), device_), "cuDeviceGetName");
     device_name_ = name;
@@ -37,11 +34,19 @@ Context::Context(int device_id) {
 
     check_cuda(cuDeviceTotalMem(&total_mem_, device_), "cuDeviceTotalMem");
 
-    // Create a CUDA context
+    // cuCtxCreate API changed in CUDA 13.0
+#if CUDA_VERSION >= 13000
+    CUctxCreateParams params = {};
+    check_cuda(
+        cuCtxCreate_v4(&context_, &params, CU_CTX_SCHED_AUTO, device_),
+        "cuCtxCreate"
+    );
+#else
     check_cuda(
         cuCtxCreate(&context_, CU_CTX_SCHED_AUTO, device_),
         "cuCtxCreate"
     );
+#endif
 }
 
 Context::~Context() {
