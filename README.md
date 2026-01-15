@@ -110,3 +110,6 @@ Running them back-to-back shows exactly what each optimization buys you.
 - CUPTI integration for real metrics (occupancy, throughput, etc.)
 - Some kind of visualization
 - Side-by-side comparison mode
+
+**TODO:**
+- Thrust/CUB support: add `uses_ptx()` and `execute()` to descriptors so host-side libraries can be benchmarked alongside raw CUDA kernels
