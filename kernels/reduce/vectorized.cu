@@ -1,6 +1,6 @@
 // SOL5: Vectorized 128-bit Loads + Grid-Stride + Warp Shuffle
 // Maximizes memory bandwidth with float4 loads
-
+#include <cuda/atomic>
 __device__ __forceinline__ float warp_reduce_sum(float val) {
     val += __shfl_down_sync(0xFFFFFFFF, val, 16);
     val += __shfl_down_sync(0xFFFFFFFF, val, 8);
@@ -51,7 +51,8 @@ extern "C" __global__ void reduce_sum(
         sum = warp_reduce_sum(sum);
         
         if (lane_id == 0) {
-            atomicAdd(output, sum);
+            cuda::atomic_ref<float, cuda::thread_scope_device> output_ref(*output);
+            output_ref.fetch_add(sum);
         }
     }
 }

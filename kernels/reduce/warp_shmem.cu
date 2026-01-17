@@ -1,6 +1,6 @@
 // SOL4: Grid-Stride + Warp Shuffle + Shared Memory Array
 // eliminates ALL shared memory atomics
-
+#include <cuda/atomic>
 __device__ __forceinline__ float warp_reduce_sum(float val) {
     val += __shfl_down_sync(0xFFFFFFFF, val, 16);
     val += __shfl_down_sync(0xFFFFFFFF, val, 8);

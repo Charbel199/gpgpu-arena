@@ -1,6 +1,6 @@
 // SOL3: Grid-Stride Loop + Warp Shuffle + Shared Memory
 // Each thread processes multiple elements via grid-stride loop
-
+#include <cuda/atomic>
 __device__ __forceinline__ float warp_reduce_sum(float val) {
     val += __shfl_down_sync(0xFFFFFFFF, val, 16);
     val += __shfl_down_sync(0xFFFFFFFF, val, 8);
