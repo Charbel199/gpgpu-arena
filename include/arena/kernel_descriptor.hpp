@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <stdexcept>
 
 namespace arena {
 
@@ -42,6 +43,13 @@ public:
     
     // verify if the result of the kernel is correct (TODO: not sure if this will work in all categories)
     virtual bool verify(Context& ctx) { return true; }
+
+
+    // run ptx or cpp code 
+    virtual bool uses_ptx() const { return true; }
+    virtual void execute(Context& ctx) { 
+        throw std::runtime_error("execute() not implemented for this kernel"); 
+    }
 };
 
 
