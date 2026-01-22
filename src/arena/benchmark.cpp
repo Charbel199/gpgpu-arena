@@ -14,9 +14,12 @@ BenchmarkResult Benchmark::run(KernelDescriptor& desc, const BenchmarkConfig& co
     try {
         desc.set_problem_size(config.params);
         
-        CUmodule module = loader_.load_module(desc.ptx_path());
-        CUfunction func = loader_.get_function(module, desc.function_name());
-
+        CUmodule module = nullptr;
+        CUfunction func = nullptr;
+        if (desc.uses_ptx()) {
+            module = loader_.load_module(desc.ptx_path());
+            func = loader_.get_function(module, desc.function_name());
+        }
         desc.allocate(ctx_);
         desc.initialize(ctx_);
 
@@ -34,7 +37,11 @@ BenchmarkResult Benchmark::run(KernelDescriptor& desc, const BenchmarkConfig& co
 
         // Warmup
         for (int i = 0; i < config.warmup_runs; i++) {
-            loader_.launch(func, launch_config, args.data());
+            if (desc.uses_ptx()) {
+                loader_.launch(func, launch_config, args.data());
+            } else {
+                desc.execute(ctx_);
+            }
         }
 
         // Profile
@@ -42,7 +49,11 @@ BenchmarkResult Benchmark::run(KernelDescriptor& desc, const BenchmarkConfig& co
         profiler_config.number_of_runs = config.number_of_runs;
 
         auto metrics = profiler_.profile([&]() {
-            loader_.launch(func, launch_config, args.data());
+            if (desc.uses_ptx()) {
+                loader_.launch(func, launch_config, args.data());
+            } else {
+                desc.execute(ctx_);
+            }
         }, profiler_config);
 
         double flops = desc.calculate_flops();
