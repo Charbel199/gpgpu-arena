@@ -60,6 +60,9 @@ endif()
 
 file(GLOB_RECURSE KERNEL_DESCRIPTORS "${CMAKE_SOURCE_DIR}/kernels/*/*.cpp")
 
+# CUDA descriptors (use runtime API, e.g. CUB/Thrust) compiled by nvcc, linked into exe
+file(GLOB CUDA_DESCRIPTORS "${CMAKE_SOURCE_DIR}/kernels/*/cub_*.cu" "${CMAKE_SOURCE_DIR}/kernels/*/thrust_*.cu")
+
 set(ARENA_SOURCES
     src/main.cpp
     src/arena/context.cpp
@@ -68,6 +71,7 @@ set(ARENA_SOURCES
     src/arena/benchmark.cpp
     src/frontend/cli.cpp
     ${KERNEL_DESCRIPTORS}
+    ${CUDA_DESCRIPTORS}
 )
 
 if(BUILD_GUI)
@@ -77,7 +81,7 @@ endif()
 add_executable(arena ${ARENA_SOURCES})
 
 target_include_directories(arena PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti)
+target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart)
 
 if(BUILD_GUI)
     target_link_libraries(arena PRIVATE imgui_lib)
@@ -88,6 +92,10 @@ endif()
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/kernels)
 file(GLOB_RECURSE KERNEL_SOURCES "${CMAKE_SOURCE_DIR}/kernels/*/*.cu")
+
+# exclude CUDA descriptors from PTX compilation (they're linked into exe, not loaded as PTX), TODO: clean up this logic
+list(FILTER KERNEL_SOURCES EXCLUDE REGEX "cub_.*\\.cu$")
+list(FILTER KERNEL_SOURCES EXCLUDE REGEX "thrust_.*\\.cu$")
 
 set(CUDA_ARCH "75" CACHE STRING "CUDA architecture to compile for")
 
