@@ -47,6 +47,7 @@ private:
 
     // Actions
     void run_selected_kernels();
+    void reset_results();
     void refresh_kernels();
     void select_category(const std::string& category);
 

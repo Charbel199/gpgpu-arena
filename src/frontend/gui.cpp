@@ -297,6 +297,23 @@ void Gui::render_controls() {
         run_selected_kernels();
     }
     ImGui::EndDisabled();
+
+    ImGui::Spacing();
+
+
+    bool has_results = false;
+    if (!current_category_.empty() && 
+        kernels_by_category_.find(current_category_) != kernels_by_category_.end()) {
+        for (const auto& k : kernels_by_category_[current_category_]) {
+            if (k.has_run) { has_results = true; break; }
+        }
+    }
+
+    ImGui::BeginDisabled(!has_results);
+    if (ImGui::Button("Reset Results", ImVec2(-1, 30 * ui_scale_))) {
+        reset_results();
+    }
+    ImGui::EndDisabled();
 }
 
 void Gui::render_results_table() {
@@ -446,6 +463,18 @@ void Gui::run_selected_kernels() {
             k.result = benchmark_.run(*k.descriptor, config_);
             k.has_run = true;
         }
+    }
+}
+
+void Gui::reset_results() {
+    if (current_category_.empty()) return;
+
+    auto it = kernels_by_category_.find(current_category_);
+    if (it == kernels_by_category_.end()) return;
+
+    for (auto& k : it->second) {
+        k.has_run = false;
+        k.result = arena::BenchmarkResult{};  // Reset to default
     }
 }
 
