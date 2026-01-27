@@ -120,6 +120,60 @@ endforeach()
 add_custom_target(kernels ALL DEPENDS ${KERNEL_PTXS})
 add_dependencies(arena kernels)
 
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import triton; print(triton.__version__)"
+        RESULT_VARIABLE TRITON_CHECK_RESULT
+        OUTPUT_VARIABLE TRITON_VERSION
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    if(TRITON_CHECK_RESULT EQUAL 0)
+        message(STATUS "Triton found: ${TRITON_VERSION}")
+
+        # always have .triton.py extension for triton kernels to be compiled
+        file(GLOB TRITON_KERNELS "${CMAKE_SOURCE_DIR}/kernels/*/*.triton.py")
+
+        set(TRITON_PTXS "")
+        foreach(TRITON_SRC ${TRITON_KERNELS})
+            get_filename_component(KERNEL_FULL_NAME ${TRITON_SRC} NAME_WE)  # e.g., "reduce.triton"
+            string(REPLACE ".triton" "" KERNEL_NAME ${KERNEL_FULL_NAME})     # e.g., "reduce"
+            get_filename_component(KERNEL_DIR ${TRITON_SRC} DIRECTORY)
+            get_filename_component(CATEGORY ${KERNEL_DIR} NAME)
+
+            set(PTX_FILE ${CMAKE_BINARY_DIR}/kernels/${CATEGORY}_triton_${KERNEL_NAME}.ptx)
+
+            add_custom_command(
+                OUTPUT ${PTX_FILE}
+                COMMAND ${Python3_EXECUTABLE} ${TRITON_SRC}
+                        --output-dir ${CMAKE_BINARY_DIR}/kernels
+                        --output-name ${CATEGORY}_triton_${KERNEL_NAME}
+                DEPENDS ${TRITON_SRC}
+                COMMENT "Triton: ${CATEGORY}/${KERNEL_FULL_NAME}.py -> ptx"
+            )
+
+            list(APPEND TRITON_PTXS ${PTX_FILE})
+        endforeach()
+
+        if(TRITON_PTXS)
+            add_custom_target(triton_kernels ALL DEPENDS ${TRITON_PTXS})
+            add_dependencies(arena triton_kernels)
+
+            message(STATUS "Triton kernels:")
+            foreach(SRC ${TRITON_KERNELS})
+                get_filename_component(SRC_NAME ${SRC} NAME)
+                message(STATUS "  ${SRC_NAME}")
+            endforeach()
+        endif()
+    else()
+        message(STATUS "Triton not found - Triton kernels will be skipped")
+        message(STATUS "Install with: pip install triton torch")
+    endif()
+endif()
+
 # --- info --- #TODO: Compile kernels on runtime
 
 message(STATUS "Kernel descriptors:")
