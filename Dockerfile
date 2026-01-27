@@ -2,11 +2,12 @@ FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install build dependencies + GUI libraries
 RUN apt-get update && apt-get install -y \
     cmake \
     build-essential \
     git \
+    python3 \
+    python3-pip \
     # OpenGL + X11 for GUI
     libgl1-mesa-dev \
     libglu1-mesa-dev \
@@ -20,7 +21,11 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/*
 
+
+RUN pip3 install triton torch --index-url https://download.pytorch.org/whl/cu121 || \
+    echo "triton installation failed. Triton kernels will be skipped."
+
 WORKDIR /workspace/gpgpu-arena
 
-# Default: just open a shell
+
 CMD ["bash"]
