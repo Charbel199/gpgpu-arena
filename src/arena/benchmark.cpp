@@ -1,4 +1,5 @@
 #include "arena/benchmark.hpp"
+#include <iostream>
 
 namespace arena {
 
@@ -10,6 +11,8 @@ BenchmarkResult Benchmark::run(KernelDescriptor& desc, const BenchmarkConfig& co
     result.kernel_name = desc.name();
     result.category = desc.category();
     result.description = desc.description();
+
+    std::cout<<"Running benchmark for "<<result.kernel_name<<" of category "<<result.category<<", description: "<<result.description<<std::endl;
 
     try {
         desc.set_problem_size(config.params);
@@ -87,12 +90,14 @@ std::vector<BenchmarkResult> Benchmark::run_category(
     const BenchmarkConfig& config
 ) {
     std::vector<BenchmarkResult> results;
-    for (auto* kernel : KernelRegistry::instance().get_by_category(category)) {
+    for (auto* kernel : get_kernels_by_category(category)) {
         results.push_back(run(*kernel, config));
     }
     return results;
 }
 
+
+// TODO: Move to kernel registry as internal functions
 std::vector<std::string> Benchmark::get_categories() const {
     return KernelRegistry::instance().get_categories();
 }
