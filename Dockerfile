@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip3 install triton torch --index-url https://download.pytorch.org/whl/cu121 || \
     echo "triton installation failed. Triton kernels will be skipped."
+RUN pip3 install numpy
 
 WORKDIR /workspace/gpgpu-arena
 
