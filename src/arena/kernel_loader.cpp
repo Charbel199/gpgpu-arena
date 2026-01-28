@@ -12,11 +12,11 @@ KernelLoader::~KernelLoader() {
 CUmodule KernelLoader::load_module(const std::string& path) {
     CUmodule module;
     
-    // Check if it's a PTX file (text) or CUBIN (binary)
+    // check if it's a PTX file (text) or CUBIN (binary, TODO: not implemented yet)
     bool is_ptx = path.find(".ptx") != std::string::npos;
     
     if (is_ptx) {
-        // Load PTX and JIT compile
+        // load PTX and JIT compile
         CUjit_option options[] = {
             CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES,
             CU_JIT_INFO_LOG_BUFFER,
@@ -36,11 +36,9 @@ CUmodule KernelLoader::load_module(const std::string& path) {
         
         CUresult result = cuModuleLoadDataEx(
             &module, 
-            nullptr,  // We'll load from file instead
+            nullptr,
             0, nullptr, nullptr
         );
-        
-        // Actually load from file
         result = cuModuleLoad(&module, path.c_str());
         
         if (result != CUDA_SUCCESS) {
@@ -49,7 +47,7 @@ CUmodule KernelLoader::load_module(const std::string& path) {
             );
         }
     } else {
-        // Load CUBIN directly
+        // load CUBIN directly
         check_cuda(cuModuleLoad(&module, path.c_str()), "cuModuleLoad");
     }
     
@@ -71,8 +69,9 @@ KernelLoader::LaunchResult KernelLoader::launch(
     const LaunchConfig& config, 
     void** args
 ) {
+    // TODO: I don't like this, we will probably only use the reference output result to check its validity
+    // BenchmarkResult contains all of the meaningful benchmarking results, so might removed this struct and return values 
     LaunchResult result;
-    // Launch the kernel
     result.result = cuLaunchKernel(
         func,
         config.grid_x, config.grid_y, config.grid_z,
