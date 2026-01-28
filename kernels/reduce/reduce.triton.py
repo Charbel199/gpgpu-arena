@@ -30,6 +30,7 @@ def reduce_sum(
 
 
 # TODO: should have a parent triton class that takes of everything after this comment
+# TODO: Currently not reading the proper output from triton
 def compile_to_ptx(block_size=256):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available")
