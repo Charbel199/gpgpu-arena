@@ -41,7 +41,7 @@ public:
     virtual double calculate_flops() const = 0;
     virtual double calculate_bytes_accessed() const = 0;
     
-    // verify if the result of the kernel is correct (TODO: not sure if this will work in all categories)
+    // verify if the result of the kernel is correct
     virtual bool verify(Context& ctx) { return true; }
 
 
