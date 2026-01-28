@@ -63,7 +63,7 @@ CUdeviceptr Context::allocate(size_t bytes) {
 
 void Context::free(CUdeviceptr ptr) {
     if (ptr) {
-        cuMemFree(ptr);
+        check_cuda(cuMemFree(ptr), "cuMemFree");
     }
 }
 
