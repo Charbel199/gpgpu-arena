@@ -46,7 +46,11 @@ BenchmarkResult Benchmark::run(KernelDescriptor& desc, const BenchmarkConfig& co
                 desc.execute(ctx_);
             }
         }
-
+        // TODO: This works but very inefficient
+        desc.cleanup(ctx_);
+        desc.allocate(ctx_);
+        desc.initialize(ctx_);
+        
         // Profile
         Profiler::ProfilerConfig profiler_config;
         profiler_config.number_of_runs = config.number_of_runs;

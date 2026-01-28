@@ -67,7 +67,7 @@ void Profiler::cleanup_cupti() {
     initialized_ = false;
 }
 
-Profiler::KernelMetrics Profiler::profile(KernelLaunchFn launch_fn, ProfilerConfig config) {
+Profiler::KernelMetrics Profiler::profile(KernelLaunchFn launch_fn, ProfilerConfig config) { //TODO: Not using num of runs yet
     KernelMetrics metrics;
 
     // Clear previous results TODO: Do we need to clear everything ?
