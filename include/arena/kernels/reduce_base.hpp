@@ -3,6 +3,7 @@
 #include "arena/kernel_descriptor.hpp"
 #include <vector>
 #include <cmath>
+#include <iostream>
 
 namespace arena {
 
@@ -57,8 +58,11 @@ public:
     bool verify(Context& ctx) override {
         float result;
         ctx.copy_to_host(&result, d_output_, sizeof(float));
+        std::cout<<"WE ARE HERE"<<std::endl;
+
         float expected = static_cast<float>(n_);
-        return std::abs(result - expected) < (expected * 1e-4f);
+        std::cout<<"RESULT: " <<result<<" expected: "<< expected<<std::endl;
+        return std::abs(result - expected) < 1e-4f; // TODO: This check does not work, actually it does work but probably won't be that easy for all kernel descriptors 
     }
 
 protected:
