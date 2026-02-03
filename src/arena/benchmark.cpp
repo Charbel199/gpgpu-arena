@@ -1,5 +1,6 @@
 #include "arena/benchmark.hpp"
 #include <iostream>
+#include <algorithm>
 
 namespace arena {
 
@@ -51,17 +52,35 @@ BenchmarkResult Benchmark::run(KernelDescriptor& desc, const BenchmarkConfig& co
         desc.allocate(ctx_);
         desc.initialize(ctx_);
         
-        // Profile
-        Profiler::ProfilerConfig profiler_config;
-        profiler_config.number_of_runs = config.number_of_runs;
+        // profile multiple runs with reset between runs
+        std::vector<float> times;
+        times.reserve(config.number_of_runs);
 
-        auto metrics = profiler_.profile([&]() {
-            if (desc.uses_ptx()) {
-                loader_.launch(func, launch_config, args.data());
-            } else {
-                desc.execute(ctx_);
-            }
-        }, profiler_config);
+        Profiler::ProfilerConfig profiler_config;
+
+        Profiler::KernelMetrics metrics;
+        for (int i = 0; i < config.number_of_runs; i++) {
+            // reset output before each run
+            desc.initialize(ctx_);
+
+            auto run_metrics = profiler_.profile([&]() {
+                if (desc.uses_ptx()) {
+                    loader_.launch(func, launch_config, args.data());
+                } else {
+                    desc.execute(ctx_);
+                }
+            }, profiler_config);
+
+            // ensure kernel completes before next iteration
+            cuCtxSynchronize();
+
+            times.push_back(run_metrics.elapsed_ms);
+            metrics = run_metrics; // Keep last metrics for register/shmem info
+        }
+
+        // compute median time (better than mean for outlier resistance TODO: double check best way to benchmark)
+        std::sort(times.begin(), times.end());
+        metrics.elapsed_ms = times[times.size() / 2];
 
         double flops = desc.calculate_flops();
         double bytes = desc.calculate_bytes_accessed();

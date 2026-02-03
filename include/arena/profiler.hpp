@@ -15,7 +15,6 @@ public:
 
 
     struct ProfilerConfig {
-        int number_of_runs = 10;
     };
 
 
