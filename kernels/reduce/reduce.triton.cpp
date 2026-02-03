@@ -9,7 +9,7 @@ public:
     std::string ptx_path() const override { return "kernels/reduce_triton_reduce.ptx"; }
 
     KernelLoader::LaunchConfig get_launch_config() const override {
-        constexpr int BLOCK_SIZE = 256;
+        constexpr int BLOCK_SIZE = 128; // must match Triton compilation (.maxntid in PTX), TODO: It was supposed to be 256 but Triton generated code with 128, not sure why yet
         return {
             .grid_x = static_cast<unsigned>((n_ + BLOCK_SIZE - 1) / BLOCK_SIZE),
             .grid_y = 1, .grid_z = 1,
