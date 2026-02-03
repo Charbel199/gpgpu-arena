@@ -62,7 +62,10 @@ public:
 
         float expected = static_cast<float>(n_);
         std::cout<<"RESULT: " <<result<<" expected: "<< expected<<std::endl;
-        return std::abs(result - expected) < 1e-4f; // TODO: This check does not work, actually it does work but probably won't be that easy for all kernel descriptors 
+
+        // relative tolerance for large values
+        float rel_error = std::abs(result - expected) / expected;
+        return rel_error < 1e-5f; // 0.001% tolerance
     }
 
 protected:
