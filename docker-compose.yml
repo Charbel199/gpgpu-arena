@@ -5,7 +5,7 @@ services:
     volumes:
       - .:/workspace/gpgpu-arena
     working_dir: /workspace/gpgpu-arena
-    command: bash -c "rm -rf build && mkdir build && cd build && cmake -DBUILD_GUI=OFF .. && make -j$$(nproc) && ./arena --cli"
+    command: bash -c "mkdir -p build && cd build && cmake -DBUILD_GUI=OFF .. && make -j$$(nproc) && ./arena --cli"
     stdin_open: true
     tty: true
     deploy:
@@ -28,7 +28,7 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=all
       - __GLX_VENDOR_LIBRARY_NAME=nvidia
       - __NV_PRIME_RENDER_OFFLOAD=1
-    command: bash -c "rm -rf build && mkdir build && cd build && cmake -DBUILD_GUI=ON .. && make -j$$(nproc) && ./arena --gui"
+    command: bash -c "mkdir -p build && cd build && cmake -DBUILD_GUI=ON .. && make -j$$(nproc) && ./arena --gui"
     stdin_open: true
     tty: true
     network_mode: host
