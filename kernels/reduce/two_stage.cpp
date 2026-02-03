@@ -33,8 +33,8 @@ public:
         size_output_ = sizeof(float);
 
         // allocate extra buffer for block results
-        auto config = get_launch_config();
-        num_blocks_ = config.grid_x;
+        config1_ = get_launch_config();
+        num_blocks_ = config1_.grid_x;
         size_block_results_ = num_blocks_ * sizeof(float);
 
         d_input_ = ctx.allocate(size_input_);
@@ -47,6 +47,22 @@ public:
             func_stage1_ = loader_.get_function(module_, "reduce_sum_blocks");
             func_stage2_ = loader_.get_function(module_, "reduce_sum_final");
         }
+
+        // prepare launch configs and args ONCE (all pointers are now valid)
+        args1_[0] = &d_input_;
+        args1_[1] = &d_block_results_;
+        args1_[2] = &n_;
+
+        config2_ = {
+            .grid_x = 1,
+            .grid_y = 1, .grid_z = 1,
+            .block_x = 256, .block_y = 1, .block_z = 1,
+            .shared_mem_bytes = 33 * sizeof(float)
+        };
+
+        args2_[0] = &d_block_results_;
+        args2_[1] = &d_output_;
+        args2_[2] = &num_blocks_;
     }
 
     void initialize(Context& ctx) override {
@@ -65,26 +81,14 @@ public:
     }
 
     void execute(Context& ctx) override {
-        // module already loaded in allocate(), just launch kernels
-        auto config1 = get_launch_config();
-
-        // Stage 1: Block-level reduction
-        void* args1[] = { &d_input_, &d_block_results_, &n_ };
-        loader_.launch(func_stage1_, config1, args1);
+        // Stage 1: Block-level reduction (configs/args prepared in allocate())
+        loader_.launch(func_stage1_, config1_, args1_);
 
         // CRITICAL: Stage 1 must complete before stage 2 (bug that I didn't notice for 1 hour)
         cuStreamSynchronize(0);
 
-        // Stage 2: Final reduction (1 block, 256 threads)
-        KernelLoader::LaunchConfig config2 = {
-            .grid_x = 1,
-            .grid_y = 1, .grid_z = 1,
-            .block_x = 256, .block_y = 1, .block_z = 1,
-            .shared_mem_bytes = 33 * sizeof(float)
-        };
-
-        void* args2[] = { &d_block_results_, &d_output_, &num_blocks_ };
-        loader_.launch(func_stage2_, config2, args2);
+        // Stage 2: Final reduction (configs/args prepared in allocate())
+        loader_.launch(func_stage2_, config2_, args2_);
 
         // ensure Stage 2 completes before returning
         cuStreamSynchronize(0);
@@ -99,6 +103,12 @@ private:
     CUmodule module_ = nullptr;
     CUfunction func_stage1_ = nullptr;
     CUfunction func_stage2_ = nullptr;
+
+    // pre-prepared launch configs and args (set once in allocate())
+    KernelLoader::LaunchConfig config1_;
+    KernelLoader::LaunchConfig config2_;
+    void* args1_[3];
+    void* args2_[3];
 };
 
 REGISTER_KERNEL(ReduceTwoStage);
