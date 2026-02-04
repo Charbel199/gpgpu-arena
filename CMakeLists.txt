@@ -111,7 +111,7 @@ foreach(KERNEL_SRC ${KERNEL_SOURCES})
     
     add_custom_command(
         OUTPUT ${PTX_FILE}
-        COMMAND ${CMAKE_CUDA_COMPILER} -ptx -arch=sm_${CUDA_ARCH} -o ${PTX_FILE} ${KERNEL_SRC}
+        COMMAND ${CMAKE_CUDA_COMPILER} -ptx -arch=sm_${CUDA_ARCH} -o ${PTX_FILE} ${KERNEL_SRC} #TODO: Possibly at -G for debug builds
         DEPENDS ${KERNEL_SRC}
         COMMENT "${CATEGORY}/${KERNEL_NAME}.cu -> ptx"
     )
