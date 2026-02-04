@@ -34,12 +34,7 @@ CUmodule KernelLoader::load_module(const std::string& path) {
             error_log
         };
         
-        CUresult result = cuModuleLoadDataEx(
-            &module, 
-            nullptr,
-            0, nullptr, nullptr
-        );
-        result = cuModuleLoad(&module, path.c_str());
+        CUresult result = cuModuleLoad(&module, path.c_str());
         
         if (result != CUDA_SUCCESS) {
             throw std::runtime_error(
