@@ -258,7 +258,13 @@ void Gui::render_problem_config() {
             config_.params["n"] = n;
         }
         ImGui::Text("%d elements (%.1f MB)", n, (n * sizeof(float)) / (1024.0f * 1024.0f));
-    } else {
+    }else if (current_category_ == "scan") {
+        int n = config_.params["n"];
+        if (ImGui::SliderInt("Elements (M)", &n, 100000, 100000000, "%d", ImGuiSliderFlags_Logarithmic)) {
+            config_.params["n"] = n;
+        }
+        ImGui::Text("%d elements (%.1f MB)", n, (n * sizeof(float)) / (1024.0f * 1024.0f));
+    }  else {
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Select a category");
     }
 }
