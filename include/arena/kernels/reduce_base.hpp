@@ -58,14 +58,10 @@ public:
     bool verify(Context& ctx) override {
         float result;
         ctx.copy_to_host(&result, d_output_, sizeof(float));
-        std::cout<<"WE ARE HERE"<<std::endl;
 
         float expected = static_cast<float>(n_);
-        std::cout<<"RESULT: " <<result<<" expected: "<< expected<<std::endl;
-
-        // relative tolerance for large values
         float rel_error = std::abs(result - expected) / expected;
-        return rel_error < 1e-5f; // 0.001% tolerance
+        return rel_error < 1e-5f;
     }
 
 protected:
