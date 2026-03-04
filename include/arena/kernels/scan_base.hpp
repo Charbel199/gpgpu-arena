@@ -1,9 +1,9 @@
 #pragma once
 
 #include "arena/kernel_descriptor.hpp"
+#include <spdlog/spdlog.h>
 #include <vector>
 #include <cmath>
-#include <iostream>
 
 namespace arena {
 
@@ -62,9 +62,7 @@ public:
         for (int i = 0; i < check_count; i++) {
             float expected = static_cast<float>(i);
             if (std::abs(h_output[i] - expected) > 1e-2f) {
-                std::cout << "Verification failed at index " << i 
-                          << ": got " << h_output[i] 
-                          << ", expected " << expected << std::endl;
+                spdlog::get("verify")->warn("Failed at index {}: got {}, expected {}", i, h_output[i], expected);
                 return false;
             }
         }
@@ -72,10 +70,10 @@ public:
         // also check last element: should be n-1
         float last_expected = static_cast<float>(n_ - 1);
         if (std::abs(h_output[n_ - 1] - last_expected) > 1e-2f) {
-            std::cout << "Verification failed at last index: got " 
-                      << h_output[n_ - 1] << ", expected " << last_expected << std::endl;
+            spdlog::get("verify")->warn("Failed at last index: got {}, expected {}", h_output[n_ - 1], last_expected);
             return false;
         }
+        spdlog::get("verify")->debug("verify passed");
         
         return true;
     }

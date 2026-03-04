@@ -1,9 +1,9 @@
 #pragma once
 
 #include "arena/kernel_descriptor.hpp"
+#include <spdlog/spdlog.h>
 #include <vector>
 #include <cmath>
-#include <iostream>
 
 namespace arena {
 
@@ -60,6 +60,7 @@ public:
         ctx.copy_to_host(&result, d_output_, sizeof(float));
 
         float expected = static_cast<float>(n_);
+        spdlog::get("verify")->debug("got {}, expected {}", result, expected);
         float rel_error = std::abs(result - expected) / expected;
         return rel_error < 1e-5f;
     }

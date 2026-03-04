@@ -1,6 +1,6 @@
 #include "arena/profiler.hpp"
 #include "arena/utils.hpp"
-#include <iostream>
+#include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <unordered_map>
 #include <string>
@@ -53,10 +53,11 @@ void Profiler::init_cupti() {
 
     CUptiResult result = cuptiActivityRegisterCallbacks(bufferRequested, bufferCompleted);
     if (result != CUPTI_SUCCESS) {
-        std::cerr << "Warning: CUPTI Activity registration failed.\n";
+        spdlog::get("profiler")->warn("CUPTI Activity registration failed");
         return;
     }
 
+    spdlog::get("profiler")->info("CUPTI initialized");
     initialized_ = true;
 }
 
@@ -108,7 +109,9 @@ Profiler::KernelMetrics Profiler::profile(KernelLaunchFn launch_fn, ProfilerConf
         metrics.elapsed_ms = data.duration_ns / 1e6f;
         metrics.registers_per_thread = data.registers_per_thread;
         metrics.shared_memory_per_block = data.shared_memory;
-        
+
+        spdlog::get("profiler")->debug("{} | {:.3f} ms | {} regs | {} B shmem",
+            name, metrics.elapsed_ms, metrics.registers_per_thread, metrics.shared_memory_per_block);
     }
 
     return metrics;

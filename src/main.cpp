@@ -5,6 +5,7 @@
 #include "arena/kernel_loader.hpp"
 #include "arena/profiler.hpp"
 #include "arena/benchmark.hpp"
+#include "arena/logger.hpp"
 #include "frontend/cli.hpp"
 
 #ifdef ARENA_GUI_ENABLED
@@ -49,8 +50,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    arena::init_logging();
+
     try {
-        // Initialize backend
         arena::Context ctx(0);
         arena::KernelLoader loader;
         arena::Profiler profiler;
@@ -64,7 +66,7 @@ int main(int argc, char** argv) {
         return frontend::run_cli(benchmark);
 
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        spdlog::error("{}", e.what());
         return 1;
     }
 }

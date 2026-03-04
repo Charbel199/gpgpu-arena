@@ -1,5 +1,6 @@
 #include "arena/context.hpp"
 #include "arena/utils.hpp"
+#include <spdlog/spdlog.h>
 #include <cuda.h>
 
 namespace arena {
@@ -33,6 +34,8 @@ Context::Context(int device_id) {
     );
 
     check_cuda(cuDeviceTotalMem(&total_mem_, device_), "cuDeviceTotalMem");
+
+    spdlog::get("context")->info("GPU: {} (sm_{}{}, {} MB)", device_name_, cc_major_, cc_minor_, total_mem_ / (1024 * 1024));
 
     // cuCtxCreate API changed in CUDA 13.0
 #if CUDA_VERSION >= 13000

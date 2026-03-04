@@ -1,5 +1,5 @@
 #include "arena/benchmark.hpp"
-#include <iostream>
+#include <spdlog/spdlog.h>
 #include <algorithm>
 
 namespace arena {
@@ -13,11 +13,11 @@ BenchmarkResult Benchmark::run(KernelDescriptor& desc, const BenchmarkConfig& co
     result.category = desc.category();
     result.description = desc.description();
 
-    std::cout<<"Running benchmark for "<<result.kernel_name<<" of category "<<result.category<<", description: "<<result.description<<std::endl;
+    spdlog::get("benchmark")->info("Benchmarking {} [{}]", result.kernel_name, result.category);
 
     try {
         desc.set_problem_size(config.params);
-        
+
         CUmodule module = nullptr;
         CUfunction func = nullptr;
         if (desc.uses_ptx()) {
@@ -28,6 +28,10 @@ BenchmarkResult Benchmark::run(KernelDescriptor& desc, const BenchmarkConfig& co
         desc.initialize(ctx_);
 
         auto launch_config = desc.get_launch_config();
+        spdlog::get("benchmark")->debug("Launch config: grid=({},{},{}), block=({},{},{}), shmem={} B",
+            launch_config.grid_x, launch_config.grid_y, launch_config.grid_z,
+            launch_config.block_x, launch_config.block_y, launch_config.block_z,
+            launch_config.shared_mem_bytes);
         
         result.grid_x = launch_config.grid_x;
         result.grid_y = launch_config.grid_y;
@@ -96,10 +100,17 @@ BenchmarkResult Benchmark::run(KernelDescriptor& desc, const BenchmarkConfig& co
         result.dram_write_gbps = metrics.dram_write_throughput_gbps;
 
         result.verified = desc.verify(ctx_);
+        if (!result.verified) {
+            spdlog::get("benchmark")->warn("{} failed verification", result.kernel_name);
+        }
         desc.cleanup(ctx_);
         result.success = true;
 
+        spdlog::get("benchmark")->debug("{}: {:.3f} ms, {:.2f} GFLOPS, {:.2f} GB/s",
+            result.kernel_name, result.elapsed_ms, result.gflops, result.bandwidth_gbps);
+
     } catch (const std::exception& e) {
+        spdlog::get("benchmark")->error("{} failed: {}", result.kernel_name, e.what());
         result.success = false;
         result.error = e.what();
         try { desc.cleanup(ctx_); } catch (...) {}

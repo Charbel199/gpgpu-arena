@@ -1,5 +1,6 @@
 #include "arena/kernel_loader.hpp"
 #include "arena/utils.hpp"
+#include <spdlog/spdlog.h>
 #include <fstream>
 #include <sstream>
 
@@ -47,6 +48,7 @@ CUmodule KernelLoader::load_module(const std::string& path) {
     }
     
     loaded_modules_.push_back(module);
+    spdlog::get("loader")->debug("Loaded module: {}", path);
     return module;
 }
 

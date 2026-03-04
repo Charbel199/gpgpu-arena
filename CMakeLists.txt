@@ -10,6 +10,13 @@ include(FetchContent)
 
 find_package(CUDAToolkit REQUIRED)
 
+# --- spdlog ---
+
+FetchContent_Declare(spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG v1.15.0)
+FetchContent_MakeAvailable(spdlog)
+
 # --- GUI (ImGui + ImPlot) ---
 
 option(BUILD_GUI "Build with Dear ImGui GUI" ON)
@@ -83,7 +90,7 @@ endif()
 add_executable(arena ${ARENA_SOURCES})
 
 target_include_directories(arena PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart)
+target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart spdlog::spdlog)
 
 if(BUILD_GUI)
     target_link_libraries(arena PRIVATE imgui_lib)
