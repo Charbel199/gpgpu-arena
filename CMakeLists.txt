@@ -157,10 +157,11 @@ if(Python3_FOUND)
 
             add_custom_command(
                 OUTPUT ${PTX_FILE}
-                COMMAND ${Python3_EXECUTABLE} ${TRITON_SRC}
+                COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=${CMAKE_SOURCE_DIR}/kernels
+                        ${Python3_EXECUTABLE} ${TRITON_SRC}
                         --output-dir ${CMAKE_BINARY_DIR}/kernels
                         --output-name ${CATEGORY}_triton_${KERNEL_NAME}
-                DEPENDS ${TRITON_SRC}
+                DEPENDS ${TRITON_SRC} ${CMAKE_SOURCE_DIR}/kernels/triton_base.py
                 COMMENT "Triton: ${CATEGORY}/${KERNEL_FULL_NAME}.py -> ptx"
             )
 

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-import sys; sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
-
-import triton.language as tl
 import triton
+import triton.language as tl
 from triton_base import main
 
 
