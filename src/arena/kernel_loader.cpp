@@ -76,8 +76,13 @@ KernelLoader::LaunchResult KernelLoader::launch(
         config.shared_mem_bytes,
         config.stream,
         args,
-        nullptr  // extra params
+        nullptr
     );
+    if (result.result != CUDA_SUCCESS) {
+        const char* errstr;
+        cuGetErrorString(result.result, &errstr);
+        spdlog::get("loader")->error("cuLaunchKernel failed: {}", errstr);
+    }
     return result;
 }
 
