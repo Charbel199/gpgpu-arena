@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+FROM nvidia/cuda:13.1.0-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -22,9 +22,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 
-RUN pip3 install triton torch --index-url https://download.pytorch.org/whl/cu121 || \
+RUN pip3 install --break-system-packages triton torch --index-url https://download.pytorch.org/whl/cu126 || \
     echo "triton installation failed. Triton kernels will be skipped."
-RUN pip3 install numpy
+RUN pip3 install --break-system-packages numpy
 
 WORKDIR /workspace/gpgpu-arena
 
