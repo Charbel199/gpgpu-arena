@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
+set(CMAKE_CUDA_ARCHITECTURES 75 CACHE STRING "CUDA architectures to compile for")
 project(gpgpu-arena LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -78,6 +79,7 @@ set(ARENA_SOURCES
     src/arena/kernel_loader.cpp
     src/arena/profiler.cpp
     src/arena/benchmark.cpp
+    src/arena/runner.cpp
     src/frontend/cli.cpp
     ${KERNEL_DESCRIPTORS}
     ${CUDA_DESCRIPTORS}
@@ -90,7 +92,7 @@ endif()
 add_executable(arena ${ARENA_SOURCES})
 
 target_include_directories(arena PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart spdlog::spdlog)
+target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::nvtx3 spdlog::spdlog)
 
 if(BUILD_GUI)
     target_link_libraries(arena PRIVATE imgui_lib)

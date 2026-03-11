@@ -3,8 +3,9 @@
 
 #include "arena/context.hpp"
 #include "arena/kernel_loader.hpp"
-#include "arena/profiler.hpp"
 #include "arena/benchmark.hpp"
+#include "arena/profiler.hpp"
+#include "arena/runner.hpp"
 #include "arena/logger.hpp"
 #include "frontend/cli.hpp"
 
@@ -55,15 +56,16 @@ int main(int argc, char** argv) {
     try {
         arena::Context ctx(0);
         arena::KernelLoader loader;
+        arena::Benchmark benchmark;
         arena::Profiler profiler;
-        arena::Benchmark benchmark(ctx, loader, profiler);
+        arena::Runner runner(ctx, loader, benchmark, profiler);
 
 #ifdef ARENA_GUI_ENABLED
         if (use_gui) {
-            return frontend::run_gui(benchmark);
+            return frontend::run_gui(runner);
         }
 #endif
-        return frontend::run_cli(benchmark);
+        return frontend::run_cli(runner);
 
     } catch (const std::exception& e) {
         spdlog::error("{}", e.what());

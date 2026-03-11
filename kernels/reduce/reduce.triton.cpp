@@ -19,7 +19,7 @@ public:
         };
     }
 
-    // Triton 3.6.0 adds 2 extra metadata pointer params to the PTX signature
+    // triton 3.6.0 adds 2 extra metadata pointer params to the PTX signature TODO: clean up
     std::vector<void*> get_kernel_args() override {
         return { &d_input_, &d_output_, &n_, &null_ptr_, &null_ptr_ };
     }

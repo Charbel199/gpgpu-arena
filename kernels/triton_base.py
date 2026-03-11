@@ -7,7 +7,7 @@ from triton.compiler import ASTSource
 
 
 def compile_kernel(fn, signature, constants):
-    src = ASTSource(fn=fn, signature=signature, constants=constants)
+    src = ASTSource(fn=fn, signature=signature, constexprs=constants)
     compiled = triton.compile(src, target=triton.runtime.driver.active.get_current_target())
     ptx = compiled.asm["ptx"]
     kernel_name = getattr(compiled.metadata, "name", fn.__name__)
