@@ -26,6 +26,7 @@ inline void init_logging() {
     make_logger("loader");
     make_logger("profiler");
     make_logger("benchmark");
+    make_logger("runner");
     make_logger("verify");
 
     spdlog::set_default_logger(default_logger);

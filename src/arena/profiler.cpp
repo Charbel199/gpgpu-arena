@@ -177,8 +177,6 @@ Profiler::ProfileResult Profiler::collect_activity(KernelLaunchFn launch_fn) {
     return result;
 }
 
-═══════════════════════════════════════════════════════
-
 std::map<std::string, double> Profiler::collect_counters(
     KernelLaunchFn launch_fn, const std::vector<std::string>& metrics,
     KernelLaunchFn reset_fn)
