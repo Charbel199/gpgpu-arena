@@ -5,6 +5,7 @@ namespace arena {
 struct ReduceGridStride : ReduceDescriptorBase {
     std::string name() const override { return "reduce_grid_stride"; }
     std::string ptx_path() const override { return "kernels/reduce_grid_stride.ptx"; }
+    std::string function_name() const override { return "reduce_sum_grid_stride"; }
     std::string description() const override {
         return "SOL3: grid-stride loop + warp shuffle";
     }

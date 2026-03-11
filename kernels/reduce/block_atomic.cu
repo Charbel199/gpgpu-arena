@@ -1,7 +1,7 @@
 // SOL1: block-Level Atomic Reduction
 // each block reduces to shared memory, then one global atomic per block
 #include <cuda/atomic>
-extern "C" __global__ void reduce_sum(
+extern "C" __global__ void reduce_sum_block_atomic(
     const float* __restrict__ input,
     float* __restrict__ output,
     int n

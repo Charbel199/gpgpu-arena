@@ -6,8 +6,8 @@
 /*
 THIS BREAKS if you have millions of blocks in stage 1:
 
-100,000 blocks → Each thread handles 390 values (still okay)
-1,000,000 blocks → Each thread handles 3,900 values (getting slow!)
+100,000 blocks -> Each thread handles 390 values (still okay)
+1,000,000 blocks -> Each thread handles 3,900 values (getting slow!)
 
 This is why CUB limits the number of blocks for stage 2
 */

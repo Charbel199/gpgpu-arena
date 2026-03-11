@@ -5,6 +5,7 @@ namespace arena {
 struct ReduceVectorized : ReduceDescriptorBase {
     std::string name() const override { return "reduce_vectorized"; }
     std::string ptx_path() const override { return "kernels/reduce_vectorized.ptx"; }
+    std::string function_name() const override { return "reduce_sum_vectorized"; }
     std::string description() const override {
         return "SOL5: vectorized 128-bit loads + grid-stride + warp shuffle";
     }

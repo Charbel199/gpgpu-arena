@@ -7,9 +7,10 @@ public:
     std::string name() const override { return "triton_reduce"; }
     std::string description() const override { return "Triton reduce with atomic add"; }
     std::string ptx_path() const override { return "kernels/reduce_triton_reduce.ptx"; }
+    std::string function_name() const override { return "reduce_sum"; }
 
     KernelLoader::LaunchConfig get_launch_config() const override {
-        constexpr int BLOCK_SIZE = 128; // must match Triton compilation (.maxntid in PTX), TODO: It was supposed to be 256 but Triton generated code with 128, not sure why yet
+        constexpr int BLOCK_SIZE = 128;
         return {
             .grid_x = static_cast<unsigned>((n_ + BLOCK_SIZE - 1) / BLOCK_SIZE),
             .grid_y = 1, .grid_z = 1,
@@ -17,6 +18,14 @@ public:
             .shared_mem_bytes = 0
         };
     }
+
+    // Triton 3.6.0 adds 2 extra metadata pointer params to the PTX signature
+    std::vector<void*> get_kernel_args() override {
+        return { &d_input_, &d_output_, &n_, &null_ptr_, &null_ptr_ };
+    }
+
+private:
+    CUdeviceptr null_ptr_ = 0;
 };
 
 REGISTER_KERNEL(TritonReduceDescriptor);

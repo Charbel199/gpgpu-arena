@@ -5,6 +5,7 @@ namespace arena {
 struct ReduceWarpShuffle : ReduceDescriptorBase {
     std::string name() const override { return "reduce_warp_shuffle"; }
     std::string ptx_path() const override { return "kernels/reduce_warp_shuffle.ptx"; }
+    std::string function_name() const override { return "reduce_sum_warp_shuffle"; }
     std::string description() const override {
         return "SOL2: warp shuffle + block atomic";
     }

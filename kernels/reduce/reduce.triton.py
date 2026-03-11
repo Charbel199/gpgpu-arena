@@ -22,6 +22,6 @@ def reduce_sum(
 
 main(
     fn=reduce_sum,
-    signature={0: "*fp32", 1: "*fp32", 2: "i32"},
+    signature={"input_ptr": "*fp32", "output_ptr": "*fp32", "n": "i32"},
     constants={"BLOCK_SIZE": 256},
 )

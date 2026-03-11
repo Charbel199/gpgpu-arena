@@ -1,4 +1,4 @@
-extern "C" __global__ void reduce_sum(
+extern "C" __global__ void reduce_sum_baseline(
     const float* __restrict__ input,
     float* __restrict__ output,
     int n

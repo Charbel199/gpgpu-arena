@@ -10,7 +10,7 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
     return val;
 }
 
-extern "C" __global__ void reduce_sum(
+extern "C" __global__ void reduce_sum_warp_shmem(
     const float* __restrict__ input,
     float* __restrict__ output,
     int n

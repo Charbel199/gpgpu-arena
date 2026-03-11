@@ -5,6 +5,7 @@ namespace arena {
 struct ReduceWarpShmem : ReduceDescriptorBase {
     std::string name() const override { return "reduce_warp_shmem"; }
     std::string ptx_path() const override { return "kernels/reduce_warp_shmem.ptx"; }
+    std::string function_name() const override { return "reduce_sum_warp_shmem"; }
     std::string description() const override {
         return "SOL4: Grid-stride + warp shuffle + shared array (no atomics)";
     }
