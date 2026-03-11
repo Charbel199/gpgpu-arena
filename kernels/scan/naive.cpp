@@ -5,6 +5,7 @@ namespace arena {
 struct ScanNaive : ScanDescriptorBase {
     std::string name() const override { return "scan_naive"; }
     std::string ptx_path() const override { return "kernels/scan_naive.ptx"; }
+    std::string function_name() const override { return "exclusive_scan_naive"; }
     std::string description() const override {
         return "Naive scan (single block only)";
     }

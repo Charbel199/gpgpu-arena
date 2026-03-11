@@ -1,5 +1,5 @@
 
-extern "C" __global__ void exclusive_scan(
+extern "C" __global__ void exclusive_scan_naive(
     const float* __restrict__ input,
     float* __restrict__ output,
     int n
