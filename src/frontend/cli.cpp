@@ -6,21 +6,19 @@
 
 namespace frontend {
 
-Cli::Cli(arena::Benchmark& benchmark)
-    : benchmark_(benchmark) {
-    // Default config
+Cli::Cli(arena::Runner& runner)
+    : runner_(runner) {
     config_.params["M"] = 1024;
     config_.params["K"] = 1024;
     config_.params["N"] = 1024;
     config_.params["n"] = 1000000;
     config_.warmup_runs = 10;
     config_.number_of_runs = 10;
-    
-    // Select first available category
-    auto categories = benchmark_.get_categories();
+
+    auto categories = runner_.get_categories();
     if (!categories.empty()) {
         current_category_ = categories[0];
-        current_kernels_ = benchmark_.get_kernels_by_category(current_category_);
+        current_kernels_ = runner_.get_kernels_by_category(current_category_);
     }
 }
 
@@ -48,7 +46,7 @@ void Cli::print_banner() {
    ║       GPGPU ARENA - Kernel Benchmarking Platform          ║
    ╚═══════════════════════════════════════════════════════════╝
 )" << std::endl;
-    const auto& ctx = benchmark_.context();
+    const auto& ctx = runner_.context();
     std::cout << "GPU: " << ctx.device_name() << "\n";
     std::cout << "Compute: SM " << ctx.compute_capability_major()
               << "." << ctx.compute_capability_minor()
@@ -107,17 +105,17 @@ bool Cli::execute(const std::string& line) {
 }
 
 void Cli::cmd_categories() {
-    auto categories = benchmark_.get_categories();
-    
+    auto categories = runner_.get_categories();
+
     if (categories.empty()) {
         std::cout << "No kernel categories available.\n";
         return;
     }
-    
+
     std::cout << "\nAvailable categories:\n";
     for (const auto& cat : categories) {
-        auto kernels = benchmark_.get_kernels_by_category(cat);
-        std::cout << "  " << std::left << std::setw(15) << cat 
+        auto kernels = runner_.get_kernels_by_category(cat);
+        std::cout << "  " << std::left << std::setw(15) << cat
                   << " (" << kernels.size() << " kernels)";
         if (cat == current_category_) {
             std::cout << " [selected]";
@@ -132,16 +130,15 @@ void Cli::cmd_select(const std::string& category) {
         cmd_categories();
         return;
     }
-    
-    auto categories = benchmark_.get_categories();
+
+    auto categories = runner_.get_categories();
     auto it = std::find(categories.begin(), categories.end(), category);
-    
+
     if (it == categories.end()) {
-        // Try partial match
         for (const auto& cat : categories) {
             if (cat.find(category) != std::string::npos) {
                 current_category_ = cat;
-                current_kernels_ = benchmark_.get_kernels_by_category(cat);
+                current_kernels_ = runner_.get_kernels_by_category(cat);
                 std::cout << "Selected category: " << cat << "\n";
                 return;
             }
@@ -150,9 +147,9 @@ void Cli::cmd_select(const std::string& category) {
         cmd_categories();
         return;
     }
-    
+
     current_category_ = category;
-    current_kernels_ = benchmark_.get_kernels_by_category(category);
+    current_kernels_ = runner_.get_kernels_by_category(category);
     std::cout << "Selected category: " << category << " (" << current_kernels_.size() << " kernels)\n";
 }
 
@@ -172,7 +169,7 @@ void Cli::cmd_list() {
     for (size_t i = 0; i < current_kernels_.size(); i++) {
         auto* k = current_kernels_[i];
         std::cout << "  [" << i << "] " << std::left << std::setw(25) << k->name();
-        
+
         if (results_.count(k->name())) {
             auto& r = results_[k->name()];
             if (r.success) {
@@ -186,14 +183,14 @@ void Cli::cmd_list() {
         std::cout << "\n";
         std::cout << "      " << k->description() << "\n";
     }
-    
+
     std::cout << "\nSettings: ";
     if (current_category_ == "matmul") {
         std::cout << "matrix=" << config_.params["M"] << "x" << config_.params["M"];
     } else if (current_category_ == "reduce") {
         std::cout << "n=" << config_.params["n"];
     }
-    std::cout << ", warmup=" << config_.warmup_runs 
+    std::cout << ", warmup=" << config_.warmup_runs
               << ", runs=" << config_.number_of_runs << "\n";
 }
 
@@ -202,7 +199,7 @@ void Cli::cmd_run(const std::string& arg) {
         std::cout << "No category selected. Use 'select <category>' first.\n";
         return;
     }
-    
+
     if (arg.empty()) {
         std::cout << "Usage: run <kernel_name|index|all>\n";
         return;
@@ -215,7 +212,6 @@ void Cli::cmd_run(const std::string& arg) {
         return;
     }
 
-    // Try as index
     try {
         size_t idx = std::stoul(arg);
         if (idx < current_kernels_.size()) {
@@ -224,7 +220,6 @@ void Cli::cmd_run(const std::string& arg) {
         }
     } catch (...) {}
 
-    // Try as name (partial match)
     for (auto* k : current_kernels_) {
         if (k->name() == arg || k->name().find(arg) != std::string::npos) {
             run_kernel(k);
@@ -237,23 +232,22 @@ void Cli::cmd_run(const std::string& arg) {
 
 void Cli::run_kernel(arena::KernelDescriptor* kernel) {
     std::cout << "Running " << kernel->name() << "... " << std::flush;
-    auto result = benchmark_.run(*kernel, config_);
+    auto result = runner_.run(*kernel, config_);
     results_[kernel->name()] = result;
 
     if (result.success) {
         std::cout << std::fixed << std::setprecision(3)
                   << result.elapsed_ms << " ms";
-        
+
         if (current_category_ == "matmul") {
             std::cout << ", " << std::setprecision(1) << result.gflops << " GFLOPS";
         } else {
             std::cout << ", " << std::setprecision(1) << result.bandwidth_gbps << " GB/s";
         }
-        
+
         std::cout << " | grid=" << result.grid_x << "x" << result.grid_y
-                  << ", block=" << result.block_x << "x" << result.block_y
-                  << ", regs=" << result.registers_per_thread;
-        
+                  << ", block=" << result.block_x << "x" << result.block_y;
+
         if (result.verified) {
             std::cout << " [OK]";
         } else {
@@ -277,31 +271,29 @@ void Cli::cmd_results() {
               << std::setw(10) << "Perf"
               << std::setw(12) << "Grid"
               << std::setw(12) << "Block"
-              << std::setw(8) << "Regs"
               << std::setw(8) << "Status" << "\n";
-    std::cout << std::string(85, '-') << "\n";
+    std::cout << std::string(77, '-') << "\n";
 
     for (const auto& [name, r] : results_) {
         std::cout << std::left << std::setw(25) << name;
         if (r.success) {
             std::cout << std::right << std::fixed
                       << std::setw(10) << std::setprecision(3) << r.elapsed_ms;
-            
+
             if (r.category == "matmul") {
                 std::cout << std::setw(10) << std::setprecision(1) << r.gflops;
             } else {
                 std::cout << std::setw(10) << std::setprecision(1) << r.bandwidth_gbps;
             }
-            
+
             std::string grid = std::to_string(r.grid_x) + "x" + std::to_string(r.grid_y);
             std::string block = std::to_string(r.block_x) + "x" + std::to_string(r.block_y);
-            
+
             std::cout << std::setw(12) << grid
                       << std::setw(12) << block
-                      << std::setw(8) << r.registers_per_thread
                       << std::setw(8) << (r.verified ? "OK" : "WARN");
         } else {
-            std::cout << std::right << std::setw(60) << "FAILED";
+            std::cout << std::right << std::setw(52) << "FAILED";
         }
         std::cout << "\n";
     }
@@ -355,8 +347,8 @@ std::string Cli::trim(const std::string& s) {
     return s.substr(start, end - start + 1);
 }
 
-int run_cli(arena::Benchmark& benchmark) {
-    Cli cli(benchmark);
+int run_cli(arena::Runner& runner) {
+    Cli cli(runner);
     cli.run();
     return 0;
 }

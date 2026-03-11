@@ -1,6 +1,6 @@
 #pragma once
 
-#include "arena/benchmark.hpp"
+#include "arena/runner.hpp"
 #include "arena/kernel_descriptor.hpp"
 #include <vector>
 #include <map>
@@ -10,7 +10,7 @@ namespace frontend {
 
 class Cli {
 public:
-    Cli(arena::Benchmark& benchmark);
+    Cli(arena::Runner& runner);
 
     void run();
 
@@ -19,7 +19,6 @@ private:
     void print_help();
     bool execute(const std::string& line);
 
-    // Commands
     void cmd_list();
     void cmd_categories();
     void cmd_select(const std::string& category);
@@ -31,16 +30,14 @@ private:
 
     static std::string trim(const std::string& s);
 
-    // Backend
-    arena::Benchmark& benchmark_;
+    arena::Runner& runner_;
 
-    // State
     std::string current_category_;
     std::vector<arena::KernelDescriptor*> current_kernels_;
-    std::map<std::string, arena::BenchmarkResult> results_;
-    arena::BenchmarkConfig config_;
+    std::map<std::string, arena::RunResult> results_;
+    arena::RunConfig config_;
 };
 
-int run_cli(arena::Benchmark& benchmark);
+int run_cli(arena::Runner& runner);
 
 }
