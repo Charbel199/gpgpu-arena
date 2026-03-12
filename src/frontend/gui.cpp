@@ -4,6 +4,7 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <implot.h>
+#include <cuda.h>
 #include <stdexcept>
 #include <algorithm>
 #include <cstdio>
@@ -23,6 +24,10 @@ Gui::Gui(arena::Runner& runner)
 }
 
 Gui::~Gui() {
+    cancel_requested_ = true;
+    if (benchmark_thread_.joinable()) {
+        benchmark_thread_.join();
+    }
     shutdown();
 }
 
@@ -113,7 +118,139 @@ void Gui::run() {
 
     while (running_ && !glfwWindowShouldClose(window_)) {
         glfwPollEvents();
+        drain_pending_results();
         render_frame();
+    }
+}
+
+// async benchmark
+
+void Gui::benchmark_thread_func(
+    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
+    arena::RunConfig config) {
+
+    // push CUDA context onto this thread (driver API contexts are thread-local)
+    CUcontext cuda_ctx = runner_.context().handle();
+    cuCtxPushCurrent(cuda_ctx);
+
+    for (int i = 0; i < (int)work.size(); i++) {
+        if (cancel_requested_) break;
+
+        auto& [cat, descriptor] = work[i];
+        benchmark_current_ = i;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            benchmark_current_name_ = descriptor->name();
+        }
+
+        PendingResult pr;
+        pr.category = cat;
+        pr.kernel_name = descriptor->name();
+        pr.logs.push_back({LogEntry::INFO, "[BENCHMARK] Running " + descriptor->name() + "..."});
+
+        pr.result = runner_.run(*descriptor, config);
+
+        if (pr.result.success) {
+            char buf[256];
+            bool is_matmul = (cat == "matmul");
+            snprintf(buf, sizeof(buf), "[BENCHMARK] %s - wall=%.3f ms gpu=%.3f ms | %.2f %s",
+                pr.result.kernel_name.c_str(),
+                pr.result.elapsed_ms,
+                pr.result.kernel_ms,
+                is_matmul ? pr.result.gflops : pr.result.bandwidth_gbps,
+                is_matmul ? "GFLOPS" : "GB/s");
+            pr.logs.push_back({LogEntry::INFO, buf});
+
+            if (config.collect_metrics && pr.result.achieved_occupancy > 0) {
+                snprintf(buf, sizeof(buf),
+                    "[PROFILER]  %s - %d regs | %d B shmem | occupancy=%.1f%% | IPC=%.2f",
+                    pr.result.kernel_name.c_str(),
+                    pr.result.registers_per_thread,
+                    pr.result.shared_memory_bytes,
+                    pr.result.achieved_occupancy * 100.0,
+                    pr.result.ipc);
+                pr.logs.push_back({LogEntry::INFO, buf});
+            }
+
+            if (!pr.result.verified) {
+                pr.logs.push_back({LogEntry::WARN, pr.result.kernel_name + " failed verification"});
+            }
+        } else {
+            pr.logs.push_back({LogEntry::ERR, pr.result.kernel_name + " failed: " + pr.result.error});
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_results_.push_back(std::move(pr));
+        }
+    }
+
+    benchmark_current_ = (int)work.size();
+
+    CUcontext popped;
+    cuCtxPopCurrent(&popped);
+
+    benchmark_running_ = false;
+}
+
+void Gui::drain_pending_results() {
+    std::vector<PendingResult> results;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        results.swap(pending_results_);
+    }
+
+    for (auto& pr : results) {
+        // apply logs
+        for (auto& entry : pr.logs) {
+            log(entry.level, entry.message);
+        }
+
+        // update kernel state
+        auto cat_it = kernels_by_category_.find(pr.category);
+        if (cat_it != kernels_by_category_.end()) {
+            for (auto& k : cat_it->second) {
+                if (k.descriptor && k.descriptor->name() == pr.kernel_name) {
+                    k.result = pr.result;
+                    k.has_run = true;
+                    break;
+                }
+            }
+        }
+
+        // store in scaling history
+        if (pr.result.success) {
+            int problem_size = (pr.category == "matmul") ?
+                config_.params["M"] : config_.params["n"];
+
+            auto& hist = scaling_history_[pr.category][pr.kernel_name];
+            // replace existing entry for same problem size
+            bool found = false;
+            for (auto& entry : hist) {
+                if (entry.problem_size == problem_size) {
+                    entry.result = pr.result;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                hist.push_back({problem_size, pr.result});
+                std::sort(hist.begin(), hist.end(),
+                    [](const SizedResult& a, const SizedResult& b) {
+                        return a.problem_size < b.problem_size;
+                    });
+            }
+        }
+    }
+
+    // if benchmark just finished, log and join thread
+    if (!benchmark_running_ && benchmark_thread_.joinable()) {
+        benchmark_thread_.join();
+        if (benchmark_current_ >= benchmark_total_) {
+            log(LogEntry::INFO, "--- Done ---");
+        } else {
+            log(LogEntry::WARN, "--- Cancelled ---");
+        }
     }
 }
 
@@ -151,25 +288,63 @@ void Gui::render_frame() {
 
     ImGui::SameLine();
 
-    ImGui::BeginChild("RightPanel", ImVec2(0, 0), true);
+    ImGui::BeginChild("RightPanel", ImVec2(0, 0), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
-    render_results_table();
-    ImGui::Spacing();
+    float min_h = 100 * ui_scale_;
+    if (results_height_ < min_h) results_height_ = 250 * ui_scale_;
+    if (performance_height_ < min_h) performance_height_ = 300 * ui_scale_;
+    if (profiling_height_ < min_h) profiling_height_ = 300 * ui_scale_;
+    if (scaling_height_ < min_h) scaling_height_ = 300 * ui_scale_;
+    if (log_height_ < min_h) log_height_ = 200 * ui_scale_;
 
-    if (ImGui::BeginTabBar("Charts")) {
-        if (ImGui::BeginTabItem("Performance")) {
-            render_performance_chart();
-            ImGui::EndTabItem();
+    auto resize_handle = [&](const char* id, float& height) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.5f, 0.5f, 0.5f, 0.8f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+        ImGui::Button(id, ImVec2(-1, 4 * ui_scale_));
+        if (ImGui::IsItemActive()) {
+            height += ImGui::GetIO().MouseDelta.y;
+            if (height < min_h) height = min_h;
         }
-        if (ImGui::BeginTabItem("Profiling")) {
-            render_profiling_chart();
-            ImGui::EndTabItem();
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
         }
-        if (ImGui::BeginTabItem("Log")) {
-            render_log();
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
+        ImGui::PopStyleColor(3);
+    };
+
+    if (ImGui::CollapsingHeader("Results", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BeginChild("ResultsContent", ImVec2(0, results_height_), false);
+        render_results_table();
+        ImGui::EndChild();
+        resize_handle("##resize_results", results_height_);
+    }
+
+    if (ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BeginChild("PerformanceContent", ImVec2(0, performance_height_), false);
+        render_performance_chart();
+        ImGui::EndChild();
+        resize_handle("##resize_performance", performance_height_);
+    }
+
+    if (ImGui::CollapsingHeader("Profiling")) {
+        ImGui::BeginChild("ProfilingContent", ImVec2(0, profiling_height_), false);
+        render_profiling_chart();
+        ImGui::EndChild();
+        resize_handle("##resize_profiling", profiling_height_);
+    }
+
+    if (ImGui::CollapsingHeader("Scaling")) {
+        ImGui::BeginChild("ScalingContent", ImVec2(0, scaling_height_), false);
+        render_scaling_chart();
+        ImGui::EndChild();
+        resize_handle("##resize_scaling", scaling_height_);
+    }
+
+    if (ImGui::CollapsingHeader("Log")) {
+        ImGui::BeginChild("LogContent", ImVec2(0, log_height_), false);
+        render_log();
+        ImGui::EndChild();
+        resize_handle("##resize_log", log_height_);
     }
 
     ImGui::EndChild();
@@ -261,13 +436,31 @@ void Gui::render_problem_config() {
     ImGui::Spacing();
 
     if (current_category_ == "matmul") {
-        int size = config_.params["M"];
-        if (ImGui::SliderInt("Matrix Size", &size, 256, 4096)) {
-            config_.params["M"] = size;
-            config_.params["K"] = size;
-            config_.params["N"] = size;
+        ImGui::Checkbox("Lock Square", &lock_square_);
+
+        int m = config_.params["M"];
+        int k = config_.params["K"];
+        int n = config_.params["N"];
+
+        if (lock_square_) {
+            if (ImGui::SliderInt("Matrix Size", &m, 256, 4096)) {
+                config_.params["M"] = m;
+                config_.params["K"] = m;
+                config_.params["N"] = m;
+            }
+            ImGui::Text("(%d x %d) x (%d x %d)", m, m, m, m);
+        } else {
+            bool changed = false;
+            changed |= ImGui::SliderInt("M (rows A)", &m, 256, 4096);
+            changed |= ImGui::SliderInt("K (shared)", &k, 256, 4096);
+            changed |= ImGui::SliderInt("N (cols B)", &n, 256, 4096);
+            if (changed) {
+                config_.params["M"] = m;
+                config_.params["K"] = k;
+                config_.params["N"] = n;
+            }
+            ImGui::Text("(%d x %d) x (%d x %d)", m, k, k, n);
         }
-        ImGui::Text("(%d x %d) x (%d x %d)", size, size, size, size);
     } else if (current_category_ == "reduce" || current_category_ == "scan") {
         int n = config_.params["n"];
         if (ImGui::SliderInt("Elements", &n, 100000, 100000000, "%d", ImGuiSliderFlags_Logarithmic)) {
@@ -303,20 +496,38 @@ void Gui::render_controls() {
     ImGui::Spacing();
     ImGui::Spacing();
 
-    int selected_count = 0;
-    if (!current_category_.empty() &&
-        kernels_by_category_.find(current_category_) != kernels_by_category_.end()) {
-        for (const auto& k : kernels_by_category_[current_category_]) {
-            if (k.selected) selected_count++;
-        }
-    }
+    // progress bar when running
+    if (benchmark_running_) {
+        int current = benchmark_current_.load();
+        int total = benchmark_total_.load();
+        float fraction = total > 0 ? (float)current / (float)total : 0.0f;
 
-    ImGui::BeginDisabled(selected_count == 0);
-    std::string btn_label = "Run Selected (" + std::to_string(selected_count) + ")";
-    if (ImGui::Button(btn_label.c_str(), ImVec2(-1, 35 * ui_scale_))) {
-        run_selected_kernels();
+        std::string overlay;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            overlay = benchmark_current_name_ + " (" + std::to_string(current + 1) + "/" + std::to_string(total) + ")";
+        }
+        ImGui::ProgressBar(fraction, ImVec2(-1, 0), overlay.c_str());
+
+        if (ImGui::Button("Cancel", ImVec2(-1, 30 * ui_scale_))) {
+            cancel_requested_ = true;
+        }
+    } else {
+        int selected_count = 0;
+        if (!current_category_.empty() &&
+            kernels_by_category_.find(current_category_) != kernels_by_category_.end()) {
+            for (const auto& k : kernels_by_category_[current_category_]) {
+                if (k.selected) selected_count++;
+            }
+        }
+
+        ImGui::BeginDisabled(selected_count == 0);
+        std::string btn_label = "Run Selected (" + std::to_string(selected_count) + ")";
+        if (ImGui::Button(btn_label.c_str(), ImVec2(-1, 35 * ui_scale_))) {
+            run_selected_kernels();
+        }
+        ImGui::EndDisabled();
     }
-    ImGui::EndDisabled();
 
     ImGui::Spacing();
 
@@ -328,7 +539,7 @@ void Gui::render_controls() {
         }
     }
 
-    ImGui::BeginDisabled(!has_results);
+    ImGui::BeginDisabled(!has_results || benchmark_running_);
     if (ImGui::Button("Reset Results", ImVec2(-1, 30 * ui_scale_))) {
         reset_results();
     }
@@ -336,9 +547,6 @@ void Gui::render_controls() {
 }
 
 void Gui::render_results_table() {
-    ImGui::Text("Results");
-    ImGui::Spacing();
-
     if (current_category_.empty()) {
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Select a category and run benchmarks");
         return;
@@ -366,7 +574,7 @@ void Gui::render_results_table() {
         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
         ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
         ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate,
-        ImVec2(0, 200 * ui_scale_))) {
+        ImVec2(0, ImGui::GetContentRegionAvail().y))) {
 
         ImGui::TableSetupColumn("Kernel", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort, 0, Col_Kernel);
         ImGui::TableSetupColumn("Block", ImGuiTableColumnFlags_WidthFixed, 70 * ui_scale_, Col_Block);
@@ -524,14 +732,14 @@ void Gui::render_results_table() {
 }
 
 void Gui::render_performance_chart() {
-    std::vector<const char*> labels;
+    std::vector<std::string> label_strings;
     std::vector<double> values;
 
     auto it = kernels_by_category_.find(current_category_);
     if (it != kernels_by_category_.end()) {
         for (const auto& k : it->second) {
             if (k.has_run && k.result.success) {
-                labels.push_back(k.result.kernel_name.c_str());
+                label_strings.push_back(k.result.kernel_name);
                 if (current_category_ == "matmul") {
                     values.push_back(k.result.gflops);
                 } else {
@@ -546,21 +754,31 @@ void Gui::render_performance_chart() {
         return;
     }
 
+    // sort by value descending
+    std::vector<int> order(values.size());
+    for (size_t i = 0; i < order.size(); i++) order[i] = (int)i;
+    std::sort(order.begin(), order.end(),
+        [&](int a, int b) { return values[a] > values[b]; });
+
+    std::vector<const char*> sorted_labels(values.size());
+    std::vector<double> sorted_values(values.size());
+    for (size_t i = 0; i < order.size(); i++) {
+        sorted_labels[i] = label_strings[order[i]].c_str();
+        sorted_values[i] = values[order[i]];
+    }
+
     const char* y_label = (current_category_ == "matmul") ? "GFLOPS" : "GB/s";
 
-    float plot_height = ImGui::GetContentRegionAvail().y - 10;
-    if (plot_height < 150 * ui_scale_) plot_height = 150 * ui_scale_;
-
-    if (ImPlot::BeginPlot("##Performance", ImVec2(-1, plot_height))) {
+    if (ImPlot::BeginPlot("##Performance", ImVec2(-1, ImGui::GetContentRegionAvail().y))) {
         ImPlot::SetupAxes("", y_label, ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
-        ImPlot::SetupAxisTicks(ImAxis_X1, 0, (double)(labels.size() - 1), (int)labels.size(), labels.data());
+        ImPlot::SetupAxisTicks(ImAxis_X1, 0, (double)(sorted_labels.size() - 1), (int)sorted_labels.size(), sorted_labels.data());
 
-        std::vector<double> positions(values.size());
+        std::vector<double> positions(sorted_values.size());
         for (size_t i = 0; i < positions.size(); i++) {
             positions[i] = (double)i;
         }
 
-        ImPlot::PlotBars("Performance", positions.data(), values.data(), (int)values.size(), 0.6);
+        ImPlot::PlotBars("Performance", positions.data(), sorted_values.data(), (int)sorted_values.size(), 0.6);
         ImPlot::EndPlot();
     }
 }
@@ -587,35 +805,122 @@ void Gui::render_profiling_chart() {
         return;
     }
 
-    float plot_height = (ImGui::GetContentRegionAvail().y - 30) / 2.0f;
-    if (plot_height < 120 * ui_scale_) plot_height = 120 * ui_scale_;
+    int n = (int)labels.size();
+    float avail = ImGui::GetContentRegionAvail().y;
+    float plot_height = (avail - 10 * ui_scale_) * 0.5f;
+    if (plot_height < 100 * ui_scale_) plot_height = 100 * ui_scale_;
 
-    std::vector<double> positions(labels.size());
-    for (size_t i = 0; i < positions.size(); i++) positions[i] = (double)i;
+    std::vector<double> positions(n);
+    for (int i = 0; i < n; i++) positions[i] = (double)i;
 
-    if (ImPlot::BeginPlot("##Occupancy", ImVec2(-1, plot_height))) {
+    if (ImPlot::BeginPlot("Occupancy & IPC", ImVec2(-1, plot_height))) {
         ImPlot::SetupAxes("", "Occupancy %", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+        ImPlot::SetupAxis(ImAxis_Y2, "IPC", ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_AuxDefault);
         ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 100, ImPlotCond_Always);
-        ImPlot::SetupAxisTicks(ImAxis_X1, 0, (double)(labels.size() - 1), (int)labels.size(), labels.data());
-        ImPlot::PlotBars("Occupancy", positions.data(), occupancy.data(), (int)occupancy.size(), 0.6);
+        ImPlot::SetupAxisTicks(ImAxis_X1, 0, (double)(n - 1), n, labels.data());
+
+        double bar_w = 0.3;
+        std::vector<double> pos_left(n), pos_right(n);
+        for (int i = 0; i < n; i++) {
+            pos_left[i] = positions[i] - bar_w * 0.5;
+            pos_right[i] = positions[i] + bar_w * 0.5;
+        }
+
+        ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
+        ImPlot::PlotBars("Occupancy %", pos_left.data(), occupancy.data(), n, bar_w);
+
+        ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
+        ImPlot::PlotBars("IPC", pos_right.data(), ipc.data(), n, bar_w);
+
         ImPlot::EndPlot();
     }
 
     ImGui::Spacing();
 
-    if (ImPlot::BeginPlot("##IPC", ImVec2(-1, plot_height))) {
-        ImPlot::SetupAxes("", "IPC", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
-        ImPlot::SetupAxisTicks(ImAxis_X1, 0, (double)(labels.size() - 1), (int)labels.size(), labels.data());
-        ImPlot::PlotBars("IPC", positions.data(), ipc.data(), (int)ipc.size(), 0.6);
+    // scatter: occupancy vs IPC
+    if (ImPlot::BeginPlot("Occupancy vs IPC", ImVec2(-1, plot_height))) {
+        ImPlot::SetupAxes("Occupancy %", "IPC", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+        ImPlot::SetupAxisLimits(ImAxis_X1, 0, 100, ImPlotCond_Always);
+
+        for (int i = 0; i < n; i++) {
+            ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 8 * ui_scale_);
+            ImPlot::PlotScatter(labels[i], &occupancy[i], &ipc[i], 1);
+        }
+
+        ImPlot::EndPlot();
+    }
+}
+
+void Gui::render_scaling_chart() {
+    auto cat_it = scaling_history_.find(current_category_);
+    if (cat_it == scaling_history_.end() || cat_it->second.empty()) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+            "Run benchmarks at different problem sizes to see scaling comparison");
+        return;
+    }
+
+    // check if any kernel has >1 data point
+    bool has_multi = false;
+    for (const auto& [name, hist] : cat_it->second) {
+        if (hist.size() > 1) { has_multi = true; break; }
+    }
+
+    if (!has_multi) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+            "Run at multiple problem sizes to see scaling (currently 1 size per kernel)");
+        return;
+    }
+
+    bool is_matmul = (current_category_ == "matmul");
+
+    // metric selector
+    const char* metric_names[] = { "Performance", "Wall Time", "GPU Time" };
+    int metric_idx = (int)scaling_metric_;
+    ImGui::SetNextItemWidth(160 * ui_scale_);
+    if (ImGui::Combo("Metric##scaling", &metric_idx, metric_names, 3)) {
+        scaling_metric_ = (ScalingMetric)metric_idx;
+    }
+
+    const char* x_label = is_matmul ? "Matrix Size" : "Elements";
+    const char* y_label;
+    switch (scaling_metric_) {
+        case ScalingMetric::Performance: y_label = is_matmul ? "GFLOPS" : "GB/s"; break;
+        case ScalingMetric::WallTime:    y_label = "Wall Time (ms)"; break;
+        case ScalingMetric::GpuTime:     y_label = "GPU Time (ms)"; break;
+    }
+
+    if (ImPlot::BeginPlot("##Scaling", ImVec2(-1, ImGui::GetContentRegionAvail().y))) {
+        ImPlot::SetupAxes(x_label, y_label, ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+
+        for (const auto& [name, hist] : cat_it->second) {
+            if (hist.size() < 2) continue;
+
+            std::vector<double> xs, ys;
+            for (const auto& entry : hist) {
+                xs.push_back((double)entry.problem_size);
+                switch (scaling_metric_) {
+                    case ScalingMetric::Performance:
+                        ys.push_back(is_matmul ? entry.result.gflops : entry.result.bandwidth_gbps);
+                        break;
+                    case ScalingMetric::WallTime:
+                        ys.push_back((double)entry.result.elapsed_ms);
+                        break;
+                    case ScalingMetric::GpuTime:
+                        ys.push_back((double)entry.result.kernel_ms);
+                        break;
+                }
+            }
+
+            ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 4 * ui_scale_);
+            ImPlot::PlotLine(name.c_str(), xs.data(), ys.data(), (int)xs.size());
+        }
+
         ImPlot::EndPlot();
     }
 }
 
 void Gui::render_log() {
-    float log_height = ImGui::GetContentRegionAvail().y - 10;
-    if (log_height < 100 * ui_scale_) log_height = 100 * ui_scale_;
-
-    ImGui::BeginChild("LogScroll", ImVec2(0, log_height), false);
+    ImGui::BeginChild("LogScroll", ImVec2(0, ImGui::GetContentRegionAvail().y), false);
     for (const auto& entry : log_entries_) {
         ImVec4 color;
         const char* prefix;
@@ -634,48 +939,32 @@ void Gui::render_log() {
 
 void Gui::run_selected_kernels() {
     if (current_category_.empty()) return;
+    if (benchmark_running_) return;
 
     auto it = kernels_by_category_.find(current_category_);
     if (it == kernels_by_category_.end()) return;
 
+    // build work list
+    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work;
     for (auto& k : it->second) {
-        if (!k.selected || !k.descriptor) continue;
-
-        log(LogEntry::INFO, "[BENCHMARK] Running " + k.descriptor->name() + "...");
-
-        k.result = runner_.run(*k.descriptor, config_);
-        k.has_run = true;
-
-        if (k.result.success) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "[BENCHMARK] %s - wall=%.3f ms gpu=%.3f ms | %.2f %s",
-                k.result.kernel_name.c_str(),
-                k.result.elapsed_ms,
-                k.result.kernel_ms,
-                (current_category_ == "matmul") ? k.result.gflops : k.result.bandwidth_gbps,
-                (current_category_ == "matmul") ? "GFLOPS" : "GB/s");
-            log(LogEntry::INFO, buf);
-
-            if (config_.collect_metrics && k.result.achieved_occupancy > 0) {
-                snprintf(buf, sizeof(buf),
-                    "[PROFILER]  %s - %d regs | %d B shmem | occupancy=%.1f%% | IPC=%.2f",
-                    k.result.kernel_name.c_str(),
-                    k.result.registers_per_thread,
-                    k.result.shared_memory_bytes,
-                    k.result.achieved_occupancy * 100.0,
-                    k.result.ipc);
-                log(LogEntry::INFO, buf);
-            }
-
-            if (!k.result.verified) {
-                log(LogEntry::WARN, k.result.kernel_name + " failed verification");
-            }
-        } else {
-            log(LogEntry::ERR, k.result.kernel_name + " failed: " + k.result.error);
+        if (k.selected && k.descriptor) {
+            work.push_back({current_category_, k.descriptor});
         }
     }
 
-    log(LogEntry::INFO, "--- Done ---");
+    if (work.empty()) return;
+
+    // join previous thread if any
+    if (benchmark_thread_.joinable()) {
+        benchmark_thread_.join();
+    }
+
+    cancel_requested_ = false;
+    benchmark_running_ = true;
+    benchmark_current_ = 0;
+    benchmark_total_ = (int)work.size();
+
+    benchmark_thread_ = std::thread(&Gui::benchmark_thread_func, this, std::move(work), config_);
 }
 
 void Gui::reset_results() {

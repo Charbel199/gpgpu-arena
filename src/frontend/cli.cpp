@@ -59,10 +59,15 @@ void Cli::print_help() {
     std::cout << "  select <cat>      Select a category (matmul, reduce, etc.)\n";
     std::cout << "  list              List kernels in current category\n";
     std::cout << "  run <name|all>    Run benchmark for kernel or all in category\n";
-    std::cout << "  results           Show benchmark results\n";
-    std::cout << "  set size <n>      Set problem size (matrix size or element count)\n";
+    std::cout << "  results           Show benchmark results (sorted by performance)\n";
+    std::cout << "  compare           Show results across problem sizes\n";
+    std::cout << "  set size <n>      Set problem size (all dims for matmul, or element count)\n";
+    std::cout << "  set m <n>         Set M dimension (matmul rows)\n";
+    std::cout << "  set k <n>         Set K dimension (matmul shared)\n";
+    std::cout << "  set n <n>         Set N dimension (matmul cols) or element count\n";
     std::cout << "  set warmup <n>    Set warmup runs (default: 10)\n";
     std::cout << "  set runs <n>      Set benchmark runs (default: 10)\n";
+    std::cout << "  set profiling <on|off>  Toggle hardware counter collection\n";
     std::cout << "  help              Show this help\n";
     std::cout << "  quit              Exit\n";
 }
@@ -92,11 +97,12 @@ bool Cli::execute(const std::string& line) {
         cmd_run(arg);
     } else if (cmd == "results" || cmd == "res") {
         cmd_results();
+    } else if (cmd == "compare" || cmd == "cmp") {
+        cmd_compare();
     } else if (cmd == "set") {
-        std::string what;
-        int value;
-        iss >> what >> value;
-        cmd_set(what, value);
+        std::string what, value_str;
+        iss >> what >> value_str;
+        cmd_set(what, value_str);
     } else {
         std::cout << "Unknown command: " << cmd << ". Type 'help' for commands.\n";
     }
@@ -173,7 +179,7 @@ void Cli::cmd_list() {
         if (results_.count(k->name())) {
             auto& r = results_[k->name()];
             if (r.success) {
-                if (current_category_ == "matmul") {
+                if (r.category == "matmul") {
                     std::cout << std::fixed << std::setprecision(1) << r.gflops << " GFLOPS";
                 } else {
                     std::cout << std::fixed << std::setprecision(1) << r.bandwidth_gbps << " GB/s";
@@ -184,14 +190,18 @@ void Cli::cmd_list() {
         std::cout << "      " << k->description() << "\n";
     }
 
+    // show current settings
     std::cout << "\nSettings: ";
     if (current_category_ == "matmul") {
-        std::cout << "matrix=" << config_.params["M"] << "x" << config_.params["M"];
-    } else if (current_category_ == "reduce") {
+        std::cout << "M=" << config_.params["M"]
+                  << " K=" << config_.params["K"]
+                  << " N=" << config_.params["N"];
+    } else {
         std::cout << "n=" << config_.params["n"];
     }
     std::cout << ", warmup=" << config_.warmup_runs
-              << ", runs=" << config_.number_of_runs << "\n";
+              << ", runs=" << config_.number_of_runs
+              << ", profiling=" << (config_.collect_metrics ? "on" : "off") << "\n";
 }
 
 void Cli::cmd_run(const std::string& arg) {
@@ -254,6 +264,27 @@ void Cli::run_kernel(arena::KernelDescriptor* kernel) {
             std::cout << " [WARN]";
         }
         std::cout << "\n";
+
+        // store in scaling history
+        int problem_size = (current_category_ == "matmul") ?
+            config_.params["M"] : config_.params["n"];
+
+        auto& hist = scaling_history_[kernel->name()];
+        bool found = false;
+        for (auto& entry : hist) {
+            if (entry.problem_size == problem_size) {
+                entry.result = result;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            hist.push_back({problem_size, result});
+            std::sort(hist.begin(), hist.end(),
+                [](const CliSizedResult& a, const CliSizedResult& b) {
+                    return a.problem_size < b.problem_size;
+                });
+        }
     } else {
         std::cout << "FAILED: " << result.error << "\n";
     }
@@ -265,22 +296,46 @@ void Cli::cmd_results() {
         return;
     }
 
+    // filter to current category
+    bool is_matmul = (current_category_ == "matmul");
+    std::string perf_header = is_matmul ? "GFLOPS" : "GB/s";
+
+    std::vector<std::pair<std::string, arena::RunResult>> sorted;
+    for (const auto& [name, r] : results_) {
+        if (r.category == current_category_) {
+            sorted.push_back({name, r});
+        }
+    }
+
+    if (sorted.empty()) {
+        std::cout << "No results for '" << current_category_ << "'. Run some benchmarks first.\n";
+        return;
+    }
+
+    // sort by primary metric descending
+    std::sort(sorted.begin(), sorted.end(),
+        [&](const auto& a, const auto& b) {
+            double va = is_matmul ? a.second.gflops : a.second.bandwidth_gbps;
+            double vb = is_matmul ? b.second.gflops : b.second.bandwidth_gbps;
+            return va > vb;  // descending
+        });
+
     std::cout << "\n";
     std::cout << std::left << std::setw(25) << "Kernel"
               << std::right << std::setw(10) << "Time(ms)"
-              << std::setw(10) << "Perf"
+              << std::setw(10) << perf_header
               << std::setw(12) << "Grid"
               << std::setw(12) << "Block"
               << std::setw(8) << "Status" << "\n";
     std::cout << std::string(77, '-') << "\n";
 
-    for (const auto& [name, r] : results_) {
+    for (const auto& [name, r] : sorted) {
         std::cout << std::left << std::setw(25) << name;
         if (r.success) {
             std::cout << std::right << std::fixed
                       << std::setw(10) << std::setprecision(3) << r.elapsed_ms;
 
-            if (r.category == "matmul") {
+            if (is_matmul) {
                 std::cout << std::setw(10) << std::setprecision(1) << r.gflops;
             } else {
                 std::cout << std::setw(10) << std::setprecision(1) << r.bandwidth_gbps;
@@ -299,8 +354,109 @@ void Cli::cmd_results() {
     }
 }
 
-void Cli::cmd_set(const std::string& what, int value) {
-    if (what == "size" || what == "matrix" || what == "n") {
+void Cli::cmd_compare() {
+    // filter scaling history to current category
+    std::map<std::string, std::vector<CliSizedResult>> cat_history;
+    for (const auto& [name, hist] : scaling_history_) {
+        // check if this kernel belongs to current category
+        for (auto* k : current_kernels_) {
+            if (k->name() == name) {
+                cat_history[name] = hist;
+                break;
+            }
+        }
+    }
+
+    if (cat_history.empty()) {
+        std::cout << "No scaling data for '" << current_category_ << "'. Run benchmarks at different problem sizes first.\n";
+        return;
+    }
+
+    bool is_matmul = (current_category_ == "matmul");
+    std::string size_label = is_matmul ? "Matrix" : "Elements";
+    std::string perf_label = is_matmul ? "GFLOPS" : "GB/s";
+
+    // collect unique problem sizes
+    std::vector<int> all_sizes;
+    for (const auto& [name, hist] : cat_history) {
+        for (const auto& entry : hist) {
+            if (std::find(all_sizes.begin(), all_sizes.end(), entry.problem_size) == all_sizes.end()) {
+                all_sizes.push_back(entry.problem_size);
+            }
+        }
+    }
+    std::sort(all_sizes.begin(), all_sizes.end());
+
+    if (all_sizes.size() < 2) {
+        std::cout << "Need results at 2+ problem sizes. Currently have " << all_sizes.size() << " size(s).\n";
+        return;
+    }
+
+    // print header
+    std::cout << "\n" << std::left << std::setw(25) << "Kernel";
+    for (int sz : all_sizes) {
+        std::string header = (is_matmul ? std::to_string(sz) + "x" + std::to_string(sz) :
+                              std::to_string(sz));
+        std::cout << std::right << std::setw(12) << header;
+    }
+    std::cout << "\n" << std::string(25 + 12 * all_sizes.size(), '-') << "\n";
+
+    // print each kernel's results across sizes
+    for (const auto& [name, hist] : cat_history) {
+        std::cout << std::left << std::setw(25) << name;
+        for (int sz : all_sizes) {
+            bool found = false;
+            for (const auto& entry : hist) {
+                if (entry.problem_size == sz && entry.result.success) {
+                    double val = is_matmul ? entry.result.gflops : entry.result.bandwidth_gbps;
+                    std::cout << std::right << std::fixed << std::setprecision(1)
+                              << std::setw(12) << val;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                std::cout << std::right << std::setw(12) << "-";
+            }
+        }
+        std::cout << "\n";
+    }
+
+    std::cout << std::string(25 + 12 * all_sizes.size(), '-') << "\n";
+    std::cout << "(values in " << perf_label << ")\n";
+}
+
+void Cli::cmd_set(const std::string& what, const std::string& value_str) {
+    if (what.empty() || value_str.empty()) {
+        std::cout << "Usage: set <setting> <value>\n";
+        std::cout << "Available: size, m, k, n, warmup, runs, profiling\n";
+        return;
+    }
+
+    // profiling toggle (non-numeric)
+    if (what == "profiling" || what == "profile") {
+        if (value_str == "on" || value_str == "1" || value_str == "true") {
+            config_.collect_metrics = true;
+            std::cout << "Profiling enabled (slower: kernel replay for hardware counters)\n";
+        } else if (value_str == "off" || value_str == "0" || value_str == "false") {
+            config_.collect_metrics = false;
+            std::cout << "Profiling disabled\n";
+        } else {
+            std::cout << "Usage: set profiling <on|off>\n";
+        }
+        return;
+    }
+
+    // numeric settings
+    int value;
+    try {
+        value = std::stoi(value_str);
+    } catch (...) {
+        std::cout << "Invalid number: " << value_str << "\n";
+        return;
+    }
+
+    if (what == "size" || what == "matrix") {
         if (current_category_ == "matmul") {
             if (value >= 64 && value <= 8192) {
                 config_.params["M"] = value;
@@ -310,7 +466,7 @@ void Cli::cmd_set(const std::string& what, int value) {
             } else {
                 std::cout << "Matrix size must be between 64 and 8192.\n";
             }
-        } else if (current_category_ == "reduce") {
+        } else if (current_category_ == "reduce" || current_category_ == "scan") {
             if (value >= 1000 && value <= 100000000) {
                 config_.params["n"] = value;
                 std::cout << "Element count set to " << value << "\n";
@@ -319,6 +475,43 @@ void Cli::cmd_set(const std::string& what, int value) {
             }
         } else {
             std::cout << "Select a category first.\n";
+        }
+    } else if (what == "m") {
+        if (value >= 64 && value <= 8192) {
+            config_.params["M"] = value;
+            std::cout << "M set to " << value << " (matrix: "
+                      << config_.params["M"] << "x" << config_.params["K"]
+                      << " * " << config_.params["K"] << "x" << config_.params["N"] << ")\n";
+        } else {
+            std::cout << "M must be between 64 and 8192.\n";
+        }
+    } else if (what == "k") {
+        if (value >= 64 && value <= 8192) {
+            config_.params["K"] = value;
+            std::cout << "K set to " << value << " (matrix: "
+                      << config_.params["M"] << "x" << config_.params["K"]
+                      << " * " << config_.params["K"] << "x" << config_.params["N"] << ")\n";
+        } else {
+            std::cout << "K must be between 64 and 8192.\n";
+        }
+    } else if (what == "n") {
+        // 'n' is matmul N dimension or element count depending on category
+        if (current_category_ == "matmul") {
+            if (value >= 64 && value <= 8192) {
+                config_.params["N"] = value;
+                std::cout << "N set to " << value << " (matrix: "
+                          << config_.params["M"] << "x" << config_.params["K"]
+                          << " * " << config_.params["K"] << "x" << config_.params["N"] << ")\n";
+            } else {
+                std::cout << "N must be between 64 and 8192.\n";
+            }
+        } else {
+            if (value >= 1000 && value <= 100000000) {
+                config_.params["n"] = value;
+                std::cout << "Element count set to " << value << "\n";
+            } else {
+                std::cout << "Element count must be between 1000 and 100000000.\n";
+            }
         }
     } else if (what == "warmup") {
         if (value >= 0 && value <= 100) {
@@ -336,7 +529,7 @@ void Cli::cmd_set(const std::string& what, int value) {
         }
     } else {
         std::cout << "Unknown setting: " << what << "\n";
-        std::cout << "Available: size, warmup, runs\n";
+        std::cout << "Available: size, m, k, n, warmup, runs, profiling\n";
     }
 }
 

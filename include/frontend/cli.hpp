@@ -8,6 +8,12 @@
 
 namespace frontend {
 
+// result snapshot at a particular problem size
+struct CliSizedResult {
+    int problem_size = 0;
+    arena::RunResult result;
+};
+
 class Cli {
 public:
     Cli(arena::Runner& runner);
@@ -24,7 +30,8 @@ private:
     void cmd_select(const std::string& category);
     void cmd_run(const std::string& arg);
     void cmd_results();
-    void cmd_set(const std::string& what, int value);
+    void cmd_set(const std::string& what, const std::string& value_str);
+    void cmd_compare();
 
     void run_kernel(arena::KernelDescriptor* kernel);
 
@@ -36,6 +43,9 @@ private:
     std::vector<arena::KernelDescriptor*> current_kernels_;
     std::map<std::string, arena::RunResult> results_;
     arena::RunConfig config_;
+
+    // comparison across problem sizes: kernel_name -> results at different sizes
+    std::map<std::string, std::vector<CliSizedResult>> scaling_history_;
 };
 
 int run_cli(arena::Runner& runner);
