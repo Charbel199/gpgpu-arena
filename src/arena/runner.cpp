@@ -68,7 +68,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
 
         nvtxRangePushA(("BENCHMARK: " + result.kernel_name).c_str());
         auto bench_result = benchmark_.run(launch_kernel, config.number_of_runs,
-            [&]() { desc.initialize(ctx_); });
+            [&]() { desc.initialize(ctx_); }); // TODO: too complicated, why not simply pass in the DESCRIPTOR + LOADER maybe and internally clean up
         nvtxRangePop();
 
         result.elapsed_ms = bench_result.median_ms;
