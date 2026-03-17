@@ -59,7 +59,7 @@ public:
         float result;
         ctx.copy_to_host(&result, d_output_, sizeof(float));
 
-        float expected = static_cast<float>(n_);
+        float expected = static_cast<float>(n_); //TODO: I don't like the idea of not doing a CPU check, what if we initialize RANDOM weights (This is how it should be anw)
         spdlog::get("verify")->debug("got {}, expected {}", result, expected);
         float rel_error = std::abs(result - expected) / expected;
         return rel_error < 1e-5f;
