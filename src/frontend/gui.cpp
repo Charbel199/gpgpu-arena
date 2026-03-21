@@ -588,23 +588,22 @@ void Gui::render_results_table() {
 
         ImGui::TableHeadersRow();
 
-        if (cat_it != kernels_by_category_.end()) {
-            sorted_indices_.clear();
-            for (int i = 0; i < (int)cat_it->second.size(); i++) {
-                if (cat_it->second[i].has_run)
-                    sorted_indices_.push_back(i);
+        {
+            std::vector<int> sorted_indices;
+            for (int i = 0; i < (int)kernels->size(); i++) {
+                if ((*kernels)[i].has_run)
+                    sorted_indices.push_back(i);
             }
 
             if (ImGuiTableSortSpecs* sort_specs = ImGui::TableGetSortSpecs()) {
-                if (sort_specs->SpecsCount > 0) {
+                if (sort_specs->SpecsDirty && sort_specs->SpecsCount > 0) {
                     const auto& spec = sort_specs->Specs[0];
-                    const auto& kernels = cat_it->second;
                     bool ascending = (spec.SortDirection == ImGuiSortDirection_Ascending);
 
-                    std::sort(sorted_indices_.begin(), sorted_indices_.end(),
+                    std::sort(sorted_indices.begin(), sorted_indices.end(),
                         [&](int a, int b) {
-                            const auto& ra = kernels[a].result;
-                            const auto& rb = kernels[b].result;
+                            const auto& ra = (*kernels)[a].result;
+                            const auto& rb = (*kernels)[b].result;
                             int cmp = 0;
                             switch (spec.ColumnUserID) {
                                 case Col_Kernel:   cmp = ra.kernel_name.compare(rb.kernel_name); break;
@@ -626,12 +625,12 @@ void Gui::render_results_table() {
                             }
                             return ascending ? (cmp < 0) : (cmp > 0);
                         });
+                    sort_specs->SpecsDirty = false;
                 }
-                sort_specs->SpecsDirty = false;
             }
 
-            for (int idx : sorted_indices_) {
-                const auto& k = cat_it->second[idx];
+            for (int idx : sorted_indices) {
+                const auto& k = (*kernels)[idx];
 
                 ImGui::TableNextRow();
 
@@ -728,16 +727,11 @@ void Gui::render_performance_chart() {
     std::vector<std::string> label_strings;
     std::vector<double> values;
 
-    auto it = kernels_by_category_.find(current_category_);
-    if (it != kernels_by_category_.end()) {
-        for (const auto& k : it->second) {
+    if (auto* kernels = current_kernels()) {
+        for (const auto& k : *kernels) {
             if (k.has_run && k.result.success) {
                 label_strings.push_back(k.result.kernel_name);
-                if (current_category_ == "matmul") {
-                    values.push_back(k.result.gflops);
-                } else {
-                    values.push_back(k.result.bandwidth_gbps);
-                }
+                values.push_back(is_matmul() ? k.result.gflops : k.result.bandwidth_gbps);
             }
         }
     }
@@ -760,7 +754,7 @@ void Gui::render_performance_chart() {
         sorted_values[i] = values[order[i]];
     }
 
-    const char* y_label = (current_category_ == "matmul") ? "GFLOPS" : "GB/s";
+    const char* y_label = is_matmul() ? "GFLOPS" : "GB/s";
 
     if (ImPlot::BeginPlot("##Performance", ImVec2(-1, ImGui::GetContentRegionAvail().y))) {
         ImPlot::SetupAxes("", y_label, ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
@@ -781,9 +775,8 @@ void Gui::render_profiling_chart() {
     std::vector<double> occupancy;
     std::vector<double> ipc;
 
-    auto it = kernels_by_category_.find(current_category_);
-    if (it != kernels_by_category_.end()) {
-        for (const auto& k : it->second) {
+    if (auto* kernels = current_kernels()) {
+        for (const auto& k : *kernels) {
             if (k.has_run && k.result.success && k.result.achieved_occupancy > 0) {
                 labels.push_back(k.result.kernel_name.c_str());
                 occupancy.push_back(k.result.achieved_occupancy * 100.0);
@@ -852,7 +845,6 @@ void Gui::render_scaling_chart() {
         return;
     }
 
-    // check if any kernel has >1 data point
     bool has_multi = false;
     for (const auto& [name, hist] : cat_it->second) {
         if (hist.size() > 1) { has_multi = true; break; }
@@ -864,9 +856,6 @@ void Gui::render_scaling_chart() {
         return;
     }
 
-    bool is_matmul = (current_category_ == "matmul");
-
-    // metric selector
     const char* metric_names[] = { "Performance", "Wall Time", "GPU Time" };
     int metric_idx = (int)scaling_metric_;
     ImGui::SetNextItemWidth(160 * ui_scale_);
@@ -874,10 +863,10 @@ void Gui::render_scaling_chart() {
         scaling_metric_ = (ScalingMetric)metric_idx;
     }
 
-    const char* x_label = is_matmul ? "Matrix Size" : "Elements";
+    const char* x_label = is_matmul() ? "Matrix Size" : "Elements";
     const char* y_label;
     switch (scaling_metric_) {
-        case ScalingMetric::Performance: y_label = is_matmul ? "GFLOPS" : "GB/s"; break;
+        case ScalingMetric::Performance: y_label = is_matmul() ? "GFLOPS" : "GB/s"; break;
         case ScalingMetric::WallTime:    y_label = "Wall Time (ms)"; break;
         case ScalingMetric::GpuTime:     y_label = "GPU Time (ms)"; break;
     }
@@ -885,15 +874,17 @@ void Gui::render_scaling_chart() {
     if (ImPlot::BeginPlot("##Scaling", ImVec2(-1, ImGui::GetContentRegionAvail().y))) {
         ImPlot::SetupAxes(x_label, y_label, ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
 
+        std::vector<double> xs, ys;
         for (const auto& [name, hist] : cat_it->second) {
             if (hist.size() < 2) continue;
 
-            std::vector<double> xs, ys;
+            xs.clear();
+            ys.clear();
             for (const auto& entry : hist) {
                 xs.push_back((double)entry.problem_size);
                 switch (scaling_metric_) {
                     case ScalingMetric::Performance:
-                        ys.push_back(is_matmul ? entry.result.gflops : entry.result.bandwidth_gbps);
+                        ys.push_back(is_matmul() ? entry.result.gflops : entry.result.bandwidth_gbps);
                         break;
                     case ScalingMetric::WallTime:
                         ys.push_back((double)entry.result.elapsed_ms);
@@ -937,7 +928,6 @@ void Gui::run_selected_kernels() {
     auto it = kernels_by_category_.find(current_category_);
     if (it == kernels_by_category_.end()) return;
 
-    // build work list
     std::vector<std::pair<std::string, arena::KernelDescriptor*>> work;
     for (auto& k : it->second) {
         if (k.selected && k.descriptor) {
@@ -947,7 +937,6 @@ void Gui::run_selected_kernels() {
 
     if (work.empty()) return;
 
-    // join previous thread if any
     if (benchmark_thread_.joinable()) {
         benchmark_thread_.join();
     }
