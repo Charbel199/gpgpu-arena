@@ -26,7 +26,6 @@ struct LogEntry {
     std::string message;
 };
 
-// result snapshot at a particular problem size
 struct SizedResult {
     int problem_size = 0;
     arena::RunResult result;
@@ -62,10 +61,12 @@ private:
     void select_category(const std::string& category);
     void log(LogEntry::Level level, const std::string& msg);
 
-    // async benchmark helpers
     void benchmark_thread_func(std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
                                arena::RunConfig config);
     void drain_pending_results();
+
+    bool is_matmul() const { return current_category_ == "matmul"; }
+    std::vector<KernelState>* current_kernels();
 
     arena::Runner& runner_;
 
@@ -84,15 +85,12 @@ private:
     std::deque<LogEntry> log_entries_;
     static constexpr size_t MAX_LOG_ENTRIES = 200;
 
-    std::vector<int> sorted_indices_;
-
     float results_height_ = 0;
     float performance_height_ = 0;
     float profiling_height_ = 0;
     float scaling_height_ = 0;
     float log_height_ = 0;
 
-    // async benchmark state
     std::thread benchmark_thread_;
     std::mutex mutex_;
     std::atomic<bool> benchmark_running_{false};
@@ -101,7 +99,6 @@ private:
     std::atomic<int> benchmark_total_{0};
     std::string benchmark_current_name_;  // guarded by mutex_
 
-    // pending results from background thread, drained on main thread
     struct PendingResult {
         std::string category;
         std::string kernel_name;
@@ -110,11 +107,9 @@ private:
     };
     std::vector<PendingResult> pending_results_;  // guarded by mutex_
 
-    // scaling chart metric selector
     enum class ScalingMetric { Performance, WallTime, GpuTime };
     ScalingMetric scaling_metric_ = ScalingMetric::Performance;
 
-    // comparison across problem sizes: category -> kernel_name -> results at different sizes
     std::map<std::string, std::map<std::string, std::vector<SizedResult>>> scaling_history_;
 };
 

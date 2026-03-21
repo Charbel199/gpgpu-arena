@@ -123,8 +123,6 @@ void Gui::run() {
     }
 }
 
-// async benchmark
-
 void Gui::benchmark_thread_func(
     std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
     arena::RunConfig config) {
@@ -201,12 +199,10 @@ void Gui::drain_pending_results() {
     }
 
     for (auto& pr : results) {
-        // apply logs
         for (auto& entry : pr.logs) {
             log(entry.level, entry.message);
         }
 
-        // update kernel state
         auto cat_it = kernels_by_category_.find(pr.category);
         if (cat_it != kernels_by_category_.end()) {
             for (auto& k : cat_it->second) {
@@ -218,7 +214,6 @@ void Gui::drain_pending_results() {
             }
         }
 
-        // store in scaling history
         if (pr.result.success) {
             int problem_size = (pr.category == "matmul") ?
                 config_.params["M"] : config_.params["n"];
@@ -243,7 +238,6 @@ void Gui::drain_pending_results() {
         }
     }
 
-    // if benchmark just finished, log and join thread
     if (!benchmark_running_ && benchmark_thread_.joinable()) {
         benchmark_thread_.join();
         if (benchmark_current_ >= benchmark_total_) {
@@ -252,6 +246,11 @@ void Gui::drain_pending_results() {
             log(LogEntry::WARN, "--- Cancelled ---");
         }
     }
+}
+
+std::vector<KernelState>* Gui::current_kernels() {
+    auto it = kernels_by_category_.find(current_category_);
+    return (it != kernels_by_category_.end()) ? &it->second : nullptr;
 }
 
 void Gui::render_frame() {
@@ -401,13 +400,13 @@ void Gui::render_kernel_list() {
     ImGui::Text("Kernels");
     ImGui::Spacing();
 
-    if (current_category_.empty() ||
-        kernels_by_category_.find(current_category_) == kernels_by_category_.end()) {
+    auto* kernels_ptr = current_kernels();
+    if (!kernels_ptr) {
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Select a category");
         return;
     }
 
-    auto& kernels = kernels_by_category_[current_category_];
+    auto& kernels = *kernels_ptr;
 
     if (ImGui::SmallButton("All")) {
         for (auto& k : kernels) k.selected = true;
@@ -514,16 +513,15 @@ void Gui::render_controls() {
         }
     } else {
         int selected_count = 0;
-        if (!current_category_.empty() &&
-            kernels_by_category_.find(current_category_) != kernels_by_category_.end()) {
-            for (const auto& k : kernels_by_category_[current_category_]) {
+        if (auto* kernels = current_kernels()) {
+            for (const auto& k : *kernels)
                 if (k.selected) selected_count++;
-            }
         }
 
         ImGui::BeginDisabled(selected_count == 0);
-        std::string btn_label = "Run Selected (" + std::to_string(selected_count) + ")";
-        if (ImGui::Button(btn_label.c_str(), ImVec2(-1, 35 * ui_scale_))) {
+        char btn_label[64];
+        snprintf(btn_label, sizeof(btn_label), "Run Selected (%d)", selected_count);
+        if (ImGui::Button(btn_label, ImVec2(-1, 35 * ui_scale_))) {
             run_selected_kernels();
         }
         ImGui::EndDisabled();
@@ -532,11 +530,9 @@ void Gui::render_controls() {
     ImGui::Spacing();
 
     bool has_results = false;
-    if (!current_category_.empty() &&
-        kernels_by_category_.find(current_category_) != kernels_by_category_.end()) {
-        for (const auto& k : kernels_by_category_[current_category_]) {
+    if (auto* kernels = current_kernels()) {
+        for (const auto& k : *kernels)
             if (k.has_run) { has_results = true; break; }
-        }
     }
 
     ImGui::BeginDisabled(!has_results || benchmark_running_);
@@ -547,21 +543,18 @@ void Gui::render_controls() {
 }
 
 void Gui::render_results_table() {
-    if (current_category_.empty()) {
+    auto* kernels = current_kernels();
+    if (!kernels) {
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Select a category and run benchmarks");
         return;
     }
 
-    bool show_gflops = (current_category_ == "matmul");
+    bool show_gflops = is_matmul();
     bool has_profiling = false;
-
-    auto cat_it = kernels_by_category_.find(current_category_);
-    if (cat_it != kernels_by_category_.end()) {
-        for (const auto& k : cat_it->second) {
-            if (k.has_run && k.result.registers_per_thread > 0) {
-                has_profiling = true;
-                break;
-            }
+    for (const auto& k : *kernels) {
+        if (k.has_run && k.result.registers_per_thread > 0) {
+            has_profiling = true;
+            break;
         }
     }
 
