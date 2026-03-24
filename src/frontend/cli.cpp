@@ -12,6 +12,8 @@ Cli::Cli(arena::Runner& runner)
     config_.params["K"] = 1024;
     config_.params["N"] = 1024;
     config_.params["n"] = 1000000;
+    config_.params["rows"] = 1024;
+    config_.params["cols"] = 1024;
     config_.warmup_runs = 10;
     config_.number_of_runs = 10;
 
@@ -61,10 +63,12 @@ void Cli::print_help() {
     std::cout << "  run <name|all>    Run benchmark for kernel or all in category\n";
     std::cout << "  results           Show benchmark results (sorted by performance)\n";
     std::cout << "  compare           Show results across problem sizes\n";
-    std::cout << "  set size <n>      Set problem size (all dims for matmul, or element count)\n";
+    std::cout << "  set size <n>      Set problem size (all dims for matmul/softmax, or element count)\n";
     std::cout << "  set m <n>         Set M dimension (matmul rows)\n";
     std::cout << "  set k <n>         Set K dimension (matmul shared)\n";
     std::cout << "  set n <n>         Set N dimension (matmul cols) or element count\n";
+    std::cout << "  set rows <n>      Set softmax rows\n";
+    std::cout << "  set cols <n>      Set softmax cols\n";
     std::cout << "  set warmup <n>    Set warmup runs (default: 10)\n";
     std::cout << "  set runs <n>      Set benchmark runs (default: 10)\n";
     std::cout << "  set profiling <on|off>  Toggle hardware counter collection\n";
@@ -196,6 +200,9 @@ void Cli::cmd_list() {
         std::cout << "M=" << config_.params["M"]
                   << " K=" << config_.params["K"]
                   << " N=" << config_.params["N"];
+    } else if (current_category_ == "softmax") {
+        std::cout << "rows=" << config_.params["rows"]
+                  << " cols=" << config_.params["cols"];
     } else {
         std::cout << "n=" << config_.params["n"];
     }
@@ -266,8 +273,10 @@ void Cli::run_kernel(arena::KernelDescriptor* kernel) {
         std::cout << "\n";
 
         // store in scaling history
-        int problem_size = (current_category_ == "matmul") ?
-            config_.params["M"] : config_.params["n"];
+        int problem_size;
+        if (current_category_ == "matmul") problem_size = config_.params["M"];
+        else if (current_category_ == "softmax") problem_size = config_.params["rows"];
+        else problem_size = config_.params["n"];
 
         auto& hist = scaling_history_[kernel->name()];
         bool found = false;
@@ -373,7 +382,7 @@ void Cli::cmd_compare() {
     }
 
     bool is_matmul = (current_category_ == "matmul");
-    std::string size_label = is_matmul ? "Matrix" : "Elements";
+    bool is_softmax = (current_category_ == "softmax");
     std::string perf_label = is_matmul ? "GFLOPS" : "GB/s";
 
     // collect unique problem sizes
@@ -395,8 +404,9 @@ void Cli::cmd_compare() {
     // print header
     std::cout << "\n" << std::left << std::setw(25) << "Kernel";
     for (int sz : all_sizes) {
-        std::string header = (is_matmul ? std::to_string(sz) + "x" + std::to_string(sz) :
-                              std::to_string(sz));
+        std::string header;
+        if (is_matmul || is_softmax) header = std::to_string(sz) + "x" + std::to_string(sz);
+        else header = std::to_string(sz);
         std::cout << std::right << std::setw(12) << header;
     }
     std::cout << "\n" << std::string(25 + 12 * all_sizes.size(), '-') << "\n";
@@ -466,6 +476,14 @@ void Cli::cmd_set(const std::string& what, const std::string& value_str) {
             } else {
                 std::cout << "Matrix size must be between 64 and 8192.\n";
             }
+        } else if (current_category_ == "softmax") {
+            if (value >= 64 && value <= 8192) {
+                config_.params["rows"] = value;
+                config_.params["cols"] = value;
+                std::cout << "Softmax size set to " << value << "x" << value << "\n";
+            } else {
+                std::cout << "Size must be between 64 and 8192.\n";
+            }
         } else if (current_category_ == "reduce" || current_category_ == "scan") {
             if (value >= 1000 && value <= 100000000) {
                 config_.params["n"] = value;
@@ -475,6 +493,22 @@ void Cli::cmd_set(const std::string& what, const std::string& value_str) {
             }
         } else {
             std::cout << "Select a category first.\n";
+        }
+    } else if (what == "rows") {
+        if (value >= 64 && value <= 8192) {
+            config_.params["rows"] = value;
+            std::cout << "Rows set to " << value << " (softmax: "
+                      << config_.params["rows"] << "x" << config_.params["cols"] << ")\n";
+        } else {
+            std::cout << "Rows must be between 64 and 8192.\n";
+        }
+    } else if (what == "cols") {
+        if (value >= 64 && value <= 8192) {
+            config_.params["cols"] = value;
+            std::cout << "Cols set to " << value << " (softmax: "
+                      << config_.params["rows"] << "x" << config_.params["cols"] << ")\n";
+        } else {
+            std::cout << "Cols must be between 64 and 8192.\n";
         }
     } else if (what == "m") {
         if (value >= 64 && value <= 8192) {

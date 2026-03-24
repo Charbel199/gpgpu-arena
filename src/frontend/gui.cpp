@@ -17,6 +17,8 @@ Gui::Gui(arena::Runner& runner)
     config_.params["K"] = 1024;
     config_.params["N"] = 1024;
     config_.params["n"] = 1000000;
+    config_.params["rows"] = 1024;
+    config_.params["cols"] = 1024;
     config_.warmup_runs = 10;
     config_.number_of_runs = 10;
 
@@ -215,8 +217,10 @@ void Gui::drain_pending_results() {
         }
 
         if (pr.result.success) {
-            int problem_size = (pr.category == "matmul") ?
-                config_.params["M"] : config_.params["n"];
+            int problem_size;
+            if (pr.category == "matmul") problem_size = config_.params["M"];
+            else if (pr.category == "softmax") problem_size = config_.params["rows"];
+            else problem_size = config_.params["n"];
 
             auto& hist = scaling_history_[pr.category][pr.kernel_name];
             // replace existing entry for same problem size
@@ -460,6 +464,18 @@ void Gui::render_problem_config() {
             }
             ImGui::Text("(%d x %d) x (%d x %d)", m, k, k, n);
         }
+    } else if (current_category_ == "softmax") {
+        int rows = config_.params["rows"];
+        int cols = config_.params["cols"];
+        bool changed = false;
+        changed |= ImGui::SliderInt("Rows", &rows, 64, 8192);
+        changed |= ImGui::SliderInt("Cols", &cols, 64, 8192);
+        if (changed) {
+            config_.params["rows"] = rows;
+            config_.params["cols"] = cols;
+        }
+        float mb = (2.0f * rows * cols * sizeof(float)) / (1024.0f * 1024.0f);
+        ImGui::Text("%d x %d (%.1f MB)", rows, cols, mb);
     } else if (current_category_ == "reduce" || current_category_ == "scan") {
         int n = config_.params["n"];
         if (ImGui::SliderInt("Elements", &n, 100000, 100000000, "%d", ImGuiSliderFlags_Logarithmic)) {
@@ -863,7 +879,10 @@ void Gui::render_scaling_chart() {
         scaling_metric_ = (ScalingMetric)metric_idx;
     }
 
-    const char* x_label = is_matmul() ? "Matrix Size" : "Elements";
+    const char* x_label;
+    if (is_matmul()) x_label = "Matrix Size";
+    else if (current_category_ == "softmax") x_label = "Rows";
+    else x_label = "Elements";
     const char* y_label;
     switch (scaling_metric_) {
         case ScalingMetric::Performance: y_label = is_matmul() ? "GFLOPS" : "GB/s"; break;
