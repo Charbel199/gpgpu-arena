@@ -18,6 +18,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     result.description = desc.description();
 
     auto log = spdlog::get("runner");
+    log->info("-------- {} --------", result.kernel_name);
 
     try {
         desc.set_problem_size(config.params);
@@ -60,8 +61,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             }
         };
 
-        // warmup
-        log->info("{}: warming up ({} runs) ...", result.kernel_name, config.warmup_runs);
+        log->info("  warmup: {} runs ...", config.warmup_runs);
         for (int i = 0; i < config.warmup_runs; i++) {
             launch_kernel();
         }
@@ -70,8 +70,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         desc.allocate(ctx_);
         desc.initialize(ctx_);
 
-        // benchmark
-        log->info("{}: benchmarking ({} runs) ...", result.kernel_name, config.number_of_runs);
+        log->info("  benchmark: {} runs ...", config.number_of_runs);
 
         nvtxRangePushA(("BENCHMARK: " + result.kernel_name).c_str());
         auto bench_result = benchmark_.run(launch_kernel, config.number_of_runs,
@@ -92,12 +91,12 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         result.gflops = (flops / (result.elapsed_ms / 1000.0)) / 1e9;
         result.bandwidth_gbps = (bytes / (result.elapsed_ms / 1000.0)) / 1e9;
 
-        log->info("{}: wall={:.3f} ms  kernel={:.3f} ms  {:.2f} GFLOPS  {:.2f} GB/s",
-            result.kernel_name, result.elapsed_ms, result.kernel_ms, result.gflops, result.bandwidth_gbps);
+        log->info("  result: wall={:.3f} ms  kernel={:.3f} ms  {:.2f} GFLOPS  {:.2f} GB/s",
+            result.elapsed_ms, result.kernel_ms, result.gflops, result.bandwidth_gbps);
 
         // profile
         if (config.collect_metrics) {
-            log->info("{}: collecting hardware counters ...", result.kernel_name);
+            log->info("  profiling: collecting hardware counters ...");
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
             desc.initialize(ctx_);
 
@@ -121,19 +120,18 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
                 result.ipc = mv.at(metric::IPC);
             }
 
-            log->info("{}: regs={} shmem={}B occupancy={:.1f}% DRAM(R={:.2f} W={:.2f} GB/s) IPC={:.2f}",
-                result.kernel_name, result.registers_per_thread, result.shared_memory_bytes,
+            log->info("  profiling: regs={} shmem={}B occupancy={:.1f}% DRAM(R={:.2f} W={:.2f} GB/s) IPC={:.2f}",
+                result.registers_per_thread, result.shared_memory_bytes,
                 result.achieved_occupancy * 100.0,
                 result.dram_read_gbps, result.dram_write_gbps, result.ipc);
             nvtxRangePop();
         }
 
-        // verification (per kernel)
         result.verified = desc.verify(ctx_);
         if (result.verified) {
-            log->info("{}: verification passed", result.kernel_name);
+            log->info("  verify: passed");
         } else {
-            log->warn("{}: verification FAILED", result.kernel_name);
+            log->warn("  verify: FAILED");
         }
         desc.cleanup(ctx_);
         result.success = true;
