@@ -33,9 +33,18 @@ Context::Context(int device_id) {
         "cuDeviceGetAttribute (minor)"
     );
 
+    check_cuda(
+        cuDeviceGetAttribute(&sm_count_, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device_),
+        "cuDeviceGetAttribute (sm_count)"
+    );
+
     check_cuda(cuDeviceTotalMem(&total_mem_, device_), "cuDeviceTotalMem");
 
-    spdlog::get("context")->info("GPU: {} (sm_{}{}, {} MB)", device_name_, cc_major_, cc_minor_, total_mem_ / (1024 * 1024));
+    auto log = spdlog::get("context");
+    log->info("Device #{}: {}", device_id, device_name_);
+    log->info("  Compute capability: sm_{}{}", cc_major_, cc_minor_);
+    log->info("  SMs: {}", sm_count_);
+    log->info("  Memory: {} MB", total_mem_ / (1024 * 1024));
 
     // cuCtxCreate API changed in CUDA 13.0
 #if CUDA_VERSION >= 13000
@@ -60,7 +69,7 @@ Context::~Context() {
 
 void Context::reset() {
     auto log = spdlog::get("context");
-    log->warn("Resetting CUDA context (recovering from sticky error)");
+    log->warn("Resetting CUDA context (recovering from device error) ...");
 
     if (context_) {
         cuCtxDestroy(context_);
@@ -81,7 +90,7 @@ void Context::reset() {
     if (result != CUDA_SUCCESS) {
         const char* err_str;
         cuGetErrorString(result, &err_str);
-        log->error("Context reset failed: {} — subsequent kernels will fail", err_str ? err_str : "unknown");
+        log->error("Context reset failed: {} - subsequent kernels will fail", err_str ? err_str : "unknown");
         context_ = nullptr;
     }
 }

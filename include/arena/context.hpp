@@ -30,6 +30,7 @@ public:
     int compute_capability_major() const { return cc_major_; }
     int compute_capability_minor() const { return cc_minor_; }
     size_t total_memory() const { return total_mem_; }
+    int sm_count() const { return sm_count_; }
 
     // destroy and recreate the CUDA context (recovers from sticky errors like illegal memory access)
     void reset();
@@ -42,6 +43,7 @@ private:
     CUcontext context_;
     std::string device_name_;
     int cc_major_, cc_minor_;
+    int sm_count_;
     size_t total_mem_;
 };
 
