@@ -135,6 +135,17 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         result.success = false;
         result.error = e.what();
         try { desc.cleanup(ctx_); } catch (...) {}
+
+        // reset context in case of error
+        try {
+            CUresult ctx_status = cuCtxSynchronize();
+            if (ctx_status != CUDA_SUCCESS) {
+                loader_.unload_all();
+                ctx_.reset();
+            }
+        } catch (...) {
+            log->error("Failed to recover CUDA context, subsequent kernels may fail");
+        }
     }
 
     return result;
