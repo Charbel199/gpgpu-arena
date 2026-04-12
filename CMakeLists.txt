@@ -1,5 +1,9 @@
-cmake_minimum_required(VERSION 3.18)
-set(CMAKE_CUDA_ARCHITECTURES 75 CACHE STRING "CUDA architectures to compile for")
+cmake_minimum_required(VERSION 3.24)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES native)
+endif()
+
 project(gpgpu-arena LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -108,19 +112,17 @@ file(GLOB_RECURSE KERNEL_SOURCES "${CMAKE_SOURCE_DIR}/kernels/*/*.cu")
 list(FILTER KERNEL_SOURCES EXCLUDE REGEX "cub_.*\\.cu$")
 list(FILTER KERNEL_SOURCES EXCLUDE REGEX "thrust_.*\\.cu$")
 
-set(CUDA_ARCH "75" CACHE STRING "CUDA architecture to compile for")
-
 set(KERNEL_PTXS "")
 foreach(KERNEL_SRC ${KERNEL_SOURCES})
     get_filename_component(KERNEL_NAME ${KERNEL_SRC} NAME_WE)
     get_filename_component(KERNEL_DIR ${KERNEL_SRC} DIRECTORY)
     get_filename_component(CATEGORY ${KERNEL_DIR} NAME)
-    
+
     set(PTX_FILE ${CMAKE_BINARY_DIR}/kernels/${CATEGORY}_${KERNEL_NAME}.ptx)
-    
+
     add_custom_command(
         OUTPUT ${PTX_FILE}
-        COMMAND ${CMAKE_CUDA_COMPILER} -ptx -arch=sm_${CUDA_ARCH} -o ${PTX_FILE} ${KERNEL_SRC} #TODO: Possibly at -G for debug builds
+        COMMAND ${CMAKE_CUDA_COMPILER} -ptx -arch=native -o ${PTX_FILE} ${KERNEL_SRC}
         DEPENDS ${KERNEL_SRC}
         COMMENT "${CATEGORY}/${KERNEL_NAME}.cu -> ptx"
     )
