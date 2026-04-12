@@ -58,8 +58,15 @@ public:
     virtual std::string source_path() const { return ""; }
     void set_compile_result(const CompileResult& result) { compile_result_ = result; }
 
+    // device properties (captured automatically on first allocate)
+    int sm_count() const { return sm_count_; }
+
 protected:
     CompileResult compile_result_;
+    int sm_count_ = 0;
+
+    // call from allocate() overrides to capture device properties
+    void capture_device_props(Context& ctx) { sm_count_ = ctx.sm_count(); }
 };
 
 

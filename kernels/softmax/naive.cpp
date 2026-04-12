@@ -4,7 +4,9 @@ namespace arena {
 
 struct SoftmaxNaive : SoftmaxDescriptorBase {
     std::string name() const override { return "softmax_naive"; }
-    std::string ptx_path() const override { return "kernels/softmax_naive.ptx"; }
+    std::string module_path() const override { return compile_result_.module_path; }
+    bool needs_compilation() const override { return true; }
+    std::string source_path() const override { return "softmax/naive.cu"; }
     std::string function_name() const override { return "softmax_naive"; }
     std::string description() const override {
         return "Naive row-wise softmax: one block per row, 3-pass (max, exp+sum, normalize)";

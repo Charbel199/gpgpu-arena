@@ -10,8 +10,8 @@ class CubScanDescriptor : public ScanDescriptorBase {
 public:
     std::string name() const override { return "cub_scan"; }
     std::string description() const override { return "CUB DeviceScan::ExclusiveSum"; }
-    std::string ptx_path() const override { return ""; }
-    bool uses_ptx() const override { return false; }
+    std::string module_path() const override { return ""; }
+    bool uses_module() const override { return false; }
     
     void allocate(Context& ctx) override {
         ScanDescriptorBase::allocate(ctx);

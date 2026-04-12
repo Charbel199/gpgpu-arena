@@ -4,7 +4,9 @@ namespace arena {
 
 struct ReduceBlockAtomic : ReduceDescriptorBase {
     std::string name() const override { return "reduce_block_atomic"; }
-    std::string ptx_path() const override { return "kernels/reduce_block_atomic.ptx"; }
+    std::string module_path() const override { return compile_result_.module_path; }
+    bool needs_compilation() const override { return true; }
+    std::string source_path() const override { return "reduce/block_atomic.cu"; }
     std::string function_name() const override { return "reduce_sum_block_atomic"; }
     std::string description() const override {
         return "SOL1: block-level shared memory atomic";

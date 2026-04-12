@@ -37,6 +37,7 @@ public:
     }
     
     void allocate(Context& ctx) override {
+        capture_device_props(ctx);
         size_data_ = n_ * sizeof(float);
         
         d_input_ = ctx.allocate(size_data_);

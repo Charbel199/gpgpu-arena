@@ -1,6 +1,5 @@
 #include "arena/kernels/reduce_base.hpp"
 #include <cuda.h>
-#include <stdexcept>
 #include <string>
 
 namespace arena {
@@ -11,17 +10,18 @@ public:
     std::string description() const override {
         return "Two-stage reduction: eliminates global atomic contention";
     }
-    std::string ptx_path() const override { return "kernels/reduce_two_stage.ptx"; }
+    std::string module_path() const override { return compile_result_.module_path; }
+    bool needs_compilation() const override { return true; }
+    std::string source_path() const override { return "reduce/two_stage.cu"; }
     std::string function_name() const override { return "reduce_sum_blocks"; }
 
-    bool uses_ptx() const override { return false; }
+    // two_stage manages its own module + two-kernel launch in execute()
+    bool uses_module() const override { return false; }
 
     KernelLoader::LaunchConfig get_launch_config() const override {
-        // this is for the first stage //TODO: Not very clean for both stages
         constexpr int blocksize = 256;
-        constexpr int sm_count = 80;
         return {
-            .grid_x = sm_count * 32,
+            .grid_x = static_cast<unsigned>(sm_count() * 32),
             .grid_y = 1, .grid_z = 1,
             .block_x = blocksize, .block_y = 1, .block_z = 1,
             .shared_mem_bytes = 33 * sizeof(float)
@@ -29,10 +29,11 @@ public:
     }
 
     void allocate(Context& ctx) override {
+        capture_device_props(ctx);
+
         size_input_ = n_ * sizeof(float);
         size_output_ = sizeof(float);
 
-        // allocate extra buffer for block results
         config1_ = get_launch_config();
         num_blocks_ = config1_.grid_x;
         size_block_results_ = num_blocks_ * sizeof(float);
@@ -41,14 +42,13 @@ public:
         d_output_ = ctx.allocate(size_output_);
         d_block_results_ = ctx.allocate(size_block_results_);
 
-        // load module and functions ONCE
+        // load module and get both stage functions
         if (!module_) {
-            module_ = loader_.load_module(ptx_path());
+            module_ = loader_.load_module(module_path());
             func_stage1_ = loader_.get_function(module_, "reduce_sum_blocks");
             func_stage2_ = loader_.get_function(module_, "reduce_sum_final");
         }
 
-        // prepare launch configs and args ONCE (all pointers are now valid)
         args1_[0] = &d_input_;
         args1_[1] = &d_block_results_;
         args1_[2] = &n_;

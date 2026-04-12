@@ -4,7 +4,9 @@ namespace arena {
 
 struct ReduceBaseline : ReduceDescriptorBase {
     std::string name() const override { return "reduce_baseline"; }
-    std::string ptx_path() const override { return "kernels/reduce_baseline.ptx"; }
+    std::string module_path() const override { return compile_result_.module_path; }
+    bool needs_compilation() const override { return true; }
+    std::string source_path() const override { return "reduce/baseline.cu"; }
     std::string function_name() const override { return "reduce_sum_baseline"; }
     std::string description() const override {
         return "Baseline: naive atomicAdd per thread";
