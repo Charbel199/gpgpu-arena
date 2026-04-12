@@ -24,6 +24,8 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip3 install --break-system-packages triton torch --index-url https://download.pytorch.org/whl/cu130 || \
     echo "triton installation failed. Triton kernels will be skipped."
+RUN pip3 install --break-system-packages cuda-tile cupy-cuda13x || \
+    echo "cuTile installation failed. cuTile kernels will be skipped."
 RUN pip3 install --break-system-packages numpy
 
 WORKDIR /workspace/gpgpu-arena

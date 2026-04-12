@@ -4,6 +4,7 @@ services:
     build: .
     volumes:
       - .:/workspace/gpgpu-arena
+      - kernel-cache:/workspace/gpgpu-arena/build/kernels
     working_dir: /workspace/gpgpu-arena
     command: bash -c "mkdir -p build && cd build && cmake -DBUILD_GUI=OFF .. && make -j$$(nproc) && ./arena --cli"
     stdin_open: true
@@ -21,6 +22,7 @@ services:
     build: .
     volumes:
       - .:/workspace/gpgpu-arena
+      - kernel-cache:/workspace/gpgpu-arena/build/kernels
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     working_dir: /workspace/gpgpu-arena
     environment:
@@ -39,3 +41,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+volumes:
+  kernel-cache:
