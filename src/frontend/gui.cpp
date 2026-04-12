@@ -612,7 +612,10 @@ void Gui::render_results_table() {
             }
 
             if (ImGuiTableSortSpecs* sort_specs = ImGui::TableGetSortSpecs()) {
-                if (sort_specs->SpecsDirty && sort_specs->SpecsCount > 0) {
+                if (sort_specs->SpecsDirty)
+                    sort_specs->SpecsDirty = false;
+
+                if (sort_specs->SpecsCount > 0) {
                     const auto& spec = sort_specs->Specs[0];
                     bool ascending = (spec.SortDirection == ImGuiSortDirection_Ascending);
 
@@ -641,7 +644,6 @@ void Gui::render_results_table() {
                             }
                             return ascending ? (cmp < 0) : (cmp > 0);
                         });
-                    sort_specs->SpecsDirty = false;
                 }
             }
 
