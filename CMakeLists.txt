@@ -11,9 +11,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
+message(STATUS "")
+message(STATUS "=== GPGPU Arena Build Configuration ===")
+message(STATUS "")
+
 include(FetchContent)
 
 find_package(CUDAToolkit REQUIRED)
+
+message(STATUS "[CUDA] Toolkit version:  ${CUDAToolkit_VERSION}")
+message(STATUS "[CUDA] nvcc:             ${CMAKE_CUDA_COMPILER}")
+message(STATUS "[CUDA] Architectures:    ${CMAKE_CUDA_ARCHITECTURES}")
+
+message(STATUS "")
+message(STATUS "[deps] Fetching dependencies ...")
 
 # --- spdlog ---
 
@@ -21,6 +32,15 @@ FetchContent_Declare(spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
     GIT_TAG v1.15.0)
 FetchContent_MakeAvailable(spdlog)
+message(STATUS "[deps]   spdlog v1.15.0")
+
+# --- nlohmann/json (header-only, used by kernel compiler) ---
+
+FetchContent_Declare(json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3)
+FetchContent_MakeAvailable(json)
+message(STATUS "[deps]   nlohmann/json v3.11.3")
 
 # --- GUI (ImGui + ImPlot) ---
 
@@ -36,16 +56,19 @@ if(BUILD_GUI)
     set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
     set(CMAKE_FIND_FRAMEWORK NEVER CACHE STRING "" FORCE)
     FetchContent_MakeAvailable(glfw)
+    message(STATUS "[deps]   GLFW 3.3.8")
 
     FetchContent_Declare(imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
         GIT_TAG v1.90.1)
     FetchContent_MakeAvailable(imgui)
+    message(STATUS "[deps]   Dear ImGui v1.90.1")
 
     FetchContent_Declare(implot
         GIT_REPOSITORY https://github.com/epezent/implot.git
         GIT_TAG v0.16)
     FetchContent_MakeAvailable(implot)
+    message(STATUS "[deps]   ImPlot v0.16")
 
     find_package(OpenGL REQUIRED)
 
@@ -81,7 +104,11 @@ set(ARENA_SOURCES
     src/main.cpp
     src/arena/context.cpp
     src/arena/kernel_loader.cpp
-    src/arena/kernel_compiler.cpp
+    src/arena/compilers/compiler_utils.cpp
+    src/arena/compilers/cuda_compiler.cpp
+    src/arena/compilers/triton_compiler.cpp
+    src/arena/compilers/cutile_compiler.cpp
+    src/arena/compilers/kernel_compiler.cpp
     src/arena/profiler.cpp
     src/arena/benchmark.cpp
     src/arena/runner.cpp
@@ -98,62 +125,24 @@ add_executable(arena ${ARENA_SOURCES})
 
 find_package(Python3 COMPONENTS Interpreter)
 
+if(Python3_FOUND)
+    message(STATUS "[Python] ${Python3_EXECUTABLE} (${Python3_VERSION})")
+else()
+    message(STATUS "[Python] Not found - Triton/cuTile kernels will fail at runtime")
+endif()
+
 target_include_directories(arena PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::nvtx3 spdlog::spdlog)
+target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::nvtx3 spdlog::spdlog nlohmann_json::nlohmann_json)
 target_compile_definitions(arena PRIVATE
     ARENA_KERNEL_DIR="${CMAKE_SOURCE_DIR}/kernels"
     ARENA_PYTHON="${Python3_EXECUTABLE}"
+    ARENA_NVCC="${CMAKE_CUDA_COMPILER}"
 )
 
 if(BUILD_GUI)
     target_link_libraries(arena PRIVATE imgui_lib)
     target_compile_definitions(arena PRIVATE ARENA_GUI_ENABLED)
 endif()
-
-# --- PTX compilation ---
-
-file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/kernels)
-file(GLOB_RECURSE KERNEL_SOURCES "${CMAKE_SOURCE_DIR}/kernels/*/*.cu")
-
-# exclude CUDA descriptors from PTX compilation (they're linked into exe, not loaded as PTX), TODO: clean up this logic
-list(FILTER KERNEL_SOURCES EXCLUDE REGEX "cub_.*\\.cu$")
-list(FILTER KERNEL_SOURCES EXCLUDE REGEX "thrust_.*\\.cu$")
-
-set(KERNEL_PTXS "")
-foreach(KERNEL_SRC ${KERNEL_SOURCES})
-    get_filename_component(KERNEL_NAME ${KERNEL_SRC} NAME_WE)
-    get_filename_component(KERNEL_DIR ${KERNEL_SRC} DIRECTORY)
-    get_filename_component(CATEGORY ${KERNEL_DIR} NAME)
-
-    set(PTX_FILE ${CMAKE_BINARY_DIR}/kernels/${CATEGORY}_${KERNEL_NAME}.ptx)
-
-    add_custom_command(
-        OUTPUT ${PTX_FILE}
-        COMMAND ${CMAKE_CUDA_COMPILER} -ptx -arch=native -o ${PTX_FILE} ${KERNEL_SRC}
-        DEPENDS ${KERNEL_SRC}
-        COMMENT "${CATEGORY}/${KERNEL_NAME}.cu -> ptx"
-    )
-    
-    list(APPEND KERNEL_PTXS ${PTX_FILE})
-endforeach()
-
-add_custom_target(kernels ALL DEPENDS ${KERNEL_PTXS})
-add_dependencies(arena kernels)
-
-
-# --- info ---
-
-message(STATUS "Kernel descriptors:")
-foreach(DESC ${KERNEL_DESCRIPTORS})
-    get_filename_component(DESC_NAME ${DESC} NAME)
-    message(STATUS "  ${DESC_NAME}")
-endforeach()
-
-message(STATUS "Kernel sources:")
-foreach(SRC ${KERNEL_SOURCES})
-    get_filename_component(SRC_REL ${SRC} NAME)
-    message(STATUS "  ${SRC_REL}")
-endforeach()
 
 # --- defaults ---
 
@@ -163,3 +152,28 @@ endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+
+# --- info ---
+
+list(LENGTH KERNEL_DESCRIPTORS NUM_DESCRIPTORS)
+list(LENGTH CUDA_DESCRIPTORS NUM_CUDA_DESCRIPTORS)
+
+message(STATUS "")
+message(STATUS "[kernels] Found ${NUM_DESCRIPTORS} kernel descriptors + ${NUM_CUDA_DESCRIPTORS} CUDA runtime descriptors:")
+foreach(DESC ${KERNEL_DESCRIPTORS})
+    get_filename_component(DESC_NAME ${DESC} NAME)
+    message(STATUS "[kernels]   ${DESC_NAME}")
+endforeach()
+foreach(DESC ${CUDA_DESCRIPTORS})
+    get_filename_component(DESC_NAME ${DESC} NAME)
+    message(STATUS "[kernels]   ${DESC_NAME} (CUDA runtime)")
+endforeach()
+
+message(STATUS "")
+message(STATUS "=== Build Summary ===")
+message(STATUS "  Build type:    ${CMAKE_BUILD_TYPE}")
+message(STATUS "  C++ compiler:  ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "  CUDA compiler: ${CMAKE_CUDA_COMPILER_ID} ${CMAKE_CUDA_COMPILER_VERSION}")
+message(STATUS "  GUI:           ${BUILD_GUI}")
+message(STATUS "  Kernel dir:    ${CMAKE_SOURCE_DIR}/kernels")
+message(STATUS "")
