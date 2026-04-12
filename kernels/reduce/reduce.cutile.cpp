@@ -17,7 +17,8 @@ public:
         return {
             .grid_x = static_cast<unsigned>((n_ + tile_size - 1) / tile_size),
             .grid_y = 1, .grid_z = 1,
-            .block_x = 1, .block_y = 1, .block_z = 1,  // cuTile manages threads internally
+            .block_x = static_cast<unsigned>(compile_result_.block_dim > 0 ? compile_result_.block_dim : 128),
+            .block_y = 1, .block_z = 1,
             .shared_mem_bytes = 0
         };
     }
@@ -33,11 +34,11 @@ public:
         arg_output_ptr_    = d_output_;
         arg_output_shape_  = 1u;
         arg_output_stride_ = 1u;
-        arg_padding_       = 0u;
+        arg_const_tile_sz_ = static_cast<uint32_t>(compile_result_.constants.at("TILE_SIZE"));
         return {
             &arg_input_ptr_, &arg_input_shape_, &arg_input_stride_,
             &arg_output_ptr_, &arg_output_shape_, &arg_output_stride_,
-            &arg_padding_
+            &arg_const_tile_sz_
         };
     }
 
@@ -45,7 +46,7 @@ private:
     uint64_t arg_input_ptr_ = 0, arg_output_ptr_ = 0;
     uint32_t arg_input_shape_ = 0, arg_input_stride_ = 0;
     uint32_t arg_output_shape_ = 0, arg_output_stride_ = 0;
-    uint32_t arg_padding_ = 0;
+    uint32_t arg_const_tile_sz_ = 0;
 };
 
 REGISTER_KERNEL(CuTileReduceDescriptor);

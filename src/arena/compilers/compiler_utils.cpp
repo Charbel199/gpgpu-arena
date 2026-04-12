@@ -50,6 +50,7 @@ CompileResult result_from_json(const nlohmann::json& j, const std::string& modul
     result.num_warps     = j.value("num_warps", 4);
     result.shared_memory = j.value("shared_memory", 0);
     result.num_params    = j.value("num_params", 3);
+    result.block_dim     = j.value("block_dim", 0);
 
     if (j.contains("constants") && j["constants"].is_object()) {
         for (auto& [key, val] : j["constants"].items()) {

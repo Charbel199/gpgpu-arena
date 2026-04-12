@@ -11,6 +11,7 @@ struct CompileResult {
     int num_warps = 4;
     int shared_memory = 0;
     int num_params = 3;
+    int block_dim = 0;          // cuTile: threads per block (0 = not set)
     std::map<std::string, int> constants;
 };
 

@@ -114,6 +114,7 @@ void KernelCompiler::save_disk_cache(const std::string& source_path,
     j["num_warps"]     = result.num_warps;
     j["shared_memory"] = result.shared_memory;
     j["num_params"]    = result.num_params;
+    j["block_dim"]     = result.block_dim;
     j["constants"]     = result.constants;
 
     if (fs::exists(source_full)) {

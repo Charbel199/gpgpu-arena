@@ -10,9 +10,25 @@ from cuda.tile._compile import compile_tile, CompilerOptions, default_tile_conte
 
 
 def compile_kernel(kernel_fn, dummy_args):
-    # compile a cuTile kernel to cubin via tileiras. Returns (kernel_name, cubin_path)
+    """Compile a cuTile kernel to cubin. Returns (kernel_name, cubin_path, block_dim)."""
     lib = compile_tile(kernel_fn._pyfunc, dummy_args, CompilerOptions(), default_tile_context)
-    return lib.func_name, str(lib.fname_cubin)
+
+    # extract block size from the compiled cubin via CUDA driver API
+    block_dim = 128  # fallback
+    try:
+        from cuda.bindings import driver as drv
+        cubin_bytes = Path(lib.fname_cubin).read_bytes()
+        err, mod = drv.cuModuleLoadData(cubin_bytes)
+        err, func = drv.cuModuleGetFunction(mod, lib.func_name.encode())
+        err, max_threads = drv.cuFuncGetAttribute(
+            drv.CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, func)
+        if max_threads > 0:
+            block_dim = max_threads
+        drv.cuModuleUnload(mod)
+    except Exception as e:
+        print(f"[cutile] Could not query block_dim, using {block_dim}: {e}", file=sys.stderr)
+
+    return lib.func_name, str(lib.fname_cubin), block_dim
 
 
 def main(kernel_fn, dummy_args, constants=None):
@@ -23,7 +39,7 @@ def main(kernel_fn, dummy_args, constants=None):
 
     try:
         print(f"[cutile] Compiling {args.output_name} ...", file=sys.stderr)
-        kernel_name, cubin_path = compile_kernel(kernel_fn, dummy_args)
+        kernel_name, cubin_path, block_dim = compile_kernel(kernel_fn, dummy_args)
     except Exception as e:
         print(f"[cutile] Compilation failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -38,7 +54,8 @@ def main(kernel_fn, dummy_args, constants=None):
     # count params: the non-Constant args are the real kernel params
     num_params = sum(1 for a in dummy_args if not isinstance(a, int))
 
-    print(f"[cutile] {args.output_name} -> {output_cubin} (kernel={kernel_name})", file=sys.stderr)
+    print(f"[cutile] {args.output_name} -> {output_cubin} "
+          f"(kernel={kernel_name}, block_dim={block_dim})", file=sys.stderr)
 
     # JSON metadata to stdout - parsed by KernelCompiler on the C++ side
     print(json.dumps({
@@ -46,5 +63,6 @@ def main(kernel_fn, dummy_args, constants=None):
         "num_warps": 0,
         "shared_memory": 0,
         "num_params": num_params,
+        "block_dim": block_dim,
         "constants": constants or {},
     }))
