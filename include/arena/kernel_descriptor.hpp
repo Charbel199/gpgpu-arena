@@ -2,7 +2,7 @@
 
 #include "arena/context.hpp"
 #include "arena/kernel_loader.hpp"
-#include "arena/kernel_compiler.hpp"
+#include "arena/compilers/compiler.hpp"
 #include <string>
 #include <vector>
 #include <map>
@@ -22,12 +22,13 @@ public:
     virtual std::string name() const = 0;
     virtual std::string category() const = 0;
     virtual std::string description() const = 0;
-    virtual std::string ptx_path() const = 0;
+    virtual std::string module_path() const = 0;
     virtual std::string function_name() const = 0;
     
     // problem configuration
     virtual std::vector<std::string> get_parameter_names() const = 0;
     virtual void set_problem_size(const std::map<std::string, int>& params) = 0;
+    virtual std::vector<std::map<std::string, int>> get_sweep_configs() const { return {}; }
     
     // memory management (through the context class)
     virtual void allocate(Context& ctx) = 0;
@@ -37,7 +38,7 @@ public:
     // kernel launch configuration
     virtual KernelLoader::LaunchConfig get_launch_config() const = 0;
     virtual std::vector<void*> get_kernel_args() = 0;
-    
+
     // calculate speed of light metrics
     virtual double calculate_flops() const = 0;
     virtual double calculate_bytes_accessed() const = 0;
@@ -46,8 +47,8 @@ public:
     virtual bool verify(Context& ctx) { return true; }
 
 
-    // run ptx or cpp code
-    virtual bool uses_ptx() const { return true; }
+    // run cubin or cpp code
+    virtual bool uses_module() const { return true; }
     virtual void execute(Context& ctx) {
         throw std::runtime_error("execute() not implemented for this kernel");
     }

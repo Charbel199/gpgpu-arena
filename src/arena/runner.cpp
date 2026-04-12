@@ -29,15 +29,16 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
 
         CUmodule module = nullptr;
         CUfunction func = nullptr;
-        if (desc.uses_ptx()) {
-            module = loader_.load_module(desc.ptx_path());
+        if (desc.uses_module()) {
+            module = loader_.load_module(desc.module_path());
             func = loader_.get_function(module, desc.function_name());
         }
         desc.allocate(ctx_);
         desc.initialize(ctx_);
 
         auto launch_config = desc.get_launch_config();
-        log->debug("Launch config: grid=({},{},{}), block=({},{},{}), shmem={} B",
+        log->debug("{} launch config: grid({},{},{}) block({},{},{}) shmem={}B",
+            result.kernel_name,
             launch_config.grid_x, launch_config.grid_y, launch_config.grid_z,
             launch_config.block_x, launch_config.block_y, launch_config.block_z,
             launch_config.shared_mem_bytes);
@@ -50,10 +51,9 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         result.block_z = launch_config.block_z;
         result.shared_mem_bytes = launch_config.shared_mem_bytes;
 
-        auto args = desc.get_kernel_args();
-
         auto launch_kernel = [&]() {
-            if (desc.uses_ptx()) {
+            if (desc.uses_module()) {
+                auto args = desc.get_kernel_args();
                 loader_.launch(func, launch_config, args.data());
             } else {
                 desc.execute(ctx_);
@@ -61,7 +61,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         };
 
         // warmup
-        log->debug("Warmup: {} runs", config.warmup_runs);
+        log->info("{}: warming up ({} runs) ...", result.kernel_name, config.warmup_runs);
         for (int i = 0; i < config.warmup_runs; i++) {
             launch_kernel();
         }
@@ -71,7 +71,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         desc.initialize(ctx_);
 
         // benchmark
-        log->info("[BENCHMARK] {} - {} runs", result.kernel_name, config.number_of_runs);
+        log->info("{}: benchmarking ({} runs) ...", result.kernel_name, config.number_of_runs);
 
         nvtxRangePushA(("BENCHMARK: " + result.kernel_name).c_str());
         auto bench_result = benchmark_.run(launch_kernel, config.number_of_runs,
@@ -85,19 +85,19 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         auto activity = profiler_.collect_activity(launch_kernel);
         result.kernel_ms = activity.kernel_time_ms;
         result.sub_kernels = activity.sub_kernels;
-        result.uses_ptx = desc.uses_ptx();
+        result.uses_module = desc.uses_module();
 
         double flops = desc.calculate_flops();
         double bytes = desc.calculate_bytes_accessed();
         result.gflops = (flops / (result.elapsed_ms / 1000.0)) / 1e9;
         result.bandwidth_gbps = (bytes / (result.elapsed_ms / 1000.0)) / 1e9;
 
-        log->info("[BENCHMARK] {} - wall={:.3f} ms kernel={:.3f} ms | {:.2f} GFLOPS | {:.2f} GB/s",
+        log->info("{}: wall={:.3f} ms  kernel={:.3f} ms  {:.2f} GFLOPS  {:.2f} GB/s",
             result.kernel_name, result.elapsed_ms, result.kernel_ms, result.gflops, result.bandwidth_gbps);
 
         // profile
         if (config.collect_metrics) {
-            log->info("[PROFILER]  {} - collecting hardware counters", result.kernel_name);
+            log->info("{}: collecting hardware counters ...", result.kernel_name);
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
             desc.initialize(ctx_);
 
@@ -121,7 +121,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
                 result.ipc = mv.at(metric::IPC);
             }
 
-            log->info("[PROFILER]  {} - {} regs | {} B shmem | occupancy={:.1f}% | DRAM R={:.2f} W={:.2f} GB/s | IPC={:.2f}",
+            log->info("{}: regs={} shmem={}B occupancy={:.1f}% DRAM(R={:.2f} W={:.2f} GB/s) IPC={:.2f}",
                 result.kernel_name, result.registers_per_thread, result.shared_memory_bytes,
                 result.achieved_occupancy * 100.0,
                 result.dram_read_gbps, result.dram_write_gbps, result.ipc);
@@ -130,14 +130,16 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
 
         // verification (per kernel)
         result.verified = desc.verify(ctx_);
-        if (!result.verified) {
-            log->warn("{} failed verification", result.kernel_name);
+        if (result.verified) {
+            log->info("{}: verification passed", result.kernel_name);
+        } else {
+            log->warn("{}: verification FAILED", result.kernel_name);
         }
         desc.cleanup(ctx_);
         result.success = true;
 
     } catch (const std::exception& e) {
-        log->error("{} failed: {}", result.kernel_name, e.what());
+        log->error("{}: {}", result.kernel_name, e.what());
         result.success = false;
         result.error = e.what();
         try { desc.cleanup(ctx_); } catch (...) {}
@@ -146,11 +148,12 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         try {
             CUresult ctx_status = cuCtxSynchronize();
             if (ctx_status != CUDA_SUCCESS) {
+                log->warn("{}: CUDA context is in error state, resetting ...", result.kernel_name);
                 loader_.unload_all();
                 ctx_.reset();
             }
         } catch (...) {
-            log->error("Failed to recover CUDA context, subsequent kernels may fail");
+            log->error("{}: failed to recover CUDA context, subsequent kernels may fail", result.kernel_name);
         }
     }
 

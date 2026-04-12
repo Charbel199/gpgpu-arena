@@ -3,7 +3,10 @@
 
 #include "arena/context.hpp"
 #include "arena/kernel_loader.hpp"
-#include "arena/kernel_compiler.hpp"
+#include "arena/compilers/kernel_compiler.hpp"
+#include "arena/compilers/cuda_compiler.hpp"
+#include "arena/compilers/triton_compiler.hpp"
+#include "arena/compilers/cutile_compiler.hpp"
 #include "arena/benchmark.hpp"
 #include "arena/profiler.hpp"
 #include "arena/runner.hpp"
@@ -55,14 +58,33 @@ int main(int argc, char** argv) {
     arena::init_logging();
 
     try {
+        spdlog::info("Initializing CUDA context ...");
         arena::Context ctx(0);
+
+        spdlog::info("Setting up kernel compiler (kernel dir: {}) ...", ARENA_KERNEL_DIR);
         arena::KernelLoader loader;
         arena::KernelCompiler compiler("kernels");
+        compiler.register_compiler(".cu",
+            std::make_unique<arena::CudaCompiler>(ARENA_KERNEL_DIR));
         compiler.register_compiler(".triton.py",
             std::make_unique<arena::TritonCompiler>(ARENA_KERNEL_DIR));
+        compiler.register_compiler(".cutile.py",
+            std::make_unique<arena::CuTileCompiler>(ARENA_KERNEL_DIR));
+
         arena::Benchmark benchmark;
         arena::Profiler profiler;
         arena::Runner runner(ctx, loader, compiler, benchmark, profiler);
+
+        auto categories = runner.get_categories();
+        auto all_kernels = runner.get_all_kernels();
+        spdlog::info("Registered {} kernels across {} categories",
+            all_kernels.size(), categories.size());
+        for (const auto& cat : categories) {
+            auto kernels = runner.get_kernels_by_category(cat);
+            spdlog::info("  {} - {} kernels", cat, kernels.size());
+        }
+
+        spdlog::info("Starting {} mode", use_gui ? "GUI" : "CLI");
 
 #ifdef ARENA_GUI_ENABLED
         if (use_gui) {
@@ -72,7 +94,7 @@ int main(int argc, char** argv) {
         return frontend::run_cli(runner);
 
     } catch (const std::exception& e) {
-        spdlog::error("{}", e.what());
+        spdlog::error("Fatal: {}", e.what());
         return 1;
     }
 }

@@ -2,7 +2,7 @@
 
 #include "arena/context.hpp"
 #include "arena/kernel_loader.hpp"
-#include "arena/kernel_compiler.hpp"
+#include "arena/compilers/kernel_compiler.hpp"
 #include "arena/benchmark.hpp"
 #include "arena/profiler.hpp"
 #include "arena/kernel_descriptor.hpp"
@@ -26,7 +26,7 @@ struct RunResult {
     std::string description;
 
     // launch type
-    bool uses_ptx = false;          // true = PTX (driver API), false = compiled (runtime API, e.g. CUB)
+    bool uses_module = false;       // true = cubin (driver API), false = compiled (runtime API, e.g. CUB)
 
     // launch config
     unsigned int grid_x = 0, grid_y = 0, grid_z = 0;
@@ -70,6 +70,7 @@ public:
     std::vector<KernelDescriptor*> get_all_kernels() const;
 
     const Context& context() const { return ctx_; }
+    KernelCompiler& compiler() { return compiler_; }
 
 private:
     Context& ctx_;
