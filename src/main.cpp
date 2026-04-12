@@ -7,6 +7,7 @@
 #include "arena/compilers/cuda_compiler.hpp"
 #include "arena/compilers/triton_compiler.hpp"
 #include "arena/compilers/cutile_compiler.hpp"
+#include "arena/compilers/warp_compiler.hpp"
 #include "arena/benchmark.hpp"
 #include "arena/profiler.hpp"
 #include "arena/runner.hpp"
@@ -70,6 +71,8 @@ int main(int argc, char** argv) {
             std::make_unique<arena::TritonCompiler>(ARENA_KERNEL_DIR));
         compiler.register_compiler(".cutile.py",
             std::make_unique<arena::CuTileCompiler>(ARENA_KERNEL_DIR));
+        compiler.register_compiler(".warp.py",
+            std::make_unique<arena::WarpCompiler>(ARENA_KERNEL_DIR));
 
         arena::Benchmark benchmark;
         arena::Profiler profiler;

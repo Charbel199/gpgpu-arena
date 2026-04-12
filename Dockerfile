@@ -26,6 +26,8 @@ RUN pip3 install --break-system-packages triton torch --index-url https://downlo
     echo "triton installation failed. Triton kernels will be skipped."
 RUN pip3 install --break-system-packages cuda-tile cupy-cuda13x || \
     echo "cuTile installation failed. cuTile kernels will be skipped."
+RUN pip3 install --break-system-packages warp-lang || \
+    echo "Warp installation failed. Warp kernels will be skipped."
 RUN pip3 install --break-system-packages numpy
 
 WORKDIR /workspace/gpgpu-arena

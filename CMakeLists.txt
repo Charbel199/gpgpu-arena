@@ -108,6 +108,7 @@ set(ARENA_SOURCES
     src/arena/compilers/cuda_compiler.cpp
     src/arena/compilers/triton_compiler.cpp
     src/arena/compilers/cutile_compiler.cpp
+    src/arena/compilers/warp_compiler.cpp
     src/arena/compilers/kernel_compiler.cpp
     src/arena/profiler.cpp
     src/arena/benchmark.cpp

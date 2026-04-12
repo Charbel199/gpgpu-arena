@@ -37,12 +37,17 @@ CUfunction KernelLoader::get_function(CUmodule module, const std::string& kernel
 }
 
 KernelLoader::LaunchResult KernelLoader::launch(
-    CUfunction func, 
-    const LaunchConfig& config, 
+    CUfunction func,
+    const LaunchConfig& config,
     void** args
 ) {
-    // TODO: I don't like this, we will probably only use the reference output result to check its validity
-    // BenchmarkResult contains all of the meaningful benchmarking results, so might removed this struct and return values 
+    // opt into dynamic shared memory >48KB (required for large tile sizes)
+    if (config.shared_mem_bytes > 48 * 1024) {
+        cuFuncSetAttribute(func,
+            CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            config.shared_mem_bytes);
+    }
+
     LaunchResult result;
     result.result = cuLaunchKernel(
         func,
