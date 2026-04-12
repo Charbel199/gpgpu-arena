@@ -2,6 +2,7 @@
 
 #include "arena/context.hpp"
 #include "arena/kernel_loader.hpp"
+#include "arena/kernel_compiler.hpp"
 #include <string>
 #include <vector>
 #include <map>
@@ -45,11 +46,19 @@ public:
     virtual bool verify(Context& ctx) { return true; }
 
 
-    // run ptx or cpp code 
+    // run ptx or cpp code
     virtual bool uses_ptx() const { return true; }
-    virtual void execute(Context& ctx) { 
-        throw std::runtime_error("execute() not implemented for this kernel"); 
+    virtual void execute(Context& ctx) {
+        throw std::runtime_error("execute() not implemented for this kernel");
     }
+
+    // runtime compilation (override for DSL kernels like Triton)
+    virtual bool needs_compilation() const { return false; }
+    virtual std::string source_path() const { return ""; }
+    void set_compile_result(const CompileResult& result) { compile_result_ = result; }
+
+protected:
+    CompileResult compile_result_;
 };
 
 

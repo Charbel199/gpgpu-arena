@@ -6,8 +6,10 @@
 
 namespace arena {
 
-Runner::Runner(Context& ctx, KernelLoader& loader, Benchmark& benchmark, Profiler& profiler)
-    : ctx_(ctx), loader_(loader), benchmark_(benchmark), profiler_(profiler) {}
+Runner::Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
+               Benchmark& benchmark, Profiler& profiler)
+    : ctx_(ctx), loader_(loader), compiler_(compiler),
+      benchmark_(benchmark), profiler_(profiler) {}
 
 RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     RunResult result;
@@ -19,6 +21,11 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
 
     try {
         desc.set_problem_size(config.params);
+
+        // runtime compilation for DSL kernels
+        if (desc.needs_compilation()) {
+            desc.set_compile_result(compiler_.compile(desc.source_path()));
+        }
 
         CUmodule module = nullptr;
         CUfunction func = nullptr;

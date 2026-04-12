@@ -3,6 +3,7 @@
 
 #include "arena/context.hpp"
 #include "arena/kernel_loader.hpp"
+#include "arena/kernel_compiler.hpp"
 #include "arena/benchmark.hpp"
 #include "arena/profiler.hpp"
 #include "arena/runner.hpp"
@@ -56,9 +57,12 @@ int main(int argc, char** argv) {
     try {
         arena::Context ctx(0);
         arena::KernelLoader loader;
+        arena::KernelCompiler compiler("kernels");
+        compiler.register_compiler(".triton.py",
+            std::make_unique<arena::TritonCompiler>(ARENA_KERNEL_DIR));
         arena::Benchmark benchmark;
         arena::Profiler profiler;
-        arena::Runner runner(ctx, loader, benchmark, profiler);
+        arena::Runner runner(ctx, loader, compiler, benchmark, profiler);
 
 #ifdef ARENA_GUI_ENABLED
         if (use_gui) {

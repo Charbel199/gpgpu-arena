@@ -24,6 +24,7 @@ inline void init_logging() {
     auto default_logger = make_logger("arena");
     make_logger("context");
     make_logger("loader");
+    make_logger("compiler");
     make_logger("profiler");
     make_logger("benchmark");
     make_logger("runner");

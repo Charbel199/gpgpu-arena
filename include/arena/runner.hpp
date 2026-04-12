@@ -2,6 +2,7 @@
 
 #include "arena/context.hpp"
 #include "arena/kernel_loader.hpp"
+#include "arena/kernel_compiler.hpp"
 #include "arena/benchmark.hpp"
 #include "arena/profiler.hpp"
 #include "arena/kernel_descriptor.hpp"
@@ -56,7 +57,8 @@ struct RunResult {
 
 class Runner {
 public:
-    Runner(Context& ctx, KernelLoader& loader, Benchmark& benchmark, Profiler& profiler);
+    Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
+           Benchmark& benchmark, Profiler& profiler);
 
     RunResult run(KernelDescriptor& descriptor, const RunConfig& config);
 
@@ -72,6 +74,7 @@ public:
 private:
     Context& ctx_;
     KernelLoader& loader_;
+    KernelCompiler& compiler_;
     Benchmark& benchmark_;
     Profiler& profiler_;
 };
