@@ -146,14 +146,15 @@ void Gui::benchmark_thread_func(
         PendingResult pr;
         pr.category = cat;
         pr.kernel_name = descriptor->name();
-        pr.logs.push_back({LogEntry::INFO, "[BENCHMARK] Running " + descriptor->name() + "..."});
+        pr.params = config.params;
+        pr.logs.push_back({LogEntry::INFO, "Running " + descriptor->name() + " ..."});
 
         pr.result = runner_.run(*descriptor, config);
 
         if (pr.result.success) {
             char buf[256];
             bool is_matmul = (cat == "matmul");
-            snprintf(buf, sizeof(buf), "[BENCHMARK] %s - wall=%.3f ms gpu=%.3f ms | %.2f %s",
+            snprintf(buf, sizeof(buf), "%s: wall=%.3f ms  kernel=%.3f ms  %.2f %s",
                 pr.result.kernel_name.c_str(),
                 pr.result.elapsed_ms,
                 pr.result.kernel_ms,
@@ -163,7 +164,7 @@ void Gui::benchmark_thread_func(
 
             if (config.collect_metrics && pr.result.achieved_occupancy > 0) {
                 snprintf(buf, sizeof(buf),
-                    "[PROFILER]  %s - %d regs | %d B shmem | occupancy=%.1f%% | IPC=%.2f",
+                    "%s: regs=%d  shmem=%dB  occupancy=%.1f%%  IPC=%.2f",
                     pr.result.kernel_name.c_str(),
                     pr.result.registers_per_thread,
                     pr.result.shared_memory_bytes,
@@ -173,10 +174,10 @@ void Gui::benchmark_thread_func(
             }
 
             if (!pr.result.verified) {
-                pr.logs.push_back({LogEntry::WARN, pr.result.kernel_name + " failed verification"});
+                pr.logs.push_back({LogEntry::WARN, pr.result.kernel_name + ": verification FAILED"});
             }
         } else {
-            pr.logs.push_back({LogEntry::ERR, pr.result.kernel_name + " failed: " + pr.result.error});
+            pr.logs.push_back({LogEntry::ERR, pr.result.kernel_name + ": " + pr.result.error});
         }
 
         {
@@ -218,9 +219,9 @@ void Gui::drain_pending_results() {
 
         if (pr.result.success) {
             int problem_size;
-            if (pr.category == "matmul") problem_size = config_.params["M"];
-            else if (pr.category == "softmax") problem_size = config_.params["rows"];
-            else problem_size = config_.params["n"];
+            if (pr.category == "matmul") problem_size = pr.params.count("M") ? pr.params.at("M") : 0;
+            else if (pr.category == "softmax") problem_size = pr.params.count("rows") ? pr.params.at("rows") : 0;
+            else problem_size = pr.params.count("n") ? pr.params.at("n") : 0;
 
             auto& hist = scaling_history_[pr.category][pr.kernel_name];
             // replace existing entry for same problem size
@@ -367,11 +368,20 @@ void Gui::render_frame() {
 void Gui::render_device_info() {
     const auto& ctx = runner_.context();
     ImGui::Text("GPU: %s", ctx.device_name().c_str());
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 200 * ui_scale_);
-    ImGui::Text("SM %d.%d | %zu MB",
-        ctx.compute_capability_major(),
-        ctx.compute_capability_minor(),
-        ctx.total_memory() / (1024 * 1024));
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 250 * ui_scale_);
+
+    size_t mem_mb = ctx.total_memory() / (1024 * 1024);
+    if (mem_mb >= 1024) {
+        ImGui::Text("sm_%d%d | %d SMs | %.1f GB VRAM",
+            ctx.compute_capability_major(), ctx.compute_capability_minor(),
+            ctx.sm_count(),
+            mem_mb / 1024.0f);
+    } else {
+        ImGui::Text("sm_%d%d | %d SMs | %zu MB VRAM",
+            ctx.compute_capability_major(), ctx.compute_capability_minor(),
+            ctx.sm_count(),
+            mem_mb);
+    }
 }
 
 void Gui::render_category_selector() {
@@ -540,6 +550,36 @@ void Gui::render_controls() {
         if (ImGui::Button(btn_label, ImVec2(-1, 35 * ui_scale_))) {
             run_selected_kernels();
         }
+
+        snprintf(btn_label, sizeof(btn_label), "Run Sweep (%d)", selected_count);
+        if (ImGui::Button(btn_label, ImVec2(-1, 35 * ui_scale_))) {
+            run_sweep();
+        }
+        if (ImGui::IsItemHovered()) {
+            // Build tooltip showing sweep sizes from the first selected kernel
+            if (auto* kernels = current_kernels()) {
+                for (const auto& k : *kernels) {
+                    if (k.selected && k.descriptor) {
+                        auto configs = k.descriptor->get_sweep_configs();
+                        if (!configs.empty()) {
+                            ImGui::BeginTooltip();
+                            ImGui::Text("Run all selected kernels at %zu sizes:", configs.size());
+                            ImGui::Separator();
+                            for (const auto& cfg : configs) {
+                                std::string label;
+                                for (const auto& [key, val] : cfg) {
+                                    if (!label.empty()) label += ", ";
+                                    label += key + "=" + std::to_string(val);
+                                }
+                                ImGui::BulletText("%s", label.c_str());
+                            }
+                            ImGui::EndTooltip();
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         ImGui::EndDisabled();
     }
 
@@ -554,6 +594,13 @@ void Gui::render_controls() {
     ImGui::BeginDisabled(!has_results || benchmark_running_);
     if (ImGui::Button("Reset Results", ImVec2(-1, 30 * ui_scale_))) {
         reset_results();
+    }
+    ImGui::EndDisabled();
+
+    ImGui::BeginDisabled(benchmark_running_);
+    if (ImGui::Button("Clear Kernel Cache", ImVec2(-1, 30 * ui_scale_))) {
+        runner_.compiler().clear_cache();
+        log(LogEntry::INFO, "Kernel cache cleared - kernels will recompile on next run");
     }
     ImGui::EndDisabled();
 }
@@ -653,12 +700,12 @@ void Gui::render_results_table() {
                 ImGui::TableNextRow();
 
                 ImGui::TableNextColumn();
-                ImGui::Text("%s %s", k.result.uses_ptx ? "[PTX]" : "[RT]", k.result.kernel_name.c_str());
+                ImGui::Text("%s %s", k.result.uses_module ? "[CUBIN]" : "[RT]", k.result.kernel_name.c_str());
                 if (ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
                     ImGui::Text("%s", k.result.description.c_str());
                     ImGui::Separator();
-                    ImGui::Text("Type: %s", k.result.uses_ptx ? "PTX (Driver API)" : "Compiled (Runtime API)");
+                    ImGui::Text("Type: %s", k.result.uses_module ? "cubin (Driver API)" : "Compiled (Runtime API)");
                     if (!k.result.sub_kernels.empty()) {
                         ImGui::Text("GPU Kernels (%zu):", k.result.sub_kernels.size());
                         for (const auto& sk : k.result.sub_kernels) {
@@ -968,6 +1015,108 @@ void Gui::run_selected_kernels() {
     benchmark_total_ = (int)work.size();
 
     benchmark_thread_ = std::thread(&Gui::benchmark_thread_func, this, std::move(work), config_);
+}
+
+void Gui::run_sweep() {
+    if (current_category_.empty()) return;
+    if (benchmark_running_) return;
+
+    auto it = kernels_by_category_.find(current_category_);
+    if (it == kernels_by_category_.end()) return;
+
+    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work;
+    for (auto& k : it->second) {
+        if (k.selected && k.descriptor) {
+            work.push_back({current_category_, k.descriptor});
+        }
+    }
+    if (work.empty()) return;
+
+    // Get sweep configs from the first selected kernel (all share the same base)
+    auto sweep_configs = work[0].second->get_sweep_configs();
+    if (sweep_configs.empty()) {
+        log(LogEntry::WARN, "No sweep configs defined for this category");
+        return;
+    }
+
+    if (benchmark_thread_.joinable()) {
+        benchmark_thread_.join();
+    }
+
+    cancel_requested_ = false;
+    benchmark_running_ = true;
+    benchmark_current_ = 0;
+    benchmark_total_ = (int)(work.size() * sweep_configs.size());
+
+    benchmark_thread_ = std::thread(&Gui::sweep_thread_func, this,
+        std::move(work), std::move(sweep_configs), config_);
+}
+
+void Gui::sweep_thread_func(
+    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
+    std::vector<std::map<std::string, int>> sweep_configs,
+    arena::RunConfig config)
+{
+    // Push CUDA context for this thread
+    CUcontext ctx = runner_.context().handle();
+    cuCtxPushCurrent(ctx);
+
+    int i = 0;
+    for (const auto& params : sweep_configs) {
+        if (cancel_requested_) break;
+
+        config.params = params;
+
+        for (auto& [cat, descriptor] : work) {
+            if (cancel_requested_) break;
+
+            benchmark_current_ = i++;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                benchmark_current_name_ = descriptor->name();
+            }
+
+            PendingResult pr;
+            pr.category = cat;
+            pr.kernel_name = descriptor->name();
+            pr.params = params;
+
+            // Build a label for the size
+            std::string size_str;
+            for (auto& [k, v] : params) {
+                if (!size_str.empty()) size_str += ",";
+                size_str += k + "=" + std::to_string(v);
+            }
+            pr.logs.push_back({LogEntry::INFO, "Sweep " + descriptor->name() + " [" + size_str + "] ..."});
+
+            pr.result = runner_.run(*descriptor, config);
+
+            if (pr.result.success) {
+                char buf[256];
+                bool is_matmul = (cat == "matmul");
+                snprintf(buf, sizeof(buf), "%s [%s]: wall=%.3f ms  %.2f %s",
+                    pr.result.kernel_name.c_str(), size_str.c_str(),
+                    pr.result.elapsed_ms,
+                    is_matmul ? pr.result.gflops : pr.result.bandwidth_gbps,
+                    is_matmul ? "GFLOPS" : "GB/s");
+                pr.logs.push_back({LogEntry::INFO, buf});
+            } else {
+                pr.logs.push_back({LogEntry::ERR, pr.result.kernel_name + ": " + pr.result.error});
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                pending_results_.push_back(std::move(pr));
+            }
+        }
+    }
+
+    benchmark_current_ = (int)(work.size() * sweep_configs.size());
+
+    CUcontext popped;
+    cuCtxPopCurrent(&popped);
+
+    benchmark_running_ = false;
 }
 
 void Gui::reset_results() {

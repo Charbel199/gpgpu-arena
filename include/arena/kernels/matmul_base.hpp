@@ -16,6 +16,19 @@ public:
         return {"M", "K", "N"};
     }
 
+    std::vector<std::map<std::string, int>> get_sweep_configs() const override {
+        return {
+            {{"M", 64},   {"K", 64},   {"N", 64}},
+            {{"M", 128},  {"K", 128},  {"N", 128}},
+            {{"M", 256},  {"K", 256},  {"N", 256}},
+            {{"M", 512},  {"K", 512},  {"N", 512}},
+            {{"M", 1024}, {"K", 1024}, {"N", 1024}},
+            {{"M", 2048}, {"K", 2048}, {"N", 2048}},
+            {{"M", 4096}, {"K", 4096}, {"N", 4096}},
+            {{"M", 8192}, {"K", 8192}, {"N", 8192}},
+        };
+    }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         M_ = params.count("M") ? params.at("M") : 1024;
         K_ = params.count("K") ? params.at("K") : M_;

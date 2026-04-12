@@ -18,6 +18,19 @@ public:
         return {"rows", "cols"};
     }
 
+    std::vector<std::map<std::string, int>> get_sweep_configs() const override {
+        return {
+            {{"rows", 64},   {"cols", 64}},
+            {{"rows", 128},  {"cols", 128}},
+            {{"rows", 256},  {"cols", 256}},
+            {{"rows", 512},  {"cols", 512}},
+            {{"rows", 1024}, {"cols", 1024}},
+            {{"rows", 2048}, {"cols", 2048}},
+            {{"rows", 4096}, {"cols", 4096}},
+            {{"rows", 8192}, {"cols", 8192}},
+        };
+    }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         rows_ = params.count("rows") ? params.at("rows") : 1024;
         cols_ = params.count("cols") ? params.at("cols") : 1024;
@@ -83,7 +96,7 @@ public:
                 float rel_err = std::abs(out_row[c] - expected) / (expected + 1e-8f);
                 if (rel_err > 1e-3f) {
                     spdlog::get("verify")->warn(
-                        "row {} col {}: got {}, expected {}", r, c, out_row[c], expected);
+                        "softmax: row {} col {}: got {}, expected {}", r, c, out_row[c], expected);
                     return false;
                 }
             }
@@ -92,7 +105,7 @@ public:
             float sum = 0.0f;
             for (int c = 0; c < cols_; c++) sum += out_row[c];
             if (std::abs(sum - 1.0f) > 1e-3f) {
-                spdlog::get("verify")->warn("row {} sum = {}, expected 1.0", r, sum);
+                spdlog::get("verify")->warn("softmax: row {} sum = {}, expected 1.0", r, sum);
                 return false;
             }
         }

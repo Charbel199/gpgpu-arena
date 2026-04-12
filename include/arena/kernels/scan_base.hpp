@@ -15,6 +15,22 @@ public:
     std::vector<std::string> get_parameter_names() const override {
         return {"n"};
     }
+
+    std::vector<std::map<std::string, int>> get_sweep_configs() const override {
+        return {
+            {{"n", 256}},
+            {{"n", 1024}},
+            {{"n", 4096}},
+            {{"n", 16384}},
+            {{"n", 65536}},
+            {{"n", 262144}},
+            {{"n", 1000000}},
+            {{"n", 4000000}},
+            {{"n", 16000000}},
+            {{"n", 64000000}},
+            {{"n", 256000000}},
+        };
+    }
     
     void set_problem_size(const std::map<std::string, int>& params) override {
         n_ = params.count("n") ? params.at("n") : 1000000;
@@ -62,7 +78,7 @@ public:
         for (int i = 0; i < check_count; i++) {
             float expected = static_cast<float>(i);
             if (std::abs(h_output[i] - expected) > 1e-2f) {
-                spdlog::get("verify")->warn("Failed at index {}: got {}, expected {}", i, h_output[i], expected);
+                spdlog::get("verify")->warn("scan: mismatch at index {}: got {}, expected {}", i, h_output[i], expected);
                 return false;
             }
         }
@@ -70,7 +86,7 @@ public:
         // also check last element: should be n-1
         float last_expected = static_cast<float>(n_ - 1);
         if (std::abs(h_output[n_ - 1] - last_expected) > 1e-2f) {
-            spdlog::get("verify")->warn("Failed at last index: got {}, expected {}", h_output[n_ - 1], last_expected);
+            spdlog::get("verify")->warn("scan: mismatch at last index: got {}, expected {}", h_output[n_ - 1], last_expected);
             return false;
         }
         spdlog::get("verify")->debug("verify passed");

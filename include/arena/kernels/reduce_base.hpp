@@ -16,6 +16,22 @@ public:
     std::vector<std::string> get_parameter_names() const override {
         return {"n"};
     }
+
+    std::vector<std::map<std::string, int>> get_sweep_configs() const override {
+        return {
+            {{"n", 256}},
+            {{"n", 1024}},
+            {{"n", 4096}},
+            {{"n", 16384}},
+            {{"n", 65536}},
+            {{"n", 262144}},
+            {{"n", 1000000}},
+            {{"n", 4000000}},
+            {{"n", 16000000}},
+            {{"n", 64000000}},
+            {{"n", 256000000}},
+        };
+    }
     
     void set_problem_size(const std::map<std::string, int>& params) override {
         n_ = params.count("n") ? params.at("n") : 1000000;
@@ -60,7 +76,7 @@ public:
         ctx.copy_to_host(&result, d_output_, sizeof(float));
 
         float expected = static_cast<float>(n_); //TODO: I don't like the idea of not doing a CPU check, what if we initialize RANDOM weights (This is how it should be anw)
-        spdlog::get("verify")->debug("got {}, expected {}", result, expected);
+        spdlog::get("verify")->debug("reduce: got {}, expected {}", result, expected);
         float rel_error = std::abs(result - expected) / expected;
         return rel_error < 1e-5f;
     }
