@@ -17,29 +17,42 @@ CUmodule KernelLoader::load_module(const std::string& path) {
     bool is_ptx = path.find(".ptx") != std::string::npos;
     
     if (is_ptx) {
-        // load PTX and JIT compile
+        // read PTX source and JIT compile with error logging
+        std::ifstream file(path);
+        if (!file.is_open()) {
+            throw std::runtime_error("PTX file not found: " + path);
+        }
+        std::ostringstream ss;
+        ss << file.rdbuf();
+        std::string ptx_source = ss.str();
+
         CUjit_option options[] = {
             CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES,
             CU_JIT_INFO_LOG_BUFFER,
             CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES,
             CU_JIT_ERROR_LOG_BUFFER
         };
-        
+
         char info_log[1024] = {0};
         char error_log[1024] = {0};
-        
+
         void* option_values[] = {
             reinterpret_cast<void*>(sizeof(info_log)),
             info_log,
             reinterpret_cast<void*>(sizeof(error_log)),
             error_log
         };
-        
-        CUresult result = cuModuleLoad(&module, path.c_str());
-        
+
+        CUresult result = cuModuleLoadDataEx(&module, ptx_source.c_str(),
+            4, options, option_values);
+
         if (result != CUDA_SUCCESS) {
+            const char* err_str;
+            cuGetErrorString(result, &err_str);
             throw std::runtime_error(
-                "Failed to load PTX module: " + path + "\nError: " + error_log
+                "Failed to load PTX module: " + path +
+                "\nCUDA error: " + (err_str ? err_str : "unknown") +
+                "\nJIT error log: " + error_log
             );
         }
     } else {
