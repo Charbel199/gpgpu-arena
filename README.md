@@ -11,19 +11,15 @@ A CUDA kernel benchmarking platform. Write different GPU implementations, run th
 ### Quick Start (Docker)
 
 ```bash
-# GUI
-xhost +
-docker compose run --rm run
+# CLI mode (builds and runs interactive CLI)
+docker compose up arena
 
-# Or: interactive shell for development
-docker compose run --rm arena
-```
+# GUI mode (builds and runs with GUI)
+xhost +local:docker
+docker compose up gui
 
-In the shell:
-```bash
-mkdir -p build && cd build
-cmake .. && make -j$(nproc)
-./arena
+# Or: drop into a shell for development
+docker compose run --rm arena bash
 ```
 
 ### Native Build

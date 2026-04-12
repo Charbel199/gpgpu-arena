@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 
-RUN pip3 install --break-system-packages triton torch --index-url https://download.pytorch.org/whl/cu126 || \
+RUN pip3 install --break-system-packages triton torch --index-url https://download.pytorch.org/whl/cu130 || \
     echo "triton installation failed. Triton kernels will be skipped."
 RUN pip3 install --break-system-packages numpy
 
