@@ -55,14 +55,15 @@ Profiler::~Profiler() {
 void Profiler::init_activity() {
     if (activity_initialized_) return;
 
+    auto log = spdlog::get("profiler");
     auto result = cuptiActivityRegisterCallbacks(
         activity_buffer_requested, activity_buffer_completed);
     if (result != CUPTI_SUCCESS) {
-        spdlog::get("profiler")->warn("CUPTI Activity registration failed");
+        log->warn("CUPTI Activity API registration failed (nsys/ncu running?)");
         return;
     }
 
-    spdlog::get("profiler")->info("CUPTI Activity API initialized");
+    log->info("CUPTI Activity API initialized");
     activity_initialized_ = true;
 }
 
@@ -363,12 +364,12 @@ Profiler::ProfileResult Profiler::profile(
     auto log = spdlog::get("profiler");
 
     // Step 1: Activity API (registers + shared memory)
-    log->info("Collecting kernel metadata (Activity API)");
+    log->debug("Step 1/2: Collecting kernel metadata via Activity API ...");
     if (reset_fn) reset_fn();
     auto result = collect_activity(launch_fn);
 
     // Step 2: Range Profiler (hardware counters)
-    log->info("Collecting hardware counters (Range Profiler)");
+    log->debug("Step 2/2: Collecting hardware counters via Range Profiler ...");
     result.metric_values = collect_counters(launch_fn, reset_fn);
 
     return result;

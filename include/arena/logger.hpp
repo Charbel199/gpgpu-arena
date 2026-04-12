@@ -8,7 +8,7 @@ namespace arena {
 
 inline void init_logging() {
     auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    console_sink->set_pattern("[%^%l%$] [%n] %v");
+    console_sink->set_pattern("[%H:%M:%S] [%^%l%$] [%n] %v");
 
     auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("arena.log", true);
     file_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] %v");
@@ -37,6 +37,14 @@ inline void init_logging() {
 #else
     spdlog::set_level(spdlog::level::debug);
 #endif
+
+    spdlog::info("Logging initialized (level={}, file=arena.log)",
+#ifdef NDEBUG
+        "info"
+#else
+        "debug"
+#endif
+    );
 }
 
 }

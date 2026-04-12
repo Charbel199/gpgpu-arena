@@ -56,6 +56,7 @@ private:
     void render_log();
 
     void run_selected_kernels();
+    void run_sweep();
     void reset_results();
     void refresh_kernels();
     void select_category(const std::string& category);
@@ -63,6 +64,9 @@ private:
 
     void benchmark_thread_func(std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
                                arena::RunConfig config);
+    void sweep_thread_func(std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
+                           std::vector<std::map<std::string, int>> sweep_configs,
+                           arena::RunConfig config);
     void drain_pending_results();
 
     bool is_matmul() const { return current_category_ == "matmul"; }
@@ -104,6 +108,7 @@ private:
         std::string kernel_name;
         arena::RunResult result;
         std::vector<LogEntry> logs;
+        std::map<std::string, int> params;  // the params used for this run (for scaling history)
     };
     std::vector<PendingResult> pending_results_;  // guarded by mutex_
 
