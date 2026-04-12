@@ -94,25 +94,24 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
             desc.initialize(ctx_);
 
-            Profiler::ProfileConfig profile_config;
-            auto profile_result = profiler_.profile(launch_kernel, profile_config,
+            auto profile_result = profiler_.profile(launch_kernel,
                 [&]() { desc.initialize(ctx_); });
 
             result.registers_per_thread = profile_result.registers_per_thread;
             result.shared_memory_bytes = profile_result.shared_memory_per_block;
 
             auto& mv = profile_result.metric_values;
-            if (mv.count("sm__warps_active.avg.pct_of_peak_sustained_active")) {
-                result.achieved_occupancy = mv.at("sm__warps_active.avg.pct_of_peak_sustained_active") / 100.0;
+            if (mv.count(metric::OCCUPANCY)) {
+                result.achieved_occupancy = mv.at(metric::OCCUPANCY) / 100.0;
             }
-            if (mv.count("dram__bytes_read.sum")) {
-                result.dram_read_gbps = (mv.at("dram__bytes_read.sum") / (result.elapsed_ms / 1000.0)) / 1e9;
+            if (mv.count(metric::DRAM_READ)) {
+                result.dram_read_gbps = (mv.at(metric::DRAM_READ) / (result.elapsed_ms / 1000.0)) / 1e9;
             }
-            if (mv.count("dram__bytes_write.sum")) {
-                result.dram_write_gbps = (mv.at("dram__bytes_write.sum") / (result.elapsed_ms / 1000.0)) / 1e9;
+            if (mv.count(metric::DRAM_WRITE)) {
+                result.dram_write_gbps = (mv.at(metric::DRAM_WRITE) / (result.elapsed_ms / 1000.0)) / 1e9;
             }
-            if (mv.count("smsp__inst_executed.avg.per_cycle_active")) {
-                result.ipc = mv.at("smsp__inst_executed.avg.per_cycle_active");
+            if (mv.count(metric::IPC)) {
+                result.ipc = mv.at(metric::IPC);
             }
 
             log->info("[PROFILER]  {} - {} regs | {} B shmem | occupancy={:.1f}% | DRAM R={:.2f} W={:.2f} GB/s | IPC={:.2f}",

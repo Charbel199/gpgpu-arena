@@ -104,6 +104,13 @@ void Profiler::init_range_profiler() {
     check_cupti(cuptiProfilerGetCounterAvailability(&availParams),
         "cuptiProfilerGetCounterAvailability (data)");
 
+    // Set chip-specific CUPTI metric names
+    bool is_blackwell = chip_name_.find("GB") == 0;
+    chip_metrics_.dram_read  = is_blackwell ? "dram__bytes_op_read.sum"  : "dram__bytes_read.sum";
+    chip_metrics_.dram_write = is_blackwell ? "dram__bytes_op_write.sum" : "dram__bytes_write.sum";
+    chip_metrics_.occupancy  = "sm__warps_active.avg.pct_of_peak_sustained_active";
+    chip_metrics_.ipc        = "smsp__inst_executed.avg.per_cycle_active";
+
     range_profiler_initialized_ = true;
     log->info("Range Profiler initialized");
 }
@@ -178,19 +185,29 @@ Profiler::ProfileResult Profiler::collect_activity(KernelLaunchFn launch_fn) {
 }
 
 std::map<std::string, double> Profiler::collect_counters(
-    KernelLaunchFn launch_fn, const std::vector<std::string>& metrics,
-    KernelLaunchFn reset_fn)
+    KernelLaunchFn launch_fn, KernelLaunchFn reset_fn)
 {
     auto log = spdlog::get("profiler");
     std::map<std::string, double> result;
 
     init_range_profiler();
 
+    // CUPTI metric names for this chip (set in init_range_profiler)
+    std::vector<std::string> cupti_names = {
+        chip_metrics_.dram_read, chip_metrics_.dram_write,
+        chip_metrics_.occupancy, chip_metrics_.ipc
+    };
+    // Corresponding logical keys returned to caller
+    std::vector<const char*> logical_keys = {
+        metric::DRAM_READ, metric::DRAM_WRITE,
+        metric::OCCUPANCY, metric::IPC
+    };
+
     // create a fresh host object per call (ConfigAddMetrics accumulates state)
     auto* hostObj = create_host_object();
 
     std::vector<const char*> metric_cstrs;
-    for (const auto& m : metrics) metric_cstrs.push_back(m.c_str());
+    for (const auto& m : cupti_names) metric_cstrs.push_back(m.c_str());
 
     CUcontext cuContext;
     cuCtxGetCurrent(&cuContext);
@@ -236,7 +253,7 @@ std::map<std::string, double> Profiler::collect_counters(
     check_cupti(cuptiProfilerHostGetNumOfPasses(&numPassesParams),
         "cuptiProfilerHostGetNumOfPasses");
     log->debug("Range Profiler: {} passes for {} metrics",
-        numPassesParams.numOfPasses, metrics.size());
+        numPassesParams.numOfPasses, cupti_names.size());
 
     // counter data image
     CUpti_RangeProfiler_GetCounterDataSize_Params counterDataSizeParams = {
@@ -308,7 +325,7 @@ std::map<std::string, double> Profiler::collect_counters(
         "cuptiRangeProfilerDecodeData");
 
     // evaluate
-    std::vector<double> metricValues(metrics.size());
+    std::vector<double> metricValues(cupti_names.size());
     CUpti_Profiler_Host_EvaluateToGpuValues_Params evalParams = {
         CUpti_Profiler_Host_EvaluateToGpuValues_Params_STRUCT_SIZE};
     evalParams.pHostObject = hostObj;
@@ -321,9 +338,9 @@ std::map<std::string, double> Profiler::collect_counters(
     check_cupti(cuptiProfilerHostEvaluateToGpuValues(&evalParams),
         "cuptiProfilerHostEvaluateToGpuValues");
 
-    for (size_t i = 0; i < metrics.size(); i++) {
-        result[metrics[i]] = metricValues[i];
-        log->debug("  {} = {}", metrics[i], metricValues[i]);
+    for (size_t i = 0; i < cupti_names.size(); i++) {
+        result[logical_keys[i]] = metricValues[i];
+        log->debug("  {} ({}) = {}", logical_keys[i], cupti_names[i], metricValues[i]);
     }
 
     // disable
@@ -341,8 +358,7 @@ std::map<std::string, double> Profiler::collect_counters(
 
 
 Profiler::ProfileResult Profiler::profile(
-    KernelLaunchFn launch_fn, const ProfileConfig& config,
-    KernelLaunchFn reset_fn)
+    KernelLaunchFn launch_fn, KernelLaunchFn reset_fn)
 {
     auto log = spdlog::get("profiler");
 
@@ -352,21 +368,10 @@ Profiler::ProfileResult Profiler::profile(
     auto result = collect_activity(launch_fn);
 
     // Step 2: Range Profiler (hardware counters)
-    if (!config.metrics.empty()) {
-        log->info("Collecting hardware counters (Range Profiler, {} metrics)", config.metrics.size());
-        result.metric_values = collect_counters(launch_fn, config.metrics, reset_fn);
-    }
+    log->info("Collecting hardware counters (Range Profiler)");
+    result.metric_values = collect_counters(launch_fn, reset_fn);
 
     return result;
-}
-
-std::vector<std::string> Profiler::available_metrics() const {
-    return {
-        "dram__bytes_read.sum",
-        "dram__bytes_write.sum",
-        "sm__warps_active.avg.pct_of_peak_sustained_active",
-        "smsp__inst_executed.avg.per_cycle_active"
-    };
 }
 
 }
