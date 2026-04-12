@@ -58,6 +58,34 @@ Context::~Context() {
     }
 }
 
+void Context::reset() {
+    auto log = spdlog::get("context");
+    log->warn("Resetting CUDA context (recovering from sticky error)");
+
+    if (context_) {
+        cuCtxDestroy(context_);
+        context_ = nullptr;
+    }
+
+    // clear device-level error state
+    cuDevicePrimaryCtxReset(device_);
+
+    CUresult result;
+#if CUDA_VERSION >= 13000
+    CUctxCreateParams params = {};
+    result = cuCtxCreate_v4(&context_, &params, CU_CTX_SCHED_AUTO, device_);
+#else
+    result = cuCtxCreate(&context_, CU_CTX_SCHED_AUTO, device_);
+#endif
+
+    if (result != CUDA_SUCCESS) {
+        const char* err_str;
+        cuGetErrorString(result, &err_str);
+        log->error("Context reset failed: {} — subsequent kernels will fail", err_str ? err_str : "unknown");
+        context_ = nullptr;
+    }
+}
+
 CUdeviceptr Context::allocate(size_t bytes) {
     CUdeviceptr ptr;
     check_cuda(cuMemAlloc(&ptr, bytes), "cuMemAlloc");

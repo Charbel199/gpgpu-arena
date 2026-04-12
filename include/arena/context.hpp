@@ -31,6 +31,9 @@ public:
     int compute_capability_minor() const { return cc_minor_; }
     size_t total_memory() const { return total_mem_; }
 
+    // destroy and recreate the CUDA context (recovers from sticky errors like illegal memory access)
+    void reset();
+
     // Access the raw CUDA context (for advanced usage)
     CUcontext handle() const { return context_; }
 
