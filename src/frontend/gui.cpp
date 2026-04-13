@@ -1410,16 +1410,21 @@ void Gui::render_benchmark_panel() {
         std::vector<RoofPoint> points;
         for (const auto& k : *kernels) {
             if (k.has_run && k.result.success && k.result.gflops > 0 && k.result.bandwidth_gbps > 0) {
-                // Use measured DRAM bandwidth if profiling data available,
-                // otherwise fall back to theoretical bytes
-                double actual_bw = k.result.dram_read_gbps + k.result.dram_write_gbps;
-                double bw = actual_bw > 0 ? actual_bw : k.result.bandwidth_gbps;
-                double ai = k.result.gflops / bw;  // FLOP/Byte
+                // Only use measured DRAM bandwidth (requires profiling)
+                double actual_dram = k.result.dram_read_gbps + k.result.dram_write_gbps;
+                if (actual_dram <= 0) continue;  // skip kernels without profiling data
+                double ai = k.result.gflops / actual_dram;
                 points.push_back({ai, k.result.gflops, k.result.kernel_name,
                                   detect_dsl_type(k.descriptor)});
             }
         }
 
+        if (points.empty() && peak_fp32_gflops_ > 0) {
+            if (ImGui::CollapsingHeader("Roofline Model")) {
+                ImGui::TextColored(UITheme::TEXT_DIM,
+                    "Enable 'Profile' and re-run to see the roofline (requires DRAM counters).");
+            }
+        }
         if (!points.empty() && peak_fp32_gflops_ > 0 && peak_mem_bw_gbs_ > 0) {
             if (ImGui::CollapsingHeader("Roofline Model")) {
                 ImGui::TextColored(UITheme::TEXT_DIM,
@@ -1462,7 +1467,7 @@ void Gui::render_benchmark_panel() {
                             case DSLType::Warp:   col = UITheme::WARP_BADGE; break;
                             case DSLType::CUB:    col = UITheme::CUB_BADGE; break;
                         }
-                        ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 7 * s, col, 1.5f);
+                        ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 7 * s, col, 1.5f, col);
                         ImPlot::PlotScatter(p.name.c_str(), &p.ai, &p.gflops, 1);
                     }
 
