@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
+#include <chrono>
 #include <stdexcept>
 
 namespace arena {
@@ -23,7 +24,10 @@ CompileResult KernelCompiler::compile(const std::string& source_path) {
     auto mem_it = cache_.find(source_path);
     if (mem_it != cache_.end()) {
         spdlog::get("compiler")->debug("{}: in-memory cache hit", source_path);
-        return mem_it->second;
+        auto hit = mem_it->second;
+        hit.cache_hit = true;
+        hit.compile_time_ms = 0.0f;
+        return hit;
     }
 
     auto log = spdlog::get("compiler");
@@ -41,13 +45,19 @@ CompileResult KernelCompiler::compile(const std::string& source_path) {
     if (try_disk_cache(source_path, output_name, result)) {
         log->info("{}: using cached {} (kernel={})",
             source_path, result.module_path, result.kernel_name);
+        result.cache_hit = true;
+        result.compile_time_ms = 0.0f;
         cache_[source_path] = result;
         return result;
     }
 
-    // if nothing in cahce -> compile
+    // if nothing in cache -> compile
     log->info("{}: compiling ({} compiler) ...", source_path, ext);
+    auto t0 = std::chrono::high_resolution_clock::now();
     result = comp_it->second->compile(source_path, output_name, cache_dir_);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    result.cache_hit = false;
+    result.compile_time_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
 
     log->info("{}: compiled -> {} (kernel={})",
         source_path, result.module_path, result.kernel_name);

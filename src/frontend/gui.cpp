@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <fstream>
+#include <numeric>
+#include <unistd.h>
 
 namespace frontend {
 
@@ -67,6 +70,23 @@ Gui::Gui(arena::Runner& runner)
     config_.params["cols"] = 1024;
     config_.warmup_runs = 10;
     config_.number_of_runs = 10;
+
+    // Compute GPU theoretical peaks
+    const auto& ctx = runner_.context();
+    int sms = ctx.sm_count();
+    int clock_khz = ctx.clock_rate_khz();
+    int mem_clock_khz = ctx.memory_clock_khz();
+    int bus_width = ctx.memory_bus_width();
+    int cc = ctx.compute_capability_major();
+    int cc_minor = ctx.compute_capability_minor();
+
+    // FP32 cores per SM by compute capability
+    int fp32_per_sm = 128;
+    if (cc == 7) fp32_per_sm = 64;
+    else if (cc == 8 && cc_minor == 0) fp32_per_sm = 64;  // A100
+
+    peak_fp32_gflops_ = (float)sms * fp32_per_sm * clock_khz * 2.0f / 1e6f;
+    peak_mem_bw_gbs_  = (float)mem_clock_khz * 2.0f * (bus_width / 8.0f) / 1e6f;
 
     refresh_kernels();
 }
@@ -330,6 +350,65 @@ void Gui::format_time(float ms, char* buf, size_t buf_size) {
     else                   snprintf(buf, buf_size, "%.2f s",  ms / 1000.0f);
 }
 
+const char* Gui::dsl_type_name(DSLType type) const {
+    switch (type) {
+        case DSLType::CUDA:   return "CUDA";
+        case DSLType::Triton: return "Triton";
+        case DSLType::CuTile: return "cuTile";
+        case DSLType::Warp:   return "Warp";
+        case DSLType::CUB:    return "CUB";
+    }
+    return "Unknown";
+}
+
+void Gui::export_results_csv() {
+    // Use absolute path so the user can find the file
+    char cwd[1024];
+    std::string path = "gpgpu_arena_results.csv";
+    if (getcwd(cwd, sizeof(cwd))) {
+        path = std::string(cwd) + "/gpgpu_arena_results.csv";
+    }
+    std::ofstream f(path);
+    if (!f.is_open()) { log(LogEntry::ERR, "Failed to open " + path); return; }
+
+    f << "kernel,category,dsl,block,grid,wall_ms,gpu_ms,gflops,bandwidth_gbps,"
+         "status,regs,shmem_bytes,occupancy_pct,ipc,dram_read_gbps,dram_write_gbps,"
+         "cache_hit,compile_time_ms\n";
+
+    for (const auto& [cat, states] : kernels_by_category_) {
+        for (const auto& k : states) {
+            if (!k.has_run) continue;
+            const auto& r = k.result;
+            f << r.kernel_name << "," << r.category << ","
+              << dsl_type_name(detect_dsl_type(k.descriptor)) << ","
+              << r.block_x << "x" << r.block_y << "x" << r.block_z << ","
+              << r.grid_x << "x" << r.grid_y << "x" << r.grid_z << ","
+              << r.elapsed_ms << "," << r.kernel_ms << ","
+              << r.gflops << "," << r.bandwidth_gbps << ","
+              << (r.success ? (r.verified ? "OK" : "WARN") : "FAIL") << ","
+              << r.registers_per_thread << "," << r.shared_memory_bytes << ","
+              << r.achieved_occupancy * 100.0 << "," << r.ipc << ","
+              << r.dram_read_gbps << "," << r.dram_write_gbps << ","
+              << (r.cache_hit ? "true" : "false") << "," << r.compile_time_ms << "\n";
+        }
+    }
+    log(LogEntry::INFO, "Exported to " + path);
+}
+
+std::string Gui::read_kernel_source(const std::string& rel_path) {
+    auto it = source_cache_.find(rel_path);
+    if (it != source_cache_.end()) return it->second;
+
+    std::string full_path = std::string(ARENA_KERNEL_DIR) + "/" + rel_path;
+    std::ifstream f(full_path);
+    if (!f.is_open()) return "// Could not read " + full_path;
+
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    source_cache_[rel_path] = content;
+    return content;
+}
+
 // ============================================================================
 // DSL Badge  small colored rounded rect with DSL name
 // ============================================================================
@@ -528,45 +607,69 @@ void Gui::render_header_bar() {
         ctx.device_name().c_str(),
         ctx.compute_capability_major(), ctx.compute_capability_minor(),
         ctx.sm_count(), vram_buf);
-
-    // Right-aligned items
-    float right_edge = ImGui::GetContentRegionMax().x;
-
-    // Status indicator
-    ImGui::SameLine(right_edge - 340 * s);
-    if (benchmark_running_) {
-        if (config_.collect_metrics)
-            ImGui::TextColored(UITheme::LOG_PROFILE, "PROFILING");
-        else
-            ImGui::TextColored(UITheme::ACCENT, "RUNNING");
-
-        ImGui::SameLine();
-        int cur = benchmark_current_.load();
-        int tot = benchmark_total_.load();
-        float frac = tot > 0 ? (float)cur / (float)tot : 0.0f;
-        ImGui::ProgressBar(frac, {100 * s, 0});
-    } else {
-        ImGui::TextColored(UITheme::TEXT_DIM, "IDLE");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Peak FP32: %.0f GFLOPS | Peak Mem BW: %.0f GB/s\n"
+            "Clock: %d MHz | Mem Clock: %d MHz | Bus: %d-bit",
+            peak_fp32_gflops_, peak_mem_bw_gbs_,
+            ctx.clock_rate_khz() / 1000, ctx.memory_clock_khz() / 1000,
+            ctx.memory_bus_width());
     }
 
-    // Kernel count
-    ImGui::SameLine(right_edge - 170 * s);
-    int total_k = 0;
-    for (const auto& [c, ks] : kernels_by_category_) total_k += (int)ks.size();
-    ImGui::Text("%d kernels", total_k);
+    // Right section fixed positions so nothing shifts between idle/running
+    float right_edge = ImGui::GetContentRegionMax().x;
+    float btn_w = 52 * s;
+    float gap = ImGui::GetStyle().ItemSpacing.x;
 
-    // Run All / Stop buttons
-    ImGui::SameLine(right_edge - 85 * s);
+    // 3 buttons pinned to right edge (always same position)
+    float btns_start = right_edge - btn_w * 3 - gap * 2;
+    ImGui::SameLine(btns_start);
+
+    ImGui::BeginDisabled(benchmark_running_);
+    if (ImGui::Button("Export", {btn_w, 0})) {
+        export_results_csv();
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(benchmark_running_);
+    if (ImGui::Button("Reset", {btn_w, 0})) {
+        runner_.mutable_context().reset();
+        log(LogEntry::WARN, "GPU context reset");
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
     if (benchmark_running_) {
         ImGui::PushStyleColor(ImGuiCol_Button, {0.5f, 0.1f, 0.1f, 1.0f});
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.65f, 0.15f, 0.15f, 1.0f});
-        if (ImGui::Button("Stop", {80 * s, 0})) {
+        if (ImGui::Button("Stop", {btn_w, 0})) {
             cancel_requested_ = true;
         }
         ImGui::PopStyleColor(2);
     } else {
-        if (ImGui::Button("Run All", {80 * s, 0})) {
+        if (ImGui::Button("Run", {btn_w, 0})) {
             run_selected_kernels();
+        }
+    }
+
+    // Status text between GPU info and buttons (fixed slot)
+    float status_x = btns_start - 180 * s;
+    if (status_x > 400 * s) {
+        ImGui::SameLine(status_x);
+        if (benchmark_running_) {
+            if (config_.collect_metrics)
+                ImGui::TextColored(UITheme::LOG_PROFILE, "PROFILING");
+            else
+                ImGui::TextColored(UITheme::ACCENT, "RUNNING");
+            ImGui::SameLine();
+            int cur = benchmark_current_.load();
+            int tot = benchmark_total_.load();
+            float frac = tot > 0 ? (float)cur / (float)tot : 0.0f;
+            ImGui::ProgressBar(frac, {80 * s, 0});
+        } else {
+            int total_k = 0;
+            for (const auto& [c, ks] : kernels_by_category_) total_k += (int)ks.size();
+            ImGui::TextColored(UITheme::TEXT_DIM, "IDLE | %d kernels", total_k);
         }
     }
 }
@@ -1202,10 +1305,16 @@ void Gui::render_benchmark_panel() {
                 sorted_values[i] = values[order[i]];
             }
 
+            double peak = is_matmul() ? (double)peak_fp32_gflops_ : (double)peak_mem_bw_gbs_;
+
             float plot_h = 200 * s;
             if (ImPlot::BeginPlot("##Performance", {-1, plot_h})) {
                 ImPlot::SetupAxes("", y_label,
                     ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+                // Force Y-axis to include peak so the red line is always visible
+                if (peak > 0) {
+                    ImPlot::SetupAxisLimits(ImAxis_Y1, 0, peak * 1.08, ImPlotCond_Always);
+                }
                 ImPlot::SetupAxisTicks(ImAxis_X1, 0,
                     (double)(sorted_labels.size() - 1),
                     (int)sorted_labels.size(), sorted_labels.data());
@@ -1215,6 +1324,22 @@ void Gui::render_benchmark_panel() {
 
                 ImPlot::PlotBars("Performance", positions.data(),
                     sorted_values.data(), (int)sorted_values.size(), 0.6);
+
+                // Theoretical peak line
+                if (peak > 0) {
+                    double pk_xs[2] = {-0.5, (double)sorted_values.size() - 0.5};
+                    double pk_ys[2] = {peak, peak};
+                    ImPlot::SetNextLineStyle({1.0f, 0.3f, 0.3f, 0.9f}, 2.0f);
+                    ImPlot::PlotLine("Theoretical Peak", pk_xs, pk_ys, 2);
+
+                    // Show % of peak above each bar
+                    for (size_t i = 0; i < sorted_values.size(); i++) {
+                        char pct[16];
+                        snprintf(pct, sizeof(pct), "%.0f%%", sorted_values[i] / peak * 100.0);
+                        ImPlot::PlotText(pct, positions[i], sorted_values[i], {0, -8});
+                    }
+                }
+
                 ImPlot::EndPlot();
             }
 
@@ -1278,6 +1403,174 @@ void Gui::render_benchmark_panel() {
     }
 
     // ================================================================
+    // Roofline Plot (Feature 3)
+    // ================================================================
+    {
+        struct RoofPoint { double ai; double gflops; std::string name; DSLType dsl; };
+        std::vector<RoofPoint> points;
+        for (const auto& k : *kernels) {
+            if (k.has_run && k.result.success && k.result.gflops > 0 && k.result.bandwidth_gbps > 0) {
+                // Use measured DRAM bandwidth if profiling data available,
+                // otherwise fall back to theoretical bytes
+                double actual_bw = k.result.dram_read_gbps + k.result.dram_write_gbps;
+                double bw = actual_bw > 0 ? actual_bw : k.result.bandwidth_gbps;
+                double ai = k.result.gflops / bw;  // FLOP/Byte
+                points.push_back({ai, k.result.gflops, k.result.kernel_name,
+                                  detect_dsl_type(k.descriptor)});
+            }
+        }
+
+        if (!points.empty() && peak_fp32_gflops_ > 0 && peak_mem_bw_gbs_ > 0) {
+            if (ImGui::CollapsingHeader("Roofline Model")) {
+                ImGui::TextColored(UITheme::TEXT_DIM,
+                    "X = FLOP/Byte (higher = more compute-intensive). "
+                    "Y = achieved GFLOP/s. Gray lines = GPU limits.");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Points below the memory roof are memory-bound.\n"
+                        "Points below the compute roof are compute-bound.\n"
+                        "If all points share the same X, enable 'Profile' to\n"
+                        "use measured DRAM bandwidth (spreads points).");
+                }
+                float plot_h = 250 * s;
+                if (ImPlot::BeginPlot("##Roofline", {-1, plot_h})) {
+                    ImPlot::SetupAxes("Arithmetic Intensity (FLOP/Byte)", "Performance (GFLOP/s)");
+                    ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Log10);
+                    ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+                    ImPlot::SetupAxesLimits(0.1, 200, 1, peak_fp32_gflops_ * 1.2, ImPlotCond_Once);
+
+                    // Memory roof line
+                    double ridge = peak_fp32_gflops_ / peak_mem_bw_gbs_;
+                    double mem_xs[] = {0.1, ridge};
+                    double mem_ys[] = {peak_mem_bw_gbs_ * 0.1, peak_fp32_gflops_};
+                    ImPlot::SetNextLineStyle({0.6f, 0.6f, 0.6f, 0.7f}, 2.0f);
+                    ImPlot::PlotLine("Mem BW Roof", mem_xs, mem_ys, 2);
+
+                    // Compute roof line
+                    double comp_xs[] = {ridge, 200.0};
+                    double comp_ys[] = {peak_fp32_gflops_, peak_fp32_gflops_};
+                    ImPlot::SetNextLineStyle({0.6f, 0.6f, 0.6f, 0.7f}, 2.0f);
+                    ImPlot::PlotLine("Compute Roof", comp_xs, comp_ys, 2);
+
+                    // Plot each kernel as a labeled point colored by DSL
+                    for (const auto& p : points) {
+                        ImVec4 col;
+                        switch (p.dsl) {
+                            case DSLType::CUDA:   col = UITheme::CUDA_BADGE; break;
+                            case DSLType::Triton: col = UITheme::TRITON_BADGE; break;
+                            case DSLType::CuTile: col = UITheme::CUTILE_BADGE; break;
+                            case DSLType::Warp:   col = UITheme::WARP_BADGE; break;
+                            case DSLType::CUB:    col = UITheme::CUB_BADGE; break;
+                        }
+                        ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 7 * s, col, 1.5f);
+                        ImPlot::PlotScatter(p.name.c_str(), &p.ai, &p.gflops, 1);
+                    }
+
+                    ImPlot::EndPlot();
+                }
+            }
+            ImGui::Spacing();
+        }
+    }
+
+    // ================================================================
+    // Sub-Kernel Timeline (Feature 4)
+    // ================================================================
+    if (sel && sel->has_run && sel->result.success && !sel->result.sub_kernels.empty()) {
+        const auto& sks = sel->result.sub_kernels;
+        int n = (int)sks.size();
+
+        char tl_header[128];
+        snprintf(tl_header, sizeof(tl_header),
+            "Sub-Kernel Timeline  (%d kernels, %.3f ms total)###SubKTL",
+            n, sel->result.kernel_ms);
+        if (ImGui::CollapsingHeader(tl_header, ImGuiTreeNodeFlags_DefaultOpen)) {
+
+            // Summary line
+            ImGui::TextColored(UITheme::TEXT_DIM,
+                "GPU kernel breakdown for %s  (Activity API)",
+                sel->result.kernel_name.c_str());
+            ImGui::Spacing();
+
+            // Compute total for percentage bars
+            double total_ms = 0;
+            for (const auto& sk : sks) total_ms += sk.duration_ms;
+
+            // Gantt-style rows drawn manually for clarity
+            float row_h = 32 * s;
+            float bar_pad = 6 * s;
+            float label_w = 220 * s;
+            float avail_w = ImGui::GetContentRegionAvail().x - label_w - 100 * s;
+            if (avail_w < 80 * s) avail_w = 80 * s;
+
+            for (int i = 0; i < n; i++) {
+                const auto& sk = sks[i];
+                float pct = total_ms > 0 ? (float)(sk.duration_ms / total_ms) : 0;
+                float bar_w = avail_w * pct;
+                if (bar_w < 2 * s) bar_w = 2 * s;
+
+                ImGui::PushID(i);
+
+                // Row background
+                ImVec2 row_pos = ImGui::GetCursorScreenPos();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImU32 row_bg = (i % 2 == 0) ? IM_COL32(18, 18, 18, 255)
+                                             : IM_COL32(24, 24, 24, 255);
+                dl->AddRectFilled(row_pos,
+                    {row_pos.x + ImGui::GetContentRegionAvail().x, row_pos.y + row_h},
+                    row_bg, 4.0f * s);
+
+                // Kernel name (truncated, full name on hover)
+                ImGui::SetCursorScreenPos({row_pos.x + 4 * s, row_pos.y + bar_pad});
+                std::string display_name = sk.name;
+                if (display_name.length() > 30)
+                    display_name = "..." + display_name.substr(display_name.length() - 27);
+                ImGui::TextColored(UITheme::BODY_TEXT, "%s", display_name.c_str());
+                if (ImGui::IsItemHovered() && sk.name.length() > 30) {
+                    ImGui::SetTooltip("%s", sk.name.c_str());
+                }
+
+                // Horizontal bar
+                float bar_x = row_pos.x + label_w;
+                float bar_y = row_pos.y + bar_pad;
+                float bar_h = row_h - bar_pad * 2;
+
+                // Bar background track
+                dl->AddRectFilled({bar_x, bar_y}, {bar_x + avail_w, bar_y + bar_h},
+                    IM_COL32(40, 40, 40, 255), 4.0f * s);
+
+                // Filled bar
+                ImU32 bar_col = ImGui::ColorConvertFloat4ToU32(UITheme::ACCENT);
+                dl->AddRectFilled({bar_x, bar_y}, {bar_x + bar_w, bar_y + bar_h},
+                    bar_col, 4.0f * s);
+
+                // Duration + percentage text to the right of the bar
+                char info[64];
+                snprintf(info, sizeof(info), "%.3f ms  (%.0f%%)", sk.duration_ms, pct * 100);
+                float info_x = bar_x + avail_w + 8 * s;
+                dl->AddText({info_x, bar_y + (bar_h - ImGui::GetTextLineHeight()) * 0.5f},
+                    ImGui::ColorConvertFloat4ToU32(UITheme::BODY_TEXT), info);
+
+                // Detail on hover
+                ImGui::SetCursorScreenPos(row_pos);
+                ImGui::InvisibleButton("##row", {ImGui::GetContentRegionAvail().x, row_h});
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s\n  Duration: %.3f ms (%.1f%%)\n  Registers: %d\n  Shared mem: %d B",
+                        sk.name.c_str(), sk.duration_ms, pct * 100, sk.registers, sk.shared_memory);
+                }
+
+                ImGui::PopID();
+            }
+
+            // Total line
+            ImGui::Spacing();
+            ImGui::TextColored(UITheme::HEADER_TEXT, "Total GPU time: %.3f ms across %d kernel(s)",
+                total_ms, n);
+        }
+        ImGui::Spacing();
+    }
+
+    // ================================================================
     // Scaling Chart (multi-size history)
     // ================================================================
     {
@@ -1334,7 +1627,7 @@ void Gui::render_benchmark_panel() {
                                     break;
                             }
                         }
-                        ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 4 * s);
+                        ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 5 * s);
                         ImPlot::PlotLine(name.c_str(), xs.data(), ys.data(), (int)xs.size());
                     }
 
@@ -1482,7 +1775,20 @@ void Gui::render_results_table() {
 
             ImGui::TableNextColumn(); ImGui::Text("%ux%u", k.result.block_x, k.result.block_y);
             ImGui::TableNextColumn(); ImGui::Text("%ux%u", k.result.grid_x, k.result.grid_y);
+
+            // Wall time with min/max/stddev tooltip
             ImGui::TableNextColumn(); ImGui::Text("%.3f", k.result.elapsed_ms);
+            if (ImGui::IsItemHovered() && !k.result.all_times_ms.empty()) {
+                const auto& t = k.result.all_times_ms;
+                float tmin = *std::min_element(t.begin(), t.end());
+                float tmax = *std::max_element(t.begin(), t.end());
+                float mean = std::accumulate(t.begin(), t.end(), 0.0f) / t.size();
+                float var = 0;
+                for (float v : t) var += (v - mean) * (v - mean);
+                float stddev = std::sqrt(var / t.size());
+                ImGui::SetTooltip("Min: %.3f ms\nMax: %.3f ms\nStdDev: %.3f ms\nRuns: %zu",
+                    tmin, tmax, stddev, t.size());
+            }
 
             // GPU time  highlight overhead
             ImGui::TableNextColumn();
@@ -1580,10 +1886,21 @@ void Gui::render_profile_sidebar() {
             r.uses_module ? "cubin" : "runtime");
     }
 
-    // TODO: wire to backend  expose cache hit/miss from KernelCompiler
-    ImGui::TextColored(UITheme::TEXT_DIM, "Cache: N/A");
-    // TODO: wire to backend  track compilation time
-    ImGui::TextColored(UITheme::TEXT_DIM, "Compile time: N/A");
+    // Compilation cache and timing (Feature 5)
+    if (has_data && desc->needs_compilation()) {
+        if (r.cache_hit)
+            ImGui::TextColored(UITheme::SUCCESS_GREEN, "Cache: Hit (skipped recompile)");
+        else
+            ImGui::TextColored(UITheme::WARN_YELLOW, "Cache: Miss (freshly compiled)");
+
+        if (r.compile_time_ms > 0)
+            ImGui::Text("Compile time: %.0f ms", r.compile_time_ms);
+        else
+            ImGui::TextColored(UITheme::TEXT_DIM, "Compile time: <1 ms (cached)");
+    } else {
+        ImGui::TextColored(UITheme::TEXT_DIM, "Cache: N/A (native kernel)");
+        ImGui::TextColored(UITheme::TEXT_DIM, "Compile time: N/A");
+    }
 
     // Error output
     if (has_data && !r.success && !r.error.empty()) {
@@ -1655,8 +1972,8 @@ void Gui::render_profile_sidebar() {
 
         double total_dram = r.dram_read_gbps + r.dram_write_gbps;
         if (total_dram > 0) {
-            // TODO: wire to backend for theoretical peak DRAM BW
-            colored_bar("DRAM Throughput", (float)total_dram, 1000.0f, "%.1f GB/s");
+            colored_bar("DRAM Throughput", (float)total_dram,
+                peak_mem_bw_gbs_ > 0 ? peak_mem_bw_gbs_ : 1000.0f, "%.1f GB/s");
             ImGui::TextColored(UITheme::TEXT_DIM, "  R: %.1f  W: %.1f GB/s",
                 r.dram_read_gbps, r.dram_write_gbps);
         }
@@ -1744,6 +2061,25 @@ void Gui::render_profile_sidebar() {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s", sk.name.c_str());
             }
+        }
+    }
+
+    // ================================================================
+    // Source Viewer (Feature 9)
+    // ================================================================
+    if (desc->needs_compilation() && !desc->source_path().empty()) {
+        ImGui::Spacing();
+        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Source Code")) {
+            std::string src = read_kernel_source(desc->source_path());
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, {0.04f, 0.04f, 0.04f, 1.0f});
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {4 * s, 4 * s});
+            float viewer_h = std::min(300 * s, ImGui::GetContentRegionAvail().y - 10 * s);
+            if (viewer_h < 80 * s) viewer_h = 80 * s;
+            ImGui::InputTextMultiline("##src", src.data(), src.size() + 1,
+                {-1, viewer_h}, ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
         }
     }
 }

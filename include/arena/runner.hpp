@@ -51,6 +51,10 @@ struct RunResult {
     double dram_write_gbps = 0.0;
     double ipc = 0.0;
 
+    // compilation info
+    bool cache_hit = false;
+    float compile_time_ms = 0.0f;
+
     bool verified = false;
     bool success = false;
     std::string error;
@@ -71,6 +75,7 @@ public:
     std::vector<KernelDescriptor*> get_all_kernels() const;
 
     const Context& context() const { return ctx_; }
+    Context& mutable_context() { return ctx_; }
     KernelCompiler& compiler() { return compiler_; }
 
 private:

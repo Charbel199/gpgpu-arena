@@ -25,7 +25,10 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
 
         // runtime compilation for DSL kernels
         if (desc.needs_compilation()) {
-            desc.set_compile_result(compiler_.compile(desc.source_path()));
+            auto cr = compiler_.compile(desc.source_path());
+            result.cache_hit = cr.cache_hit;
+            result.compile_time_ms = cr.compile_time_ms;
+            desc.set_compile_result(cr);
         }
 
         CUmodule module = nullptr;

@@ -31,6 +31,9 @@ public:
     int compute_capability_minor() const { return cc_minor_; }
     size_t total_memory() const { return total_mem_; }
     int sm_count() const { return sm_count_; }
+    int clock_rate_khz() const { return clock_rate_khz_; }
+    int memory_clock_khz() const { return memory_clock_khz_; }
+    int memory_bus_width() const { return memory_bus_width_; }
 
     // destroy and recreate the CUDA context (recovers from sticky errors like illegal memory access)
     void reset();
@@ -44,6 +47,9 @@ private:
     std::string device_name_;
     int cc_major_, cc_minor_;
     int sm_count_;
+    int clock_rate_khz_;
+    int memory_clock_khz_;
+    int memory_bus_width_;
     size_t total_mem_;
 };
 

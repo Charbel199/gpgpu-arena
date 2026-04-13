@@ -90,6 +90,9 @@ private:
     DSLType detect_dsl_type(const arena::KernelDescriptor* desc) const;
     static void format_time(float ms, char* buf, size_t buf_size);
     const KernelState* selected_kernel() const;
+    const char* dsl_type_name(DSLType type) const;
+    void export_results_csv();
+    std::string read_kernel_source(const std::string& rel_path);
 
     // Actions
     void run_selected_kernels();
@@ -127,6 +130,13 @@ private:
 
     // UI state
     UIState ui_state_;
+
+    // GPU theoretical peaks (computed once at startup)
+    float peak_fp32_gflops_ = 0;
+    float peak_mem_bw_gbs_ = 0;
+
+    // Source file cache for viewer
+    std::map<std::string, std::string> source_cache_;
 
     // Logging
     std::deque<LogEntry> log_entries_;
