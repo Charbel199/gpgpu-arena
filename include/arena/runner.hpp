@@ -35,6 +35,7 @@ struct RunResult {
 
     // benchmark results (timing)
     float elapsed_ms = 0.0f;       // wall time (CUDA events, median over N runs)
+    std::vector<float> all_times_ms;  // individual run times from benchmark
     float kernel_ms = 0.0f;        // GPU-only time (CUPTI Activity API, sum of all kernels)
     double gflops = 0.0;
     double bandwidth_gbps = 0.0;

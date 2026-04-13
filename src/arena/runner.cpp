@@ -78,6 +78,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         nvtxRangePop();
 
         result.elapsed_ms = bench_result.median_ms;
+        result.all_times_ms = bench_result.all_times_ms;
 
         // GPU-only kernel time via Activity API (single run, sums all sub-kernels)
         desc.initialize(ctx_);
