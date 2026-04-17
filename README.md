@@ -1,6 +1,8 @@
 # GPGPU Arena
 
-A CUDA kernel benchmarking platform. Write GPU kernels in CUDA C++, Triton, or cuTile - benchmark them side by side with identical inputs and measurement infrastructure.
+A CUDA kernel benchmarking platform. Write GPU kernels in CUDA C++, Triton, cuTile or any DSL benchmark them side by side with identical inputs and measurement infrastructure.
+
+![GPGPU Arena UI - matmul comparison across cuTile, Triton, and CUDA](docs/ui-matmul.png)
 
 ## Quick Start
 
@@ -27,7 +29,9 @@ Runtime Compiler (nvcc / Triton / cuTile)  -->  .cubin (cached)
 cuModuleLoad  -->  cuLaunchKernel  -->  Benchmark + Profile
 ```
 
-All kernels compile to **cubin** (final SASS) at runtime on first use. Compiled cubins are cached on disk - subsequent runs skip compilation. Edit a kernel source file, re-run, and only that kernel recompiles.
+All kernels compile to **cubin** (final SASS) at runtime on first use. Compiled cubins are cached on disk and subsequent runs skip compilation. Edit a kernel source file, re-run, and only that kernel recompiles.
+
+![Reduce sweep - 12 reduce kernels with speedup, wall vs GPU time, and throughput vs theoretical peak](docs/reduce-sweep.png)
 
 ## Adding a Kernel
 
@@ -65,6 +69,14 @@ The descriptor declares `needs_compilation() = true` and `source_path()`. The ar
 - **Runner** - orchestrates: compile -> warmup -> benchmark -> profile -> verify.
 
 ## Profiling
+
+Side-by-side occupancy/IPC across kernels plus an arithmetic-intensity vs performance roofline:
+
+![Profiling comparison and roofline model](docs/profiling-roofline.png)
+
+Sub-kernel timeline (Activity API) breaks multi-launch kernels into their individual GPU invocations:
+
+![Sub-kernel timeline showing reduce_two_stage broken into reduce_sum_blocks and reduce_sum_final](docs/subkernel-timeline.png)
 
 Hardware counter collection (occupancy, IPC, DRAM) requires GPU performance counter access:
 
