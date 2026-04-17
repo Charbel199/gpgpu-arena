@@ -12,7 +12,7 @@
 #include "arena/profiler.hpp"
 #include "arena/runner.hpp"
 #include "arena/logger.hpp"
-#include "frontend/cli.hpp"
+#include "frontend/tui.hpp"
 
 #ifdef ARENA_GUI_ENABLED
 #include "frontend/gui.hpp"
@@ -21,7 +21,7 @@
 void print_usage(const char* program) {
     std::cout << "Usage: " << program << " [OPTIONS]\n\n"
               << "Options:\n"
-              << "  --cli       Run in command-line mode\n"
+              << "  --tui       Run the terminal UI (alias: --cli)\n"
 #ifdef ARENA_GUI_ENABLED
               << "  --gui       Run with graphical interface (default)\n"
 #endif
@@ -30,29 +30,29 @@ void print_usage(const char* program) {
 
 int main(int argc, char** argv) {
     bool use_gui = false;
-    bool use_cli = false;
+    bool use_tui = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
-        } else if (strcmp(argv[i], "--cli") == 0) {
-            use_cli = true;
+        } else if (strcmp(argv[i], "--cli") == 0 || strcmp(argv[i], "--tui") == 0) {
+            use_tui = true;
         } else if (strcmp(argv[i], "--gui") == 0) {
             use_gui = true;
         }
     }
 
 #ifdef ARENA_GUI_ENABLED
-    if (!use_cli && !use_gui) {
+    if (!use_tui && !use_gui) {
         use_gui = true;
     }
 #else
-    use_cli = true;
+    use_tui = true;
 #endif
 
-    if (use_gui && use_cli) {
-        std::cerr << "Error: Cannot use both --cli and --gui\n";
+    if (use_gui && use_tui) {
+        std::cerr << "Error: Cannot use both --tui and --gui\n";
         return 1;
     }
 
@@ -87,14 +87,14 @@ int main(int argc, char** argv) {
             spdlog::info("  {} - {} kernels", cat, kernels.size());
         }
 
-        spdlog::info("Starting {} mode", use_gui ? "GUI" : "CLI");
+        spdlog::info("Starting {} mode", use_gui ? "GUI" : "TUI");
 
 #ifdef ARENA_GUI_ENABLED
         if (use_gui) {
             return frontend::run_gui(runner);
         }
 #endif
-        return frontend::run_cli(runner);
+        return frontend::run_tui(runner);
 
     } catch (const std::exception& e) {
         spdlog::error("Fatal: {}", e.what());

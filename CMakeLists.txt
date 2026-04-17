@@ -113,7 +113,7 @@ set(ARENA_SOURCES
     src/arena/profiler.cpp
     src/arena/benchmark.cpp
     src/arena/runner.cpp
-    src/frontend/cli.cpp
+    src/frontend/tui.cpp
     ${KERNEL_DESCRIPTORS}
     ${CUDA_DESCRIPTORS}
 )

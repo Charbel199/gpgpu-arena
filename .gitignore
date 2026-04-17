@@ -1,5 +1,6 @@
 # Build directories
 build/
+build-*/
 cmake-build-*/
 
 # IDE
@@ -8,16 +9,31 @@ cmake-build-*/
 *.swp
 *.swo
 *~
+.DS_Store
 
 # Compiled files
 *.o
 *.obj
 *.ptx
 *.cubin
+*.a
+*.so
 
 # Binaries
 *.exe
+arena
 
-
-# Other
+# Python
 *.pyc
+__pycache__/
+.pytest_cache/
+
+# Runtime output
+*.log
+arena.log
+imgui.ini
+gpgpu_arena_results.csv
+
+# Local overrides
+.env
+*.local
