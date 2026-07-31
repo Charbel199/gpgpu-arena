@@ -27,8 +27,10 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         // runtime compilation for DSL kernels
         if (desc.needs_compilation()) {
             auto cr = compiler_.compile(desc.source_path());
-            result.cache_hit = cr.cache_hit;
-            result.compile_ms = cr.compile_time_ms;
+            result.cache_hit  = cr.cache_hit;
+            result.compile_ms = cr.compile_ms;
+            result.import_ms  = cr.import_ms;
+            result.invoke_ms  = cr.invoke_ms;
             desc.set_compile_result(cr);
         }
 

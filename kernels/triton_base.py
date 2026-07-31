@@ -3,15 +3,21 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+_import_t0 = time.perf_counter()
 import triton
 from triton.compiler import ASTSource
+_IMPORT_MS = (time.perf_counter() - _import_t0) * 1000.0
 
 
 def check_gpu_supported():
+    global _IMPORT_MS
     try:
+        _torch_t0 = time.perf_counter()
         import torch
+        _IMPORT_MS += (time.perf_counter() - _torch_t0) * 1000.0
         if not torch.cuda.is_available():
             return False, "CUDA not available"
         cap = torch.cuda.get_device_capability()
@@ -58,7 +64,9 @@ def main(fn, signature, constants):
 
     try:
         print(f"[triton] Compiling {args.output_name} ...", file=sys.stderr)
+        _compile_t0 = time.perf_counter()
         cubin, kernel_name, num_warps, shared = compile_kernel(fn, signature, constants)
+        compile_ms = (time.perf_counter() - _compile_t0) * 1000.0
     except Exception as e:
         print(f"[triton] Compilation failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -82,4 +90,6 @@ def main(fn, signature, constants):
         "shared_memory": shared,
         "num_params": num_params,
         "constants": constants,
+        "import_ms": _IMPORT_MS,
+        "compile_ms": compile_ms,
     }))
