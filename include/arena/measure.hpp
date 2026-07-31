@@ -2,6 +2,7 @@
 
 #include "arena/measure_policy.hpp"
 #include "arena/runner_config.hpp"
+#include "arena/power.hpp"
 
 #include <cuda.h>
 #include <functional>
@@ -35,5 +36,38 @@ struct TimingResult {
 // from the measured interval, so each run starts from a drained queue.
 TimingResult time_operation(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
                             int runs);
+
+struct EnergyResult {
+    bool   available  = false;
+    double mj_per_op  = 0.0;
+    double avg_watts  = 0.0;
+    int    iterations = 0;
+    float  total_ms   = 0.0f;   // actual interval, including the drain
+};
+
+// Sustained-load energy measurement.
+//
+// Deliberately does NOT reset between iterations: it launches back-to-back so
+// launches pipeline, which is the only regime where energy is meaningful. The
+// consequence is that the output buffer accumulates garbage, so this pass must
+// run last and its output must never be verified.
+//
+// Energy and elapsed time are measured across the same interval, including the
+// final queue drain, so mj_per_op and avg_watts stay correct despite the
+// window overshooting slightly.
+//
+// Two caveats on interpreting mj_per_op:
+//
+//  1. NVML reports whole-board energy, so it includes idle draw for the
+//     duration of each operation, not just the kernel's marginal cost.
+//
+//  2. The loop is only GPU-bound if the host can issue launches faster than
+//     the GPU retires them. For short kernels it often cannot -- the launch
+//     path costs tens of microseconds, so the GPU idles between launches and
+//     that idle energy is charged to the operation. Compare
+//     (iterations * gpu_ms) against total_ms to see how saturated the device
+//     actually was; Runner logs this as a saturation percentage.
+EnergyResult measure_energy(const LaunchFn& launch_fn, PowerMonitor& power,
+                            float window_ms);
 
 }

@@ -116,4 +116,57 @@ TimingResult time_operation(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
     return out;
 }
 
+EnergyResult measure_energy(const LaunchFn& launch_fn, PowerMonitor& power,
+                            float window_ms) {
+    EnergyResult out;
+    if (!power.available() || window_ms <= 0.0f) return out;
+
+    nvtxRangePushA("ENERGY");
+
+    // 1. drain, then take the baseline
+    cuCtxSynchronize();
+    const uint64_t energy_start = power.energy_mj();
+    const auto wall_start = std::chrono::steady_clock::now();
+
+    // 2. launch back-to-back without syncing, so launches pipeline
+    int iterations = 0;
+    for (;;) {
+        launch_fn();
+        iterations++;
+
+        const float elapsed = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - wall_start).count();
+        if (elapsed >= window_ms) break;
+    }
+
+    // 3. drain the queue
+    cuCtxSynchronize();
+
+    // 4. close the interval - same interval for both quantities
+    const uint64_t energy_end = power.energy_mj();
+    const float total_ms = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - wall_start).count();
+
+    nvtxRangePop();
+
+    if (energy_end <= energy_start || total_ms <= 0.0f || iterations == 0) {
+        // counter did not advance: window too short for its update rate
+        return out;
+    }
+
+    const double delta_mj = static_cast<double>(energy_end - energy_start);
+    out.available  = true;
+    out.iterations = iterations;
+    out.total_ms   = total_ms;
+    out.mj_per_op  = delta_mj / iterations;
+    out.avg_watts  = delta_mj / total_ms;   // mJ/ms == W
+
+    spdlog::get("power")->debug(
+        "energy: {} iterations over {:.1f} ms, {:.1f} mJ total, "
+        "{:.4f} mJ/op, {:.1f} W",
+        iterations, total_ms, delta_mj, out.mj_per_op, out.avg_watts);
+
+    return out;
+}
+
 }

@@ -24,6 +24,9 @@ struct RunConfig {
     int  number_of_runs   = 10;
     bool collect_metrics  = false;
 
+    bool  collect_energy   = false;
+    float energy_window_ms = 500.0f;
+
     std::map<std::string, int> params;
 };
 

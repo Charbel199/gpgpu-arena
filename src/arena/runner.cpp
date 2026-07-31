@@ -165,6 +165,40 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             log->warn("  verify: FAILED");
         }
 
+        // --- energy: LAST, because it dirties the output buffer ---
+        if (config.collect_energy && power_.available()) {
+            log->info("  energy: sustained load for {:.0f} ms ...",
+                config.energy_window_ms);
+            auto e = measure::measure_energy(launch_kernel, power_,
+                                             config.energy_window_ms);
+            result.energy.available  = e.available;
+            result.energy.mj_per_op  = e.mj_per_op;
+            result.energy.avg_watts  = e.avg_watts;
+            result.energy.iterations = e.iterations;
+
+            if (e.available) {
+                // Rough device-busy estimate: isolated gpu_ms times the
+                // iteration count, over the actual window. It is only an
+                // estimate -- gpu_ms comes from a single cold activity run, so
+                // values above 100% mean sustained throughput beat that
+                // sample. Values well below 100% are the actionable case: the
+                // host could not issue launches fast enough, so the GPU idled
+                // and mj_per_op is charged that idle draw.
+                const double busy_pct = (e.total_ms > 0.0f)
+                    ? (result.gpu_ms * e.iterations) / e.total_ms * 100.0 : 0.0;
+                log->info("  energy: {:.4f} mJ/op  {:.1f} W  ({} iterations, "
+                          "~{:.0f}% device-busy)",
+                    e.mj_per_op, e.avg_watts, e.iterations, busy_pct);
+                if (busy_pct < 80.0) {
+                    log->warn("  energy: launch-bound (~{:.0f}% device-busy) - "
+                              "mj_per_op includes idle draw, treat as an upper bound",
+                              busy_pct);
+                }
+            } else {
+                log->warn("  energy: counter did not advance, try a longer window");
+            }
+        }
+
         result.sm_clock_end_mhz = power_.sm_clock_mhz();
         log->debug("  clocks: {} -> {} MHz",
             result.sm_clock_start_mhz, result.sm_clock_end_mhz);
