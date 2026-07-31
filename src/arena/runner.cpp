@@ -98,15 +98,12 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         if (config.collect_metrics) {
             log->info("  profiling: collecting hardware counters ...");
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
-            desc.initialize(ctx_);
+            // registers and shared memory come from the activity pass, which
+            // already ran above; no need to re-collect them here
+            result.registers_per_thread = activity.registers_per_thread;
+            result.shared_memory_bytes = activity.shared_memory_per_block;
 
-            auto profile_result = profiler_.profile(launch_kernel,
-                [&]() { desc.initialize(ctx_); });
-
-            result.registers_per_thread = profile_result.registers_per_thread;
-            result.shared_memory_bytes = profile_result.shared_memory_per_block;
-
-            auto& mv = profile_result.metric_values;
+            auto mv = profiler_.collect_counters(launch_kernel, reset_fn);
             if (mv.count(metric::OCCUPANCY)) {
                 result.achieved_occupancy = mv.at(metric::OCCUPANCY) / 100.0;
             }
