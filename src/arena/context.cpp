@@ -89,6 +89,11 @@ void Context::reset() {
     // clear device-level error state
     cuDevicePrimaryCtxReset(device_);
 
+    // every device allocation died with the context
+    allocation_sizes_.clear();
+    current_bytes_ = 0;
+    peak_bytes_ = 0;
+
     CUresult result;
 #if CUDA_VERSION >= 13000
     CUctxCreateParams params = {};
@@ -108,13 +113,24 @@ void Context::reset() {
 CUdeviceptr Context::allocate(size_t bytes) {
     CUdeviceptr ptr;
     check_cuda(cuMemAlloc(&ptr, bytes), "cuMemAlloc");
+
+    allocation_sizes_[ptr] = bytes;
+    current_bytes_ += bytes;
+    if (current_bytes_ > peak_bytes_) peak_bytes_ = current_bytes_;
+
     return ptr;
 }
 
 void Context::free(CUdeviceptr ptr) {
-    if (ptr) {
-        check_cuda(cuMemFree(ptr), "cuMemFree");
+    if (!ptr) return;
+
+    auto it = allocation_sizes_.find(ptr);
+    if (it != allocation_sizes_.end()) {
+        current_bytes_ -= it->second;
+        allocation_sizes_.erase(it);
     }
+
+    check_cuda(cuMemFree(ptr), "cuMemFree");
 }
 
 void Context::copy_to_device(CUdeviceptr dst, const void* src, size_t bytes) {

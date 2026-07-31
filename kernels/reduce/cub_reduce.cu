@@ -4,7 +4,7 @@
 namespace arena {
 
 class CubReduceDescriptor : public ReduceDescriptorBase {
-    void* d_temp_storage_ = nullptr;
+    CUdeviceptr d_temp_storage_ = 0;
     size_t temp_storage_bytes_ = 0;
     
 public:
@@ -23,12 +23,12 @@ public:
             reinterpret_cast<float*>(d_output_),
             n_
         );
-        cudaMalloc(&d_temp_storage_, temp_storage_bytes_);
+        if (temp_storage_bytes_ > 0) d_temp_storage_ = ctx.allocate(temp_storage_bytes_);
     }
-    
+
     void execute(Context& ctx) override {
         cub::DeviceReduce::Sum(
-            d_temp_storage_, temp_storage_bytes_,
+            reinterpret_cast<void*>(d_temp_storage_), temp_storage_bytes_,
             reinterpret_cast<float*>(d_input_),
             reinterpret_cast<float*>(d_output_),
             n_
@@ -36,8 +36,8 @@ public:
     }
     
     void cleanup(Context& ctx) override {
-        if (d_temp_storage_) cudaFree(d_temp_storage_);
-        d_temp_storage_ = nullptr;
+        if (d_temp_storage_) ctx.free(d_temp_storage_);
+        d_temp_storage_ = 0;
         ReduceDescriptorBase::cleanup(ctx);
     }
     

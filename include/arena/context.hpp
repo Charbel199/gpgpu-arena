@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 
 namespace arena {
 
@@ -20,6 +21,12 @@ public:
     // Allocate device memory for kernel inputs/outputs
     CUdeviceptr allocate(size_t bytes);
     void free(CUdeviceptr ptr);
+
+    // Device allocation accounting. Descriptors must allocate through this
+    // class for the numbers to be meaningful.
+    size_t bytes_allocated() const { return current_bytes_; }
+    size_t peak_bytes() const { return peak_bytes_; }
+    void   reset_peak() { peak_bytes_ = current_bytes_; }
 
     // Copy data to/from device
     void copy_to_device(CUdeviceptr dst, const void* src, size_t bytes);
@@ -51,6 +58,10 @@ private:
     int memory_clock_khz_;
     int memory_bus_width_;
     size_t total_mem_;
+
+    size_t current_bytes_ = 0;
+    size_t peak_bytes_ = 0;
+    std::unordered_map<CUdeviceptr, size_t> allocation_sizes_;
 };
 
 }
