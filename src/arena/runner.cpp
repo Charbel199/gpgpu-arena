@@ -26,7 +26,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         if (desc.needs_compilation()) {
             auto cr = compiler_.compile(desc.source_path());
             result.cache_hit = cr.cache_hit;
-            result.compile_time_ms = cr.compile_time_ms;
+            result.compile_ms = cr.compile_time_ms;
             desc.set_compile_result(cr);
         }
 
@@ -76,23 +76,23 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
                                                     config.number_of_runs);
         nvtxRangePop();
 
-        result.elapsed_ms = bench_result.median_ms;
+        result.op_ms = bench_result.median_ms;
         result.all_times_ms = bench_result.all_times_ms;
 
         // GPU-only kernel time via Activity API (single run, sums all sub-kernels)
         desc.initialize(ctx_);
         auto activity = profiler_.collect_activity(launch_kernel);
-        result.kernel_ms = activity.kernel_time_ms;
+        result.gpu_ms = activity.kernel_time_ms;
         result.sub_kernels = activity.sub_kernels;
         result.uses_module = desc.uses_module();
 
         double flops = desc.calculate_flops();
         double bytes = desc.calculate_bytes_accessed();
-        result.gflops = (flops / (result.elapsed_ms / 1000.0)) / 1e9;
-        result.bandwidth_gbps = (bytes / (result.elapsed_ms / 1000.0)) / 1e9;
+        result.gflops = (flops / (result.op_ms / 1000.0)) / 1e9;
+        result.bandwidth_gbps = (bytes / (result.op_ms / 1000.0)) / 1e9;
 
         log->info("  result: wall={:.3f} ms  kernel={:.3f} ms  {:.2f} GFLOPS  {:.2f} GB/s",
-            result.elapsed_ms, result.kernel_ms, result.gflops, result.bandwidth_gbps);
+            result.op_ms, result.gpu_ms, result.gflops, result.bandwidth_gbps);
 
         // profile
         if (config.collect_metrics) {
@@ -100,27 +100,28 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
             // registers and shared memory come from the activity pass, which
             // already ran above; no need to re-collect them here
-            result.registers_per_thread = activity.registers_per_thread;
-            result.shared_memory_bytes = activity.shared_memory_per_block;
+            result.counters.regs_per_thread = activity.registers_per_thread;
+            result.counters.shared_mem_bytes = activity.shared_memory_per_block;
 
             auto mv = profiler_.collect_counters(launch_kernel, reset_fn);
             if (mv.count(metric::OCCUPANCY)) {
-                result.achieved_occupancy = mv.at(metric::OCCUPANCY) / 100.0;
+                result.counters.occupancy = mv.at(metric::OCCUPANCY) / 100.0;
             }
             if (mv.count(metric::DRAM_READ)) {
-                result.dram_read_gbps = (mv.at(metric::DRAM_READ) / (result.elapsed_ms / 1000.0)) / 1e9;
+                result.counters.dram_read_gbps = (mv.at(metric::DRAM_READ) / (result.op_ms / 1000.0)) / 1e9;
             }
             if (mv.count(metric::DRAM_WRITE)) {
-                result.dram_write_gbps = (mv.at(metric::DRAM_WRITE) / (result.elapsed_ms / 1000.0)) / 1e9;
+                result.counters.dram_write_gbps = (mv.at(metric::DRAM_WRITE) / (result.op_ms / 1000.0)) / 1e9;
             }
             if (mv.count(metric::IPC)) {
-                result.ipc = mv.at(metric::IPC);
+                result.counters.ipc = mv.at(metric::IPC);
             }
 
             log->info("  profiling: regs={} shmem={}B occupancy={:.1f}% DRAM(R={:.2f} W={:.2f} GB/s) IPC={:.2f}",
-                result.registers_per_thread, result.shared_memory_bytes,
-                result.achieved_occupancy * 100.0,
-                result.dram_read_gbps, result.dram_write_gbps, result.ipc);
+                result.counters.regs_per_thread, result.counters.shared_mem_bytes,
+                result.counters.occupancy * 100.0,
+                result.counters.dram_read_gbps, result.counters.dram_write_gbps, result.counters.ipc);
+            result.counters.available = true;
             nvtxRangePop();
         }
 

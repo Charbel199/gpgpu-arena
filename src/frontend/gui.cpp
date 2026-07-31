@@ -371,9 +371,9 @@ void Gui::export_results_csv() {
     std::ofstream f(path);
     if (!f.is_open()) { log(LogEntry::ERR, "Failed to open " + path); return; }
 
-    f << "kernel,category,dsl,block,grid,wall_ms,gpu_ms,gflops,bandwidth_gbps,"
+    f << "kernel,category,dsl,block,grid,op_ms,gpu_ms,gflops,bandwidth_gbps,"
          "status,regs,shmem_bytes,occupancy_pct,ipc,dram_read_gbps,dram_write_gbps,"
-         "cache_hit,compile_time_ms\n";
+         "cache_hit,compile_ms\n";
 
     for (const auto& [cat, states] : kernels_by_category_) {
         for (const auto& k : states) {
@@ -383,13 +383,13 @@ void Gui::export_results_csv() {
               << dsl_type_name(detect_dsl_type(k.descriptor)) << ","
               << r.block_x << "x" << r.block_y << "x" << r.block_z << ","
               << r.grid_x << "x" << r.grid_y << "x" << r.grid_z << ","
-              << r.elapsed_ms << "," << r.kernel_ms << ","
+              << r.op_ms << "," << r.gpu_ms << ","
               << r.gflops << "," << r.bandwidth_gbps << ","
               << (r.success ? (r.verified ? "OK" : "WARN") : "FAIL") << ","
-              << r.registers_per_thread << "," << r.shared_memory_bytes << ","
-              << r.achieved_occupancy * 100.0 << "," << r.ipc << ","
-              << r.dram_read_gbps << "," << r.dram_write_gbps << ","
-              << (r.cache_hit ? "true" : "false") << "," << r.compile_time_ms << "\n";
+              << r.counters.regs_per_thread << "," << r.counters.shared_mem_bytes << ","
+              << r.counters.occupancy * 100.0 << "," << r.counters.ipc << ","
+              << r.counters.dram_read_gbps << "," << r.counters.dram_write_gbps << ","
+              << (r.cache_hit ? "true" : "false") << "," << r.compile_ms << "\n";
         }
     }
     log(LogEntry::INFO, "Exported to " + path);
@@ -790,7 +790,7 @@ void Gui::render_kernel_sidebar() {
             ImGui::TextColored(UITheme::TEXT_DIM, "--");
         } else if (k.result.success) {
             char tbuf[32];
-            format_time(k.result.elapsed_ms, tbuf, sizeof(tbuf));
+            format_time(k.result.op_ms, tbuf, sizeof(tbuf));
             ImGui::TextColored(k.result.verified ? UITheme::SUCCESS_GREEN : UITheme::WARN_YELLOW,
                 "%s", tbuf);
         } else {
@@ -989,7 +989,7 @@ void Gui::render_benchmark_panel() {
     // ================================================================
     {
         bool has_data    = sel && sel->has_run && sel->result.success;
-        bool has_profile = has_data && sel->result.achieved_occupancy > 0;
+        bool has_profile = has_data && sel->result.counters.occupancy > 0;
 
         float card_w  = Layout::KPI_CARD_WIDTH * s;
         float spacing = ImGui::GetStyle().ItemSpacing.x;
@@ -1000,7 +1000,7 @@ void Gui::render_benchmark_panel() {
         const char* no_profiler = "Enable GPU perf counters - see README profiling section";
 
         // Card 0: Median Time
-        if (has_data) format_time(sel->result.elapsed_ms, vbuf, sizeof(vbuf));
+        if (has_data) format_time(sel->result.op_ms, vbuf, sizeof(vbuf));
         else          snprintf(vbuf, sizeof(vbuf), "--");
         render_kpi_card(0, "Median Time", has_data ? vbuf : "--", "", -1.0f, has_data);
 
@@ -1027,23 +1027,23 @@ void Gui::render_benchmark_panel() {
         // Card 3: Occupancy
         if (3 % cols != 0) ImGui::SameLine();
         char occ_buf[64];
-        if (has_profile) snprintf(occ_buf, sizeof(occ_buf), "%.1f", sel->result.achieved_occupancy * 100.0);
+        if (has_profile) snprintf(occ_buf, sizeof(occ_buf), "%.1f", sel->result.counters.occupancy * 100.0);
         render_kpi_card(3, "Occupancy", has_profile ? occ_buf : "--", "%",
-            has_profile ? (float)sel->result.achieved_occupancy : -1.0f,
+            has_profile ? (float)sel->result.counters.occupancy : -1.0f,
             has_profile, has_profile ? nullptr : no_profiler);
 
         // Card 4: IPC
         if (4 % cols != 0) ImGui::SameLine();
         char ipc_buf[64];
-        bool has_ipc = has_profile && sel->result.ipc > 0;
-        if (has_ipc) snprintf(ipc_buf, sizeof(ipc_buf), "%.2f", sel->result.ipc);
+        bool has_ipc = has_profile && sel->result.counters.ipc > 0;
+        if (has_ipc) snprintf(ipc_buf, sizeof(ipc_buf), "%.2f", sel->result.counters.ipc);
         render_kpi_card(4, "IPC", has_ipc ? ipc_buf : "--", "",
             -1.0f, has_ipc, has_ipc ? nullptr : no_profiler);
 
         // Card 5: DRAM BW
         if (5 % cols != 0) ImGui::SameLine();
         char dram_buf[64];
-        double total_dram = has_profile ? sel->result.dram_read_gbps + sel->result.dram_write_gbps : 0.0;
+        double total_dram = has_profile ? sel->result.counters.dram_read_gbps + sel->result.counters.dram_write_gbps : 0.0;
         bool has_dram = total_dram > 0;
         if (has_dram) snprintf(dram_buf, sizeof(dram_buf), "%.1f", total_dram);
         render_kpi_card(5, "DRAM BW", has_dram ? dram_buf : "--", "GB/s",
@@ -1074,7 +1074,7 @@ void Gui::render_benchmark_panel() {
             if (ys[i] < min_t) min_t = ys[i];
             if (ys[i] > max_t) max_t = ys[i];
         }
-        double median_us = (double)sel->result.elapsed_ms * 1000.0;
+        double median_us = (double)sel->result.op_ms * 1000.0;
 
         float plot_h = 200 * s;
         if (ImPlot::BeginPlot("##TimingDist", {-1, plot_h})) {
@@ -1115,7 +1115,7 @@ void Gui::render_benchmark_panel() {
 
         for (const auto& k : *kernels) {
             if (k.has_run && k.result.success) {
-                bars.push_back({k.result.kernel_name, (double)k.result.elapsed_ms,
+                bars.push_back({k.result.kernel_name, (double)k.result.op_ms,
                                 detect_dsl_type(k.descriptor)});
             }
         }
@@ -1204,7 +1204,7 @@ void Gui::render_benchmark_panel() {
         for (const auto& k : *kernels) {
             if (k.has_run && k.result.success) {
                 entries.push_back({k.result.kernel_name,
-                    (double)k.result.elapsed_ms, (double)k.result.kernel_ms});
+                    (double)k.result.op_ms, (double)k.result.gpu_ms});
             }
         }
 
@@ -1357,10 +1357,10 @@ void Gui::render_benchmark_panel() {
         std::vector<double> occupancy, ipc_vals;
 
         for (const auto& k : *kernels) {
-            if (k.has_run && k.result.success && k.result.achieved_occupancy > 0) {
+            if (k.has_run && k.result.success && k.result.counters.occupancy > 0) {
                 prof_labels.push_back(k.result.kernel_name.c_str());
-                occupancy.push_back(k.result.achieved_occupancy * 100.0);
-                ipc_vals.push_back(k.result.ipc);
+                occupancy.push_back(k.result.counters.occupancy * 100.0);
+                ipc_vals.push_back(k.result.counters.ipc);
             }
         }
 
@@ -1411,7 +1411,7 @@ void Gui::render_benchmark_panel() {
         for (const auto& k : *kernels) {
             if (k.has_run && k.result.success && k.result.gflops > 0 && k.result.bandwidth_gbps > 0) {
                 // Only use measured DRAM bandwidth (requires profiling)
-                double actual_dram = k.result.dram_read_gbps + k.result.dram_write_gbps;
+                double actual_dram = k.result.counters.dram_read_gbps + k.result.counters.dram_write_gbps;
                 if (actual_dram <= 0) continue;  // skip kernels without profiling data
                 double ai = k.result.gflops / actual_dram;
                 points.push_back({ai, k.result.gflops, k.result.kernel_name,
@@ -1488,7 +1488,7 @@ void Gui::render_benchmark_panel() {
         char tl_header[128];
         snprintf(tl_header, sizeof(tl_header),
             "Sub-Kernel Timeline  (%d kernels, %.3f ms total)###SubKTL",
-            n, sel->result.kernel_ms);
+            n, sel->result.gpu_ms);
         if (ImGui::CollapsingHeader(tl_header, ImGuiTreeNodeFlags_DefaultOpen)) {
 
             // Summary line
@@ -1625,10 +1625,10 @@ void Gui::render_benchmark_panel() {
                                                              : entry.result.bandwidth_gbps);
                                     break;
                                 case ScalingMetric::WallTime:
-                                    ys.push_back((double)entry.result.elapsed_ms);
+                                    ys.push_back((double)entry.result.op_ms);
                                     break;
                                 case ScalingMetric::GpuTime:
-                                    ys.push_back((double)entry.result.kernel_ms);
+                                    ys.push_back((double)entry.result.gpu_ms);
                                     break;
                             }
                         }
@@ -1654,7 +1654,7 @@ void Gui::render_results_table() {
     bool show_gflops = is_matmul();
     bool has_profiling = false;
     for (const auto& k : *kernels) {
-        if (k.has_run && k.result.registers_per_thread > 0) {
+        if (k.has_run && k.result.counters.regs_per_thread > 0) {
             has_profiling = true; break;
         }
     }
@@ -1719,17 +1719,17 @@ void Gui::render_results_table() {
                             case Col_Kernel: cmp = ra.kernel_name.compare(rb.kernel_name); break;
                             case Col_Block:  cmp = (int)(ra.block_x * ra.block_y) - (int)(rb.block_x * rb.block_y); break;
                             case Col_Grid:   cmp = (int)(ra.grid_x * ra.grid_y) - (int)(rb.grid_x * rb.grid_y); break;
-                            case Col_Wall:   cmp = (ra.elapsed_ms < rb.elapsed_ms) ? -1 : (ra.elapsed_ms > rb.elapsed_ms) ? 1 : 0; break;
-                            case Col_GPU:    cmp = (ra.kernel_ms < rb.kernel_ms) ? -1 : (ra.kernel_ms > rb.kernel_ms) ? 1 : 0; break;
+                            case Col_Wall:   cmp = (ra.op_ms < rb.op_ms) ? -1 : (ra.op_ms > rb.op_ms) ? 1 : 0; break;
+                            case Col_GPU:    cmp = (ra.gpu_ms < rb.gpu_ms) ? -1 : (ra.gpu_ms > rb.gpu_ms) ? 1 : 0; break;
                             case Col_Perf: {
                                 double va = show_gflops ? ra.gflops : ra.bandwidth_gbps;
                                 double vb = show_gflops ? rb.gflops : rb.bandwidth_gbps;
                                 cmp = (va < vb) ? -1 : (va > vb) ? 1 : 0; break;
                             }
-                            case Col_Regs:  cmp = ra.registers_per_thread - rb.registers_per_thread; break;
-                            case Col_SHMem: cmp = ra.shared_memory_bytes - rb.shared_memory_bytes; break;
-                            case Col_Occup: cmp = (ra.achieved_occupancy < rb.achieved_occupancy) ? -1 : 1; break;
-                            case Col_IPC:   cmp = (ra.ipc < rb.ipc) ? -1 : (ra.ipc > rb.ipc) ? 1 : 0; break;
+                            case Col_Regs:  cmp = ra.counters.regs_per_thread - rb.counters.regs_per_thread; break;
+                            case Col_SHMem: cmp = ra.counters.shared_mem_bytes - rb.counters.shared_mem_bytes; break;
+                            case Col_Occup: cmp = (ra.counters.occupancy < rb.counters.occupancy) ? -1 : 1; break;
+                            case Col_IPC:   cmp = (ra.counters.ipc < rb.counters.ipc) ? -1 : (ra.counters.ipc > rb.counters.ipc) ? 1 : 0; break;
                             default: break;
                         }
                         return asc ? (cmp < 0) : (cmp > 0);
@@ -1782,7 +1782,7 @@ void Gui::render_results_table() {
             ImGui::TableNextColumn(); ImGui::Text("%ux%u", k.result.grid_x, k.result.grid_y);
 
             // Wall time with min/max/stddev tooltip
-            ImGui::TableNextColumn(); ImGui::Text("%.3f", k.result.elapsed_ms);
+            ImGui::TableNextColumn(); ImGui::Text("%.3f", k.result.op_ms);
             if (ImGui::IsItemHovered() && !k.result.all_times_ms.empty()) {
                 const auto& t = k.result.all_times_ms;
                 float tmin = *std::min_element(t.begin(), t.end());
@@ -1797,13 +1797,13 @@ void Gui::render_results_table() {
 
             // GPU time  highlight overhead
             ImGui::TableNextColumn();
-            ImGui::Text("%.3f", k.result.kernel_ms);
-            if (ImGui::IsItemHovered() && k.result.kernel_ms > 0 &&
-                k.result.elapsed_ms > k.result.kernel_ms * 1.05f) {
-                float overhead_pct = ((k.result.elapsed_ms - k.result.kernel_ms) /
-                                       k.result.elapsed_ms) * 100.0f;
+            ImGui::Text("%.3f", k.result.gpu_ms);
+            if (ImGui::IsItemHovered() && k.result.gpu_ms > 0 &&
+                k.result.op_ms > k.result.gpu_ms * 1.05f) {
+                float overhead_pct = ((k.result.op_ms - k.result.gpu_ms) /
+                                       k.result.op_ms) * 100.0f;
                 ImGui::SetTooltip("Host overhead: %.1f%% (%.3f ms)",
-                    overhead_pct, k.result.elapsed_ms - k.result.kernel_ms);
+                    overhead_pct, k.result.op_ms - k.result.gpu_ms);
             }
 
             ImGui::TableNextColumn();
@@ -1821,26 +1821,26 @@ void Gui::render_results_table() {
 
             if (has_profiling) {
                 ImGui::TableNextColumn();
-                if (k.result.registers_per_thread > 0)
-                    ImGui::Text("%d", k.result.registers_per_thread);
+                if (k.result.counters.regs_per_thread > 0)
+                    ImGui::Text("%d", k.result.counters.regs_per_thread);
                 else ImGui::TextColored(UITheme::TEXT_DIM, "-");
 
                 ImGui::TableNextColumn();
-                if (k.result.shared_memory_bytes > 0)
-                    ImGui::Text("%d", k.result.shared_memory_bytes);
+                if (k.result.counters.shared_mem_bytes > 0)
+                    ImGui::Text("%d", k.result.counters.shared_mem_bytes);
                 else ImGui::TextColored(UITheme::TEXT_DIM, "-");
 
                 ImGui::TableNextColumn();
-                if (k.result.achieved_occupancy > 0)
-                    ImGui::Text("%.1f", k.result.achieved_occupancy * 100.0);
+                if (k.result.counters.occupancy > 0)
+                    ImGui::Text("%.1f", k.result.counters.occupancy * 100.0);
                 else ImGui::TextColored(UITheme::TEXT_DIM, "-");
 
                 ImGui::TableNextColumn();
-                if (k.result.ipc > 0) ImGui::Text("%.2f", k.result.ipc);
+                if (k.result.counters.ipc > 0) ImGui::Text("%.2f", k.result.counters.ipc);
                 else ImGui::TextColored(UITheme::TEXT_DIM, "-");
             } else {
                 ImGui::TableNextColumn();
-                ImGui::Text("%d", k.result.registers_per_thread);
+                ImGui::Text("%d", k.result.counters.regs_per_thread);
             }
         }
 
@@ -1863,7 +1863,7 @@ void Gui::render_profile_sidebar() {
     auto* desc = sel->descriptor;
     const auto& r = sel->result;
     bool has_data     = sel->has_run;
-    bool has_counters = has_data && r.achieved_occupancy > 0;
+    bool has_counters = has_data && r.counters.occupancy > 0;
 
     // ================================================================
     // Compilation Info
@@ -1898,8 +1898,8 @@ void Gui::render_profile_sidebar() {
         else
             ImGui::TextColored(UITheme::WARN_YELLOW, "Cache: Miss (freshly compiled)");
 
-        if (r.compile_time_ms > 0)
-            ImGui::Text("Compile time: %.0f ms", r.compile_time_ms);
+        if (r.compile_ms > 0)
+            ImGui::Text("Compile time: %.0f ms", r.compile_ms);
         else
             ImGui::TextColored(UITheme::TEXT_DIM, "Compile time: <1 ms (cached)");
     } else {
@@ -1936,18 +1936,18 @@ void Gui::render_profile_sidebar() {
     }
 
     // Registers (from Activity API  usually available)
-    if (has_data && r.registers_per_thread > 0) {
-        ImGui::Text("Registers/thread: %d", r.registers_per_thread);
+    if (has_data && r.counters.regs_per_thread > 0) {
+        ImGui::Text("Registers/thread: %d", r.counters.regs_per_thread);
     } else {
         ImGui::TextColored(UITheme::TEXT_DIM, "Registers/thread: --");
     }
 
     // Shared memory
-    if (has_data && r.shared_memory_bytes > 0) {
-        if (r.shared_memory_bytes >= 1024)
-            ImGui::Text("Shared mem: %.1f KB", r.shared_memory_bytes / 1024.0f);
+    if (has_data && r.counters.shared_mem_bytes > 0) {
+        if (r.counters.shared_mem_bytes >= 1024)
+            ImGui::Text("Shared mem: %.1f KB", r.counters.shared_mem_bytes / 1024.0f);
         else
-            ImGui::Text("Shared mem: %d B", r.shared_memory_bytes);
+            ImGui::Text("Shared mem: %d B", r.counters.shared_mem_bytes);
     } else {
         ImGui::TextColored(UITheme::TEXT_DIM, "Shared mem: --");
     }
@@ -1969,18 +1969,18 @@ void Gui::render_profile_sidebar() {
 
     if (has_counters) {
         colored_bar("Achieved Occupancy",
-            (float)(r.achieved_occupancy * 100.0), 100.0f, "%.1f%%");
+            (float)(r.counters.occupancy * 100.0), 100.0f, "%.1f%%");
 
-        if (r.ipc > 0) {
-            colored_bar("IPC", (float)r.ipc, 4.0f, "%.2f");
+        if (r.counters.ipc > 0) {
+            colored_bar("IPC", (float)r.counters.ipc, 4.0f, "%.2f");
         }
 
-        double total_dram = r.dram_read_gbps + r.dram_write_gbps;
+        double total_dram = r.counters.dram_read_gbps + r.counters.dram_write_gbps;
         if (total_dram > 0) {
             colored_bar("DRAM Throughput", (float)total_dram,
                 peak_mem_bw_gbs_ > 0 ? peak_mem_bw_gbs_ : 1000.0f, "%.1f GB/s");
             ImGui::TextColored(UITheme::TEXT_DIM, "  R: %.1f  W: %.1f GB/s",
-                r.dram_read_gbps, r.dram_write_gbps);
+                r.counters.dram_read_gbps, r.counters.dram_write_gbps);
         }
     } else {
         ImGui::PushStyleColor(ImGuiCol_Text, UITheme::TEXT_DIM);
@@ -2192,19 +2192,19 @@ void Gui::benchmark_thread_func(
             bool matmul = (cat == "matmul");
             snprintf(buf, sizeof(buf), "%s: wall=%.3f ms  kernel=%.3f ms  %.2f %s",
                 pr.result.kernel_name.c_str(),
-                pr.result.elapsed_ms, pr.result.kernel_ms,
+                pr.result.op_ms, pr.result.gpu_ms,
                 matmul ? pr.result.gflops : pr.result.bandwidth_gbps,
                 matmul ? "GFLOPS" : "GB/s");
             pr.logs.push_back({LogEntry::INFO, buf});
 
-            if (config.collect_metrics && pr.result.achieved_occupancy > 0) {
+            if (config.collect_metrics && pr.result.counters.occupancy > 0) {
                 snprintf(buf, sizeof(buf),
                     "%s: regs=%d  shmem=%dB  occupancy=%.1f%%  IPC=%.2f",
                     pr.result.kernel_name.c_str(),
-                    pr.result.registers_per_thread,
-                    pr.result.shared_memory_bytes,
-                    pr.result.achieved_occupancy * 100.0,
-                    pr.result.ipc);
+                    pr.result.counters.regs_per_thread,
+                    pr.result.counters.shared_mem_bytes,
+                    pr.result.counters.occupancy * 100.0,
+                    pr.result.counters.ipc);
                 pr.logs.push_back({LogEntry::INFO, buf});
             }
 
@@ -2273,7 +2273,7 @@ void Gui::sweep_thread_func(
                 bool matmul = (cat == "matmul");
                 snprintf(buf, sizeof(buf), "%s [%s]: wall=%.3f ms  %.2f %s",
                     pr.result.kernel_name.c_str(), size_str.c_str(),
-                    pr.result.elapsed_ms,
+                    pr.result.op_ms,
                     matmul ? pr.result.gflops : pr.result.bandwidth_gbps,
                     matmul ? "GFLOPS" : "GB/s");
                 pr.logs.push_back({LogEntry::INFO, buf});
