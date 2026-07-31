@@ -21,7 +21,9 @@ cmake-build-*/
 
 # Binaries
 *.exe
-arena
+# root-anchored: a bare "arena" also matches the include/arena and src/arena
+# directories, which silently swallows every new source file added there
+/arena
 
 # Python
 *.pyc
