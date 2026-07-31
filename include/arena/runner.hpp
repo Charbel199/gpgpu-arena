@@ -3,7 +3,8 @@
 #include "arena/context.hpp"
 #include "arena/kernel_loader.hpp"
 #include "arena/compilers/kernel_compiler.hpp"
-#include "arena/benchmark.hpp"
+#include "arena/runner_config.hpp"
+#include "arena/measure.hpp"
 #include "arena/profiler.hpp"
 #include "arena/kernel_descriptor.hpp"
 #include <string>
@@ -11,14 +12,6 @@
 #include <map>
 
 namespace arena {
-
-struct RunConfig {
-    int warmup_runs = 10;
-    int number_of_runs = 10;
-    bool collect_metrics = false;
-
-    std::map<std::string, int> params;
-};
 
 struct RunResult {
     std::string kernel_name;
@@ -63,7 +56,7 @@ struct RunResult {
 class Runner {
 public:
     Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
-           Benchmark& benchmark, Profiler& profiler);
+           Profiler& profiler);
 
     RunResult run(KernelDescriptor& descriptor, const RunConfig& config);
 
@@ -82,7 +75,6 @@ private:
     Context& ctx_;
     KernelLoader& loader_;
     KernelCompiler& compiler_;
-    Benchmark& benchmark_;
     Profiler& profiler_;
 };
 

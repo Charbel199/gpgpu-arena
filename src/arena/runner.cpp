@@ -7,9 +7,8 @@
 namespace arena {
 
 Runner::Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
-               Benchmark& benchmark, Profiler& profiler)
-    : ctx_(ctx), loader_(loader), compiler_(compiler),
-      benchmark_(benchmark), profiler_(profiler) {}
+               Profiler& profiler)
+    : ctx_(ctx), loader_(loader), compiler_(compiler), profiler_(profiler) {}
 
 RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     RunResult result;
@@ -64,20 +63,17 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             }
         };
 
-        log->info("  warmup: {} runs ...", config.warmup_runs);
-        for (int i = 0; i < config.warmup_runs; i++) {
-            launch_kernel();
-        }
-        check_cuda(cuCtxSynchronize(), "warmup sync");
-        desc.cleanup(ctx_);
-        desc.allocate(ctx_);
-        desc.initialize(ctx_);
+        auto reset_fn = [&]() { desc.initialize(ctx_); };
+
+        log->info("  warmup ...");
+        auto warm = measure::warmup(launch_kernel, reset_fn, config);
+        log->info("  warmup: {} iterations, {}", warm.iterations,
+            warm.converged ? "converged" : "DID NOT CONVERGE");
 
         log->info("  benchmark: {} runs ...", config.number_of_runs);
-
         nvtxRangePushA(("BENCHMARK: " + result.kernel_name).c_str());
-        auto bench_result = benchmark_.run(launch_kernel, config.number_of_runs,
-            [&]() { desc.initialize(ctx_); }); // TODO: too complicated, why not simply pass in the DESCRIPTOR + LOADER maybe and internally clean up
+        auto bench_result = measure::time_operation(launch_kernel, reset_fn,
+                                                    config.number_of_runs);
         nvtxRangePop();
 
         result.elapsed_ms = bench_result.median_ms;

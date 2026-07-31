@@ -127,7 +127,7 @@ set(ARENA_SOURCES
     src/arena/compilers/kernel_compiler.cpp
     src/arena/profiler.cpp
     src/arena/power.cpp
-    src/arena/benchmark.cpp
+    src/arena/measure.cpp
     src/arena/measure_policy.cpp
     src/arena/runner.cpp
     ${KERNEL_DESCRIPTORS}
