@@ -107,6 +107,20 @@ void Context::reset() {
         cuGetErrorString(result, &err_str);
         log->error("Context reset failed: {} - subsequent kernels will fail", err_str ? err_str : "unknown");
         context_ = nullptr;
+        return;
+    }
+
+    // The caller (the benchmark worker thread) pushed the OLD context before
+    // its work loop. That context is now destroyed, so without rebinding here
+    // every subsequent kernel in the batch would run against a dead context.
+    CUresult bind = cuCtxSetCurrent(context_);
+    if (bind != CUDA_SUCCESS) {
+        const char* err_str;
+        cuGetErrorString(bind, &err_str);
+        log->error("Failed to bind new context to calling thread: {}",
+            err_str ? err_str : "unknown");
+    } else {
+        log->info("Context reset complete, rebound to calling thread");
     }
 }
 

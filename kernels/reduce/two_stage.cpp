@@ -78,6 +78,18 @@ public:
         ctx.free(d_output_);
         ctx.free(d_block_results_);
         d_input_ = d_output_ = d_block_results_ = 0;
+
+        // Drop the cached module. After a context reset these handles are
+        // dangling, and the `if (!module_)` guard in allocate() would
+        // otherwise never reload them.
+        //
+        // unload_all() is safe because loader_ is private to this descriptor
+        // and every launch has completed by now. Without it, the reload on
+        // the next allocate() would leak one module per run.
+        loader_.unload_all();
+        module_ = nullptr;
+        func_stage1_ = nullptr;
+        func_stage2_ = nullptr;
     }
 
     void execute(Context& ctx) override {
