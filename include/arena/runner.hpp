@@ -6,6 +6,7 @@
 #include "arena/runner_config.hpp"
 #include "arena/measure.hpp"
 #include "arena/profiler.hpp"
+#include "arena/power.hpp"
 #include "arena/kernel_descriptor.hpp"
 #include <string>
 #include <vector>
@@ -82,7 +83,7 @@ struct RunResult {
 class Runner {
 public:
     Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
-           Profiler& profiler);
+           Profiler& profiler, PowerMonitor& power);
 
     RunResult run(KernelDescriptor& descriptor, const RunConfig& config);
 
@@ -102,6 +103,7 @@ private:
     KernelLoader& loader_;
     KernelCompiler& compiler_;
     Profiler& profiler_;
+    PowerMonitor& power_;
 };
 
 }

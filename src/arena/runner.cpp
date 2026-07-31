@@ -2,13 +2,15 @@
 #include "arena/utils.hpp"
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <chrono>
 #include <nvtx3/nvToolsExt.h>
 
 namespace arena {
 
 Runner::Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
-               Profiler& profiler)
-    : ctx_(ctx), loader_(loader), compiler_(compiler), profiler_(profiler) {}
+               Profiler& profiler, PowerMonitor& power)
+    : ctx_(ctx), loader_(loader), compiler_(compiler),
+      profiler_(profiler), power_(power) {}
 
 RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     RunResult result;
@@ -30,14 +32,22 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             desc.set_compile_result(cr);
         }
 
+        // --- Tier 2: module load ---
         CUmodule module = nullptr;
         CUfunction func = nullptr;
         if (desc.uses_module()) {
+            auto load_t0 = std::chrono::steady_clock::now();
             module = loader_.load_module(desc.module_path());
             func = loader_.get_function(module, desc.function_name());
+            result.module_load_ms = std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - load_t0).count();
         }
+
+        // --- allocation, with memory accounting ---
+        ctx_.reset_peak();
         desc.allocate(ctx_);
         desc.initialize(ctx_);
+        result.peak_device_bytes = ctx_.peak_bytes();
 
         auto launch_config = desc.get_launch_config();
         log->debug("{} launch config: grid({},{},{}) block({},{},{}) shmem={}B",
@@ -65,11 +75,17 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
 
         auto reset_fn = [&]() { desc.initialize(ctx_); };
 
-        log->info("  warmup ...");
+        result.sm_clock_start_mhz = power_.sm_clock_mhz();
+
+        // --- Tier 2: warmup / cold start ---
         auto warm = measure::warmup(launch_kernel, reset_fn, config);
+        result.warmup_iterations = warm.iterations;
+        result.warmup_converged  = warm.converged;
+        result.first_launch_ms   = warm.first_launch_ms;
         log->info("  warmup: {} iterations, {}", warm.iterations,
             warm.converged ? "converged" : "DID NOT CONVERGE");
 
+        // --- Tier 1: operation timing ---
         log->info("  benchmark: {} runs ...", config.number_of_runs);
         nvtxRangePushA(("BENCHMARK: " + result.kernel_name).c_str());
         auto bench_result = measure::time_operation(launch_kernel, reset_fn,
@@ -79,58 +95,78 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         result.op_ms = bench_result.median_ms;
         result.all_times_ms = bench_result.all_times_ms;
 
-        // GPU-only kernel time via Activity API (single run, sums all sub-kernels)
-        desc.initialize(ctx_);
+        // --- Tier 1: SASS breakdown ---
+        reset_fn();
         auto activity = profiler_.collect_activity(launch_kernel);
         result.gpu_ms = activity.kernel_time_ms;
         result.sub_kernels = activity.sub_kernels;
+        result.launch_count = static_cast<int>(activity.sub_kernels.size());
+        result.overhead_ms = std::max(0.0f, result.op_ms - result.gpu_ms);
+        result.counters.regs_per_thread = activity.registers_per_thread;
+        result.counters.shared_mem_bytes = activity.shared_memory_per_block;
         result.uses_module = desc.uses_module();
 
-        double flops = desc.calculate_flops();
-        double bytes = desc.calculate_bytes_accessed();
-        result.gflops = (flops / (result.op_ms / 1000.0)) / 1e9;
-        result.bandwidth_gbps = (bytes / (result.op_ms / 1000.0)) / 1e9;
+        // --- throughput: op_ms denominator ---
+        result.gflops = measure::rate_per_sec(
+            desc.calculate_flops(), result.op_ms) / 1e9;
+        result.bandwidth_gbps = measure::rate_per_sec(
+            desc.calculate_bytes_accessed(), result.op_ms) / 1e9;
 
-        log->info("  result: wall={:.3f} ms  kernel={:.3f} ms  {:.2f} GFLOPS  {:.2f} GB/s",
-            result.op_ms, result.gpu_ms, result.gflops, result.bandwidth_gbps);
+        log->info("  result: op={:.3f} ms  gpu={:.3f} ms  overhead={:.3f} ms  "
+                  "{:.2f} GFLOPS  {:.2f} GB/s",
+            result.op_ms, result.gpu_ms, result.overhead_ms,
+            result.gflops, result.bandwidth_gbps);
 
         // profile
         if (config.collect_metrics) {
             log->info("  profiling: collecting hardware counters ...");
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
-            // registers and shared memory come from the activity pass, which
-            // already ran above; no need to re-collect them here
-            result.counters.regs_per_thread = activity.registers_per_thread;
-            result.counters.shared_mem_bytes = activity.shared_memory_per_block;
-
             auto mv = profiler_.collect_counters(launch_kernel, reset_fn);
+            nvtxRangePop();
+
+            // Counters are collected for a single launch replay, so the
+            // matching interval is single-launch SASS time, not the whole
+            // operation. Dividing by op_ms would mix a single-launch
+            // numerator with a multi-launch denominator.
             if (mv.count(metric::OCCUPANCY)) {
                 result.counters.occupancy = mv.at(metric::OCCUPANCY) / 100.0;
             }
             if (mv.count(metric::DRAM_READ)) {
-                result.counters.dram_read_gbps = (mv.at(metric::DRAM_READ) / (result.op_ms / 1000.0)) / 1e9;
+                result.counters.dram_read_gbps = measure::rate_per_sec(
+                    mv.at(metric::DRAM_READ), result.gpu_ms) / 1e9;
             }
             if (mv.count(metric::DRAM_WRITE)) {
-                result.counters.dram_write_gbps = (mv.at(metric::DRAM_WRITE) / (result.op_ms / 1000.0)) / 1e9;
+                result.counters.dram_write_gbps = measure::rate_per_sec(
+                    mv.at(metric::DRAM_WRITE), result.gpu_ms) / 1e9;
             }
             if (mv.count(metric::IPC)) {
                 result.counters.ipc = mv.at(metric::IPC);
             }
+            result.counters.available = true;
 
             log->info("  profiling: regs={} shmem={}B occupancy={:.1f}% DRAM(R={:.2f} W={:.2f} GB/s) IPC={:.2f}",
                 result.counters.regs_per_thread, result.counters.shared_mem_bytes,
                 result.counters.occupancy * 100.0,
                 result.counters.dram_read_gbps, result.counters.dram_write_gbps, result.counters.ipc);
-            result.counters.available = true;
-            nvtxRangePop();
         }
 
+        // --- verification gets its own clean run ---
+        // Independent of which profiling passes ran, so a multi-pass
+        // UserReplay counter collection cannot cause a spurious failure.
+        reset_fn();
+        launch_kernel();
+        check_cuda(cuCtxSynchronize(), "verify sync");
         result.verified = desc.verify(ctx_);
         if (result.verified) {
             log->info("  verify: passed");
         } else {
             log->warn("  verify: FAILED");
         }
+
+        result.sm_clock_end_mhz = power_.sm_clock_mhz();
+        log->debug("  clocks: {} -> {} MHz",
+            result.sm_clock_start_mhz, result.sm_clock_end_mhz);
+
         desc.cleanup(ctx_);
         result.success = true;
 

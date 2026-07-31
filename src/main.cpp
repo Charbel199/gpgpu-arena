@@ -9,6 +9,7 @@
 #include "arena/compilers/cutile_compiler.hpp"
 #include "arena/compilers/warp_compiler.hpp"
 #include "arena/profiler.hpp"
+#include "arena/power.hpp"
 #include "arena/runner.hpp"
 #include "arena/logger.hpp"
 
@@ -55,7 +56,8 @@ int main(int argc, char** argv) {
             std::make_unique<arena::WarpCompiler>(ARENA_KERNEL_DIR));
 
         arena::Profiler profiler;
-        arena::Runner runner(ctx, loader, compiler, profiler);
+        arena::PowerMonitor power(0);
+        arena::Runner runner(ctx, loader, compiler, profiler, power);
 
         auto categories = runner.get_categories();
         auto all_kernels = runner.get_all_kernels();
