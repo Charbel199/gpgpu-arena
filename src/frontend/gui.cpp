@@ -371,9 +371,12 @@ void Gui::export_results_csv() {
     std::ofstream f(path);
     if (!f.is_open()) { log(LogEntry::ERR, "Failed to open " + path); return; }
 
-    f << "kernel,category,dsl,block,grid,op_ms,gpu_ms,gflops,bandwidth_gbps,"
-         "status,regs,shmem_bytes,occupancy_pct,ipc,dram_read_gbps,dram_write_gbps,"
-         "cache_hit,compile_ms\n";
+    f << "kernel,category,dsl,block,grid,op_ms,gpu_ms,overhead_ms,launch_count,"
+         "gflops,bandwidth_gbps,status,counters_available,regs,shmem_bytes,"
+         "occupancy_pct,ipc,dram_read_gbps,dram_write_gbps,"
+         "peak_device_bytes,energy_available,mj_per_op,avg_watts,"
+         "module_load_ms,first_launch_ms,cache_hit,compile_ms,import_ms,invoke_ms,"
+         "warmup_iterations,warmup_converged,sm_clock_start_mhz,sm_clock_end_mhz\n";
 
     for (const auto& [cat, states] : kernels_by_category_) {
         for (const auto& k : states) {
@@ -383,13 +386,23 @@ void Gui::export_results_csv() {
               << dsl_type_name(detect_dsl_type(k.descriptor)) << ","
               << r.block_x << "x" << r.block_y << "x" << r.block_z << ","
               << r.grid_x << "x" << r.grid_y << "x" << r.grid_z << ","
-              << r.op_ms << "," << r.gpu_ms << ","
+              << r.op_ms << "," << r.gpu_ms << "," << r.overhead_ms << ","
+              << r.launch_count << ","
               << r.gflops << "," << r.bandwidth_gbps << ","
               << (r.success ? (r.verified ? "OK" : "WARN") : "FAIL") << ","
+              << (r.counters.available ? "true" : "false") << ","
               << r.counters.regs_per_thread << "," << r.counters.shared_mem_bytes << ","
               << r.counters.occupancy * 100.0 << "," << r.counters.ipc << ","
               << r.counters.dram_read_gbps << "," << r.counters.dram_write_gbps << ","
-              << (r.cache_hit ? "true" : "false") << "," << r.compile_ms << "\n";
+              << r.peak_device_bytes << ","
+              << (r.energy.available ? "true" : "false") << ","
+              << r.energy.mj_per_op << "," << r.energy.avg_watts << ","
+              << r.module_load_ms << "," << r.first_launch_ms << ","
+              << (r.cache_hit ? "true" : "false") << ","
+              << r.compile_ms << "," << r.import_ms << "," << r.invoke_ms << ","
+              << r.warmup_iterations << ","
+              << (r.warmup_converged ? "true" : "false") << ","
+              << r.sm_clock_start_mhz << "," << r.sm_clock_end_mhz << "\n";
         }
     }
     log(LogEntry::INFO, "Exported to " + path);
@@ -869,6 +882,15 @@ void Gui::render_run_controls() {
     ImGui::SliderInt("Warmup", &config_.warmup_runs, 0, 50);
     ImGui::SliderInt("Runs", &config_.number_of_runs, 1, 100);
     ImGui::Checkbox("Profile", &config_.collect_metrics);
+    ImGui::SameLine();
+    ImGui::Checkbox("Energy", &config_.collect_energy);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Sustained-load energy pass (adds ~%.0f ms per kernel).\n"
+            "Measures pipelined throughput, not isolated launches.\n"
+            "Whole-board energy: treat mJ/op as an upper bound.",
+            config_.energy_window_ms);
+    }
     if (config_.collect_metrics) {
         ImGui::SameLine();
         ImGui::TextColored(UITheme::WARN_YELLOW, "(slower)");
@@ -1660,9 +1682,10 @@ void Gui::render_results_table() {
     }
 
     enum ColumnID { Col_Kernel = 0, Col_Block, Col_Grid, Col_Wall, Col_GPU,
-                    Col_Perf, Col_Status, Col_Regs, Col_SHMem, Col_Occup, Col_IPC };
+                    Col_Overhead, Col_Launches, Col_Perf, Col_PeakMem, Col_Energy,
+                    Col_Status, Col_Regs, Col_SHMem, Col_Occup, Col_IPC };
 
-    int num_cols = has_profiling ? 11 : 8;
+    int num_cols = has_profiling ? 15 : 12;
 
     float table_h = std::min(ImGui::GetContentRegionAvail().y, 300 * s);
     if (table_h < 100 * s) table_h = 100 * s;
@@ -1677,12 +1700,20 @@ void Gui::render_results_table() {
             ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort, 0, Col_Kernel);
         ImGui::TableSetupColumn("Block",  ImGuiTableColumnFlags_WidthFixed, 70 * s, Col_Block);
         ImGui::TableSetupColumn("Grid",   ImGuiTableColumnFlags_WidthFixed, 80 * s, Col_Grid);
-        ImGui::TableSetupColumn("Wall (ms)",
+        ImGui::TableSetupColumn("Op (ms)",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Wall);
         ImGui::TableSetupColumn("GPU (ms)",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 60 * s, Col_GPU);
+        ImGui::TableSetupColumn("Overhead",
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 70 * s, Col_Overhead);
+        ImGui::TableSetupColumn("Lch",
+            ImGuiTableColumnFlags_WidthFixed, 38 * s, Col_Launches);
         ImGui::TableSetupColumn(show_gflops ? "GFLOPS" : "GB/s",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 60 * s, Col_Perf);
+        ImGui::TableSetupColumn("Peak Mem",
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_PeakMem);
+        ImGui::TableSetupColumn("mJ/op",
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Energy);
         ImGui::TableSetupColumn("Status",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 50 * s, Col_Status);
 
@@ -1726,6 +1757,10 @@ void Gui::render_results_table() {
                                 double vb = show_gflops ? rb.gflops : rb.bandwidth_gbps;
                                 cmp = (va < vb) ? -1 : (va > vb) ? 1 : 0; break;
                             }
+                            case Col_Overhead: cmp = (ra.overhead_ms < rb.overhead_ms) ? -1 : (ra.overhead_ms > rb.overhead_ms) ? 1 : 0; break;
+                            case Col_Launches: cmp = ra.launch_count - rb.launch_count; break;
+                            case Col_PeakMem:  cmp = (ra.peak_device_bytes < rb.peak_device_bytes) ? -1 : (ra.peak_device_bytes > rb.peak_device_bytes) ? 1 : 0; break;
+                            case Col_Energy:   cmp = (ra.energy.mj_per_op < rb.energy.mj_per_op) ? -1 : (ra.energy.mj_per_op > rb.energy.mj_per_op) ? 1 : 0; break;
                             case Col_Regs:  cmp = ra.counters.regs_per_thread - rb.counters.regs_per_thread; break;
                             case Col_SHMem: cmp = ra.counters.shared_mem_bytes - rb.counters.shared_mem_bytes; break;
                             case Col_Occup: cmp = (ra.counters.occupancy < rb.counters.occupancy) ? -1 : 1; break;
@@ -1765,6 +1800,12 @@ void Gui::render_results_table() {
                     ui_state_.selected_kernel_name = k.descriptor->name();
                     ui_state_.selected_category = k.descriptor->category();
                 }
+            }
+            if (k.has_run && k.result.success && !k.result.warmup_converged) {
+                ImGui::SameLine(0, 4);
+                ImGui::TextColored(UITheme::WARN_YELLOW, "~");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Warmup did not converge; clock was still drifting");
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::BeginTooltip();
@@ -1806,9 +1847,54 @@ void Gui::render_results_table() {
                     overhead_pct, k.result.op_ms - k.result.gpu_ms);
             }
 
+            // Overhead: launch latency and inter-kernel gaps
+            ImGui::TableNextColumn();
+            if (k.result.gpu_ms > 0.0f) {
+                float pct = (k.result.op_ms > 0.0f)
+                    ? (k.result.overhead_ms / k.result.op_ms) * 100.0f : 0.0f;
+                if (pct >= 50.0f) ImGui::TextColored(UITheme::WARN_YELLOW, "%.3f", k.result.overhead_ms);
+                else              ImGui::Text("%.3f", k.result.overhead_ms);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "%.1f%% of operation time.\n"
+                        "Launch latency and inter-kernel gaps: the cost of\n"
+                        "getting work onto the GPU, not the work itself.", pct);
+                }
+            } else {
+                ImGui::TextColored(UITheme::TEXT_DIM, "--");
+            }
+
+            ImGui::TableNextColumn();
+            if (k.result.launch_count > 0) ImGui::Text("%d", k.result.launch_count);
+            else                           ImGui::TextColored(UITheme::TEXT_DIM, "--");
+
             ImGui::TableNextColumn();
             if (show_gflops) ImGui::Text("%.1f", k.result.gflops);
             else             ImGui::Text("%.1f", k.result.bandwidth_gbps);
+
+            ImGui::TableNextColumn();
+            if (k.result.peak_device_bytes > 0) {
+                ImGui::Text("%.1f MB", k.result.peak_device_bytes / (1024.0 * 1024.0));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%zu bytes, high-water mark across this run",
+                        k.result.peak_device_bytes);
+            } else {
+                ImGui::TextColored(UITheme::TEXT_DIM, "--");
+            }
+
+            ImGui::TableNextColumn();
+            if (k.result.energy.available) {
+                ImGui::Text("%.3f", k.result.energy.mj_per_op);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "%.1f W average over %d iterations.\n"
+                        "Whole-board energy, so this is an upper bound on the\n"
+                        "kernel's marginal cost.",
+                        k.result.energy.avg_watts, k.result.energy.iterations);
+                }
+            } else {
+                ImGui::TextColored(UITheme::TEXT_DIM, "--");
+            }
 
             ImGui::TableNextColumn();
             if (k.result.success) {
@@ -1830,14 +1916,16 @@ void Gui::render_results_table() {
                     ImGui::Text("%d", k.result.counters.shared_mem_bytes);
                 else ImGui::TextColored(UITheme::TEXT_DIM, "-");
 
+                // "--" means the counter pass did not run, which is a
+                // different statement from a measured zero.
                 ImGui::TableNextColumn();
-                if (k.result.counters.occupancy > 0)
+                if (k.result.counters.available)
                     ImGui::Text("%.1f", k.result.counters.occupancy * 100.0);
-                else ImGui::TextColored(UITheme::TEXT_DIM, "-");
+                else ImGui::TextColored(UITheme::TEXT_DIM, "--");
 
                 ImGui::TableNextColumn();
-                if (k.result.counters.ipc > 0) ImGui::Text("%.2f", k.result.counters.ipc);
-                else ImGui::TextColored(UITheme::TEXT_DIM, "-");
+                if (k.result.counters.available) ImGui::Text("%.2f", k.result.counters.ipc);
+                else ImGui::TextColored(UITheme::TEXT_DIM, "--");
             } else {
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", k.result.counters.regs_per_thread);
@@ -1863,7 +1951,7 @@ void Gui::render_profile_sidebar() {
     auto* desc = sel->descriptor;
     const auto& r = sel->result;
     bool has_data     = sel->has_run;
-    bool has_counters = has_data && r.counters.occupancy > 0;
+    bool has_counters = has_data && r.counters.available;
 
     // ================================================================
     // Compilation Info
@@ -2066,6 +2154,65 @@ void Gui::render_profile_sidebar() {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s", sk.name.c_str());
             }
+        }
+    }
+
+    // ================================================================
+    // Cold start / build / measurement quality
+    //
+    // These are one-time or per-process costs, deliberately kept out of the
+    // main table: their units (ms) are not comparable with the per-invocation
+    // tier (ms/op), and nothing should sum across the two.
+    // ================================================================
+    if (has_data && r.success) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextColored(UITheme::TEXT_DIM, "Cold start (per process)");
+        ImGui::Text("Module load:  %.2f ms", r.module_load_ms);
+        ImGui::Text("First launch: %.3f ms", r.first_launch_ms);
+        if (r.op_ms > 0.0f && r.first_launch_ms > r.op_ms) {
+            ImGui::SameLine();
+            ImGui::TextColored(UITheme::TEXT_DIM, "(%.1fx steady state)",
+                r.first_launch_ms / r.op_ms);
+        }
+
+        ImGui::Spacing();
+        ImGui::TextColored(UITheme::TEXT_DIM, "Build (one time, cached)");
+        if (r.cache_hit) {
+            ImGui::TextColored(UITheme::TEXT_DIM, "cached");
+        } else if (r.invoke_ms > 0.0f) {
+            ImGui::Text("Compile: %.0f ms", r.compile_ms);
+            if (r.import_ms > 0.0f) {
+                ImGui::Text("Import:  %.0f ms", r.import_ms);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Python interpreter startup and module imports.\n"
+                        "Not part of the DSL's compile cost.");
+                }
+            }
+            ImGui::Text("Invoke:  %.0f ms", r.invoke_ms);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Full subprocess wall time, including spawn.");
+            }
+        } else {
+            ImGui::TextColored(UITheme::TEXT_DIM, "n/a (no runtime compilation)");
+        }
+
+        ImGui::Spacing();
+        ImGui::TextColored(UITheme::TEXT_DIM, "Measurement quality");
+        ImGui::Text("Warmup: %d iterations", r.warmup_iterations);
+        if (!r.warmup_converged) {
+            ImGui::SameLine();
+            ImGui::TextColored(UITheme::WARN_YELLOW, "(no convergence)");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Timings were still drifting when warmup hit its cap.\n"
+                    "This result was measured on an unsettled clock.");
+            }
+        }
+        if (r.sm_clock_start_mhz > 0) {
+            ImGui::Text("SM clock: %u -> %u MHz",
+                r.sm_clock_start_mhz, r.sm_clock_end_mhz);
         }
     }
 

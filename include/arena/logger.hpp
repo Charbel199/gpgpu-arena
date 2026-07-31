@@ -6,7 +6,7 @@
 
 namespace arena {
 
-// shared handle to the stdout sink so the TUI can mute it while running.
+// shared handle to the stdout sink so a full-screen frontend can mute it.
 inline std::shared_ptr<spdlog::sinks::stdout_color_sink_mt>& console_sink() {
     static std::shared_ptr<spdlog::sinks::stdout_color_sink_mt> s;
     return s;
