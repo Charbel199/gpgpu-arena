@@ -126,6 +126,7 @@ set(ARENA_SOURCES
     src/arena/compilers/warp_compiler.cpp
     src/arena/compilers/kernel_compiler.cpp
     src/arena/profiler.cpp
+    src/arena/power.cpp
     src/arena/benchmark.cpp
     src/arena/measure_policy.cpp
     src/arena/runner.cpp
@@ -148,7 +149,7 @@ else()
 endif()
 
 target_include_directories(arena PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::nvtx3 spdlog::spdlog nlohmann_json::nlohmann_json)
+target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::nvml CUDA::nvtx3 spdlog::spdlog nlohmann_json::nlohmann_json)
 target_compile_definitions(arena PRIVATE
     ARENA_KERNEL_DIR="${CMAKE_SOURCE_DIR}/kernels"
     ARENA_PYTHON="${Python3_EXECUTABLE}"

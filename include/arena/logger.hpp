@@ -39,6 +39,7 @@ inline void init_logging() {
     make_logger("loader");
     make_logger("compiler");
     make_logger("profiler");
+    make_logger("power");
     make_logger("benchmark");
     make_logger("runner");
     make_logger("verify");
