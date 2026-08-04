@@ -122,6 +122,17 @@ fp16 variants are separate entries in the same `reduce` table. At n=4M:
 | `reduce_fp16_accum_fp32` | fp16>fp32 | 1.5e-07 | accumulates in float |
 | `reduce_fp16_out_fp16` | fp16>fp16 | 5.8e-04 | clean arithmetic, half output |
 
+Supported storage types are fp32, fp16, bf16, both OCP fp8 variants
+(e4m3 and e5m2) and fp4 (e2m1). Buffers are sized in bits, so fp4 packs two
+values per byte, and tolerance is derived from the output type's mantissa
+with a floor of half an ulp: a kernel is never asked to be more accurate
+than the type it writes into.
+
+NVFP4 is not usable yet. The element type is there, but the format is fp4
+values with a shared e4m3 scale per 16 elements, and the base descriptors
+allocate no second buffer for those scales. `dtype_is_block_scaled()` flags
+it so nothing quietly treats it as a plain narrow type.
+
 Sources live under `kernels/<category>/<input dtype>/`. The folder is named for
 what a kernel reads, since that is what shapes the source: reading `__half*`
 rather than `float*` changes the signature and the load path, while the output

@@ -16,6 +16,12 @@ cmake-build-*/
 *.obj
 *.ptx
 *.cubin
+
+# Compile cache sidecars. These sit next to the cubins and record an absolute
+# source path, so they must never be committed. They land in kernels/ rather
+# than build/kernels/ whenever the binary runs with the repo root as its
+# working directory, since KernelCompiler's cache path is relative.
+kernels/*.json
 *.a
 *.so
 

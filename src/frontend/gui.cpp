@@ -39,6 +39,9 @@ namespace UITheme {
     constexpr ImVec4 DTYPE_F16_F16 = {0.93f,  0.39f,  0.24f,  1.0f};  // burnt orange
     constexpr ImVec4 DTYPE_B16_F32 = {0.72f,  0.55f,  0.90f,  1.0f};  // violet
     constexpr ImVec4 DTYPE_B16_B16 = {0.90f,  0.42f,  0.62f,  1.0f};  // rose
+    constexpr ImVec4 DTYPE_F8_F32  = {0.95f,  0.30f,  0.45f,  1.0f};  // crimson
+    constexpr ImVec4 DTYPE_F8_F8   = {0.80f,  0.20f,  0.35f,  1.0f};  // deep crimson
+    constexpr ImVec4 DTYPE_F4      = {0.65f,  0.15f,  0.45f,  1.0f};  // magenta
     constexpr ImVec4 DTYPE_OTHER   = {0.60f,  0.60f,  0.60f,  1.0f};
     constexpr ImVec4 CUB_BADGE     = {0.55f,  0.55f,  0.55f,  1.0f};  // gray
 
@@ -364,6 +367,11 @@ static ImVec4 dtype_color(const std::string& label) {
     if (label == "fp16>fp16") return UITheme::DTYPE_F16_F16;
     if (label == "bf16>fp32") return UITheme::DTYPE_B16_F32;
     if (label == "bf16>bf16") return UITheme::DTYPE_B16_B16;
+    // Narrower still. Matched on prefix so both fp8 variants share a family.
+    if (label.rfind("fp4", 0) == 0)  return UITheme::DTYPE_F4;
+    if (label.rfind("fp8", 0) == 0)
+        return label.find(">fp32") != std::string::npos ? UITheme::DTYPE_F8_F32
+                                                        : UITheme::DTYPE_F8_F8;
     return UITheme::DTYPE_OTHER;
 }
 

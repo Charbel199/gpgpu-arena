@@ -172,3 +172,100 @@ TEST_CASE("quantize_in_place") {
         CHECK(v[0] != 0.1f);   // 0.1 is not representable in half
     }
 }
+
+TEST_CASE("narrow float formats") {
+    SUBCASE("bit widths, including sub-byte") {
+        CHECK(dtype_bits(DType::FP32) == 32);
+        CHECK(dtype_bits(DType::FP8_E4M3) == 8);
+        CHECK(dtype_bits(DType::FP4_E2M1) == 4);
+    }
+    SUBCASE("buffer sizing rounds up for fp4") {
+        // Two values per byte, and an odd count still needs a whole byte.
+        CHECK(dtype_buffer_bytes(16, DType::FP4_E2M1) == 8);
+        CHECK(dtype_buffer_bytes(17, DType::FP4_E2M1) == 9);
+        CHECK(dtype_buffer_bytes(1, DType::FP4_E2M1) == 1);
+        CHECK(dtype_buffer_bytes(10, DType::FP8_E4M3) == 10);
+        CHECK(dtype_buffer_bytes(10, DType::FP32) == 40);
+    }
+    SUBCASE("tolerance loosens monotonically as the mantissa shrinks") {
+        CHECK(default_tolerance(DType::FP32) < default_tolerance(DType::FP16));
+        CHECK(default_tolerance(DType::FP16) < default_tolerance(DType::BF16));
+        CHECK(default_tolerance(DType::BF16) < default_tolerance(DType::FP8_E4M3));
+        CHECK(default_tolerance(DType::FP8_E4M3) < default_tolerance(DType::FP8_E5M2));
+        CHECK(default_tolerance(DType::FP8_E5M2) < default_tolerance(DType::FP4_E2M1));
+    }
+    SUBCASE("block-scaled formats are flagged") {
+        CHECK_FALSE(dtype_is_block_scaled(DType::FP8_E4M3));
+        CHECK(dtype_is_block_scaled(DType::FP4_E2M1));
+        CHECK(dtype_scale_block(DType::FP4_E2M1) == 16);
+    }
+}
+
+TEST_CASE("fp8 conversion") {
+    SUBCASE("e4m3 exact values round-trip") {
+        for (float f : {0.0f, 1.0f, -1.0f, 0.5f, 2.0f, 16.0f, -48.0f}) {
+            CHECK(fp8_e4m3_to_float(float_to_fp8_e4m3(f)) == f);
+        }
+    }
+    SUBCASE("e4m3 saturates rather than reaching infinity") {
+        // OCP e4m3 has no inf encoding; its largest finite value is 448.
+        const float big = fp8_e4m3_to_float(float_to_fp8_e4m3(1e6f));
+        CHECK(std::isfinite(big));
+        CHECK(big >= 240.0f);
+    }
+    SUBCASE("e5m2 keeps more range and less precision than e4m3") {
+        CHECK(fp8_e5m2_to_float(float_to_fp8_e5m2(4096.0f)) == 4096.0f);
+        CHECK(relative_error(fp8_e4m3_to_float(float_to_fp8_e4m3(1.1f)), 1.1) <
+              relative_error(fp8_e5m2_to_float(float_to_fp8_e5m2(1.1f)), 1.1));
+    }
+    SUBCASE("signed zero survives") {
+        CHECK(fp8_e4m3_to_float(float_to_fp8_e4m3(0.0f)) == 0.0f);
+        CHECK(std::signbit(fp8_e4m3_to_float(float_to_fp8_e4m3(-0.0f))));
+    }
+}
+
+TEST_CASE("fp4 e2m1") {
+    SUBCASE("the eight representable magnitudes are exact") {
+        for (float f : {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f}) {
+            CHECK(fp4_e2m1_to_float(float_to_fp4_e2m1(f)) == f);
+            CHECK(fp4_e2m1_to_float(float_to_fp4_e2m1(-f)) == -f);
+        }
+    }
+    SUBCASE("everything else snaps to the nearest of those") {
+        CHECK(fp4_e2m1_to_float(float_to_fp4_e2m1(2.6f)) == 3.0f);
+        CHECK(fp4_e2m1_to_float(float_to_fp4_e2m1(100.0f)) == 6.0f);   // saturates
+        CHECK(fp4_e2m1_to_float(float_to_fp4_e2m1(0.1f)) == 0.0f);
+    }
+}
+
+TEST_CASE("pack_values and unpack_value") {
+    SUBCASE("fp32 round-trips exactly") {
+        std::vector<float> v{1.0f, -2.5f, 3.25f};
+        auto b = pack_values(v, DType::FP32);
+        CHECK(b.size() == 12);
+        for (size_t i = 0; i < v.size(); i++)
+            CHECK(unpack_value(b.data(), i, DType::FP32) == v[i]);
+    }
+    SUBCASE("fp4 packs two per byte and reads back in order") {
+        // The nibble order matters: getting it wrong silently swaps pairs.
+        std::vector<float> v{0.5f, 6.0f, -1.0f, 2.0f};
+        auto b = pack_values(v, DType::FP4_E2M1);
+        CHECK(b.size() == 2);
+        for (size_t i = 0; i < v.size(); i++)
+            CHECK(unpack_value(b.data(), i, DType::FP4_E2M1) == v[i]);
+    }
+    SUBCASE("odd fp4 count still round-trips") {
+        std::vector<float> v{1.5f, -3.0f, 4.0f};
+        auto b = pack_values(v, DType::FP4_E2M1);
+        CHECK(b.size() == 2);
+        for (size_t i = 0; i < v.size(); i++)
+            CHECK(unpack_value(b.data(), i, DType::FP4_E2M1) == v[i]);
+    }
+    SUBCASE("fp8 round-trips through the buffer") {
+        std::vector<float> v{1.0f, -2.0f, 0.5f};
+        auto b = pack_values(v, DType::FP8_E4M3);
+        CHECK(b.size() == 3);
+        for (size_t i = 0; i < v.size(); i++)
+            CHECK(unpack_value(b.data(), i, DType::FP8_E4M3) == v[i]);
+    }
+}

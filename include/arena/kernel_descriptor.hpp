@@ -87,9 +87,15 @@ public:
         // entirely in the output type. Kernels that accumulate in something
         // wider and only narrow at the end, which is the sensible design, do
         // far better than that, and for a narrow output the unbounded figure
-        // reaches 15.6 at n=4M. An answer more than 10% off is wrong whatever
-        // the type, so that is the ceiling.
-        return std::min(scaled, 0.10);
+        // reaches 15.6 at n=4M.
+        //
+        // The cap itself has a floor of half an ulp of the output type: an
+        // answer cannot be more accurate than the type it is written into, so
+        // demanding 10% from an fp4 output, where a single value can be 25%
+        // off, would fail a correct kernel.
+        const double half_ulp =
+            0.5 / static_cast<double>(1ULL << (dtype_mantissa_bits(output_dtype()) - 1));
+        return std::min(scaled, std::max(0.10, half_ulp));
     }
 
     // Compare against a CPU reference and report how far off it was. Returning
