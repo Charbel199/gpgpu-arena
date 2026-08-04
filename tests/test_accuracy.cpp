@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <limits>
+#include <vector>
 
 using namespace arena;
 
@@ -104,5 +105,70 @@ TEST_CASE("dtype") {
         // 0.738 error a saturated accumulator produces.
         const double scaled = default_tolerance(DType::FP32) * std::sqrt(64e6);
         CHECK(scaled < 0.738);
+    }
+}
+
+TEST_CASE("half conversion") {
+    SUBCASE("exact values round-trip") {
+        for (float f : {0.0f, 1.0f, -1.0f, 0.5f, 2.0f, -256.0f, 1024.0f}) {
+            CHECK(half_to_float(float_to_half(f)) == f);
+        }
+    }
+    SUBCASE("signed zero is preserved") {
+        CHECK(half_to_float(float_to_half(-0.0f)) == 0.0f);
+        CHECK(std::signbit(half_to_float(float_to_half(-0.0f))));
+    }
+    SUBCASE("integers above 2048 start losing steps") {
+        // This is why an fp16 accumulator stops counting: 2049 is not
+        // representable, so adding 1.0 to 2048.0 does nothing.
+        CHECK(half_to_float(float_to_half(2048.0f)) == 2048.0f);
+        CHECK(half_to_float(float_to_half(2049.0f)) == 2048.0f);
+    }
+    SUBCASE("overflow saturates to infinity") {
+        CHECK(std::isinf(half_to_float(float_to_half(1e6f))));
+    }
+    SUBCASE("underflow reaches subnormals then zero") {
+        CHECK(half_to_float(float_to_half(1e-7f)) > 0.0f);    // subnormal
+        CHECK(half_to_float(float_to_half(1e-10f)) == 0.0f);  // too small
+    }
+    SUBCASE("NaN stays NaN") {
+        CHECK(std::isnan(half_to_float(float_to_half(
+            std::numeric_limits<float>::quiet_NaN()))));
+    }
+    SUBCASE("round-trip error stays within one half-ulp") {
+        for (float f : {0.3f, 1.7f, -12.34f, 987.6f}) {
+            CHECK(relative_error(half_to_float(float_to_half(f)), f) < 1e-3);
+        }
+    }
+}
+
+TEST_CASE("bf16 conversion") {
+    SUBCASE("exact values round-trip") {
+        for (float f : {0.0f, 1.0f, -2.0f, 256.0f}) {
+            CHECK(bf16_to_float(float_to_bf16(f)) == f);
+        }
+    }
+    SUBCASE("keeps fp32 range but loses mantissa") {
+        // bf16 holds far larger values than fp16, at much lower precision.
+        CHECK(bf16_to_float(float_to_bf16(1e30f)) > 1e29f);
+        CHECK(relative_error(bf16_to_float(float_to_bf16(1.234f)), 1.234f) < 1e-2);
+    }
+    SUBCASE("NaN stays NaN") {
+        CHECK(std::isnan(bf16_to_float(float_to_bf16(
+            std::numeric_limits<float>::quiet_NaN()))));
+    }
+}
+
+TEST_CASE("quantize_in_place") {
+    SUBCASE("fp32 leaves data untouched") {
+        std::vector<float> v{0.1f, 0.2f, 0.3f}, orig = v;
+        quantize_in_place(v, DType::FP32);
+        CHECK(v == orig);
+    }
+    SUBCASE("fp16 rounds every element") {
+        std::vector<float> v{0.1f, 0.2f, 0.3f};
+        quantize_in_place(v, DType::FP16);
+        for (size_t i = 0; i < v.size(); i++) CHECK(v[i] != 0.0f);
+        CHECK(v[0] != 0.1f);   // 0.1 is not representable in half
     }
 }

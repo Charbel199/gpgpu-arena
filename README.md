@@ -56,7 +56,7 @@ Throughput (GFLOPS, GB/s) divides by `op_ms`. Hardware counters divide by
 `gpu_ms`, because the range profiler samples a single launch replay.
 
 Warmup runs until timings stabilise rather than a fixed count, using median
-drift between consecutive windows — a sliding-variance test reports a
+drift between consecutive windows. A sliding-variance test would report a
 steadily boosting clock as stable. Results record `warmup_converged` so you
 can tell when a number was measured on an unsettled clock.
 
@@ -64,6 +64,37 @@ Energy uses NVML over a sustained back-to-back window, since NVML updates far
 more slowly than a single kernel runs. It reports whole-board energy, so
 `mj_per_op` is an upper bound on a kernel's marginal cost; the runner logs a
 device-busy estimate and warns when the loop is launch-bound.
+
+## Numerics
+
+Kernels are judged on measured error, not a pass/fail. Every category compares
+against a CPU reference accumulated in `double` and reports the max and mean
+relative error alongside the tolerance it was judged against.
+
+Tolerance comes from the storage type's mantissa, scaled by the square root of
+the accumulation length, since summing more values legitimately costs
+precision. A kernel that is merely imprecise then reads differently from one
+that is wrong: `reduce_baseline` over 64M ones reports `7.4e-01`, which is an
+fp32 accumulator saturating at 2^24, not a bug.
+
+Input data is selectable with `--dist`:
+
+| Distribution | Use |
+| --- | --- |
+| `ones` | Fast sanity check. Hides ordering bugs: every reduce kernel scores exactly zero. |
+| `uniform` | Default. Mixed signs, so accumulation order starts to matter. |
+| `normal` | Occasional large magnitudes. |
+| `adversarial` | Mixed magnitudes, denormals and exact zeros. |
+
+`--seed` makes a run reproducible; the CPU reference is regenerated from the
+same numbers the GPU saw.
+
+Dtype is part of a kernel's identity rather than a run-time switch, so
+`reduce_fp16_accum_fp16` and `reduce_fp16_accum_fp32` are separate entries in
+the same `reduce` table. Those two differ only in the accumulator type and sit
+about four orders of magnitude apart on error, which is the clearest argument
+for reporting the number at all. Kernel sources live under
+`kernels/<category>/<dtype>/`.
 
 ## Known Issues
 
@@ -73,7 +104,7 @@ device-busy estimate and warns when the loop is launch-bound.
   accept. Reproduces identically on older commits, so it is an upstream API
   change rather than a regression.
 
-- **The compile cache is keyed on source mtime only** — not on target
+- The compile cache is keyed on source mtime alone, not on target
   architecture, compiler version, or compile flags. A cubin can outlive the
   toolchain that produced it and be reused silently. This has been observed
   producing wrong results that verification caught. Clear it with

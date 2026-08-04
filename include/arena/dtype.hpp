@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace arena {
 
@@ -30,5 +32,20 @@ int dtype_mantissa_bits(DType d);
 // than hand-picked. Scale it by the accumulation length to get a kernel's
 // tolerance: summing more values legitimately costs more precision.
 double default_tolerance(DType d, ComputeMode m = ComputeMode::Default);
+
+// IEEE 754 binary16 conversion, round to nearest even. Implemented in plain
+// C++ rather than via cuda_fp16.h because descriptors are compiled by the host
+// compiler, which does not see CUDA headers.
+uint16_t float_to_half(float f);
+float    half_to_float(uint16_t h);
+
+// bfloat16: the top 16 bits of an fp32, so conversion is a shift plus rounding.
+uint16_t float_to_bf16(float f);
+float    bf16_to_float(uint16_t h);
+
+// Round-trips a buffer through the storage type, giving the values the GPU
+// will actually see. The CPU reference is built from these so a kernel is
+// judged on its arithmetic, not on the input rounding it had no say in.
+void quantize_in_place(std::vector<float>& v, DType d);
 
 }

@@ -4,6 +4,7 @@
 #include <spdlog/spdlog.h>
 #include <vector>
 #include <cmath>
+#include <cstdint>
 
 namespace arena {
 
@@ -41,7 +42,7 @@ public:
     
     void allocate(Context& ctx) override {
         capture_device_props(ctx);
-        size_input_ = n_ * sizeof(float);
+        size_input_ = (size_t)n_ * dtype_size(dtype());
         size_output_ = sizeof(float);
         
         d_input_ = ctx.allocate(size_input_);
@@ -52,12 +53,24 @@ public:
         std::vector<float> h_input;
         generate(h_input, n_, distribution_, input_seed_);
 
-        // Reference is computed from the data we actually upload, in double,
-        // so it stays correct whatever the generator produces.
+        // Round the inputs to the storage type first, then take the reference
+        // from those. A kernel is then judged on its own arithmetic rather
+        // than on input rounding it had no say in.
+        quantize_in_place(h_input, dtype());
+
         reference_ = 0.0;
         for (float v : h_input) reference_ += v;
 
-        ctx.copy_to_device(d_input_, h_input.data(), size_input_);
+        if (dtype() == DType::FP32) {
+            ctx.copy_to_device(d_input_, h_input.data(), size_input_);
+        } else {
+            std::vector<uint16_t> packed(n_);
+            for (int i = 0; i < n_; i++) {
+                packed[i] = (dtype() == DType::FP16) ? float_to_half(h_input[i])
+                                                     : float_to_bf16(h_input[i]);
+            }
+            ctx.copy_to_device(d_input_, packed.data(), size_input_);
+        }
 
         float zero = 0.0f;
         ctx.copy_to_device(d_output_, &zero, sizeof(float));

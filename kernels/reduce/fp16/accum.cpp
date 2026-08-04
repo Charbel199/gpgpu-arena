@@ -1,0 +1,68 @@
+#include "arena/categories/reduce_base.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+namespace arena {
+
+// Shared setup for the two accumulator variants. A small grid on purpose: each
+// thread then sums roughly n / (sm_count * 4 * 256) values, and it is the
+// length of that per-thread run that decides whether a half accumulator
+// survives.
+class Fp16AccumBase : public ReduceDescriptorBase {
+public:
+    DType dtype() const override { return DType::FP16; }
+    bool needs_compilation() const override { return true; }
+    std::string module_path() const override { return compile_result_.module_path; }
+    std::string source_path() const override { return "reduce/fp16/accum.cu"; }
+
+    // The sequential chain here is one thread's chunk, not all of n: a tree
+    // combines the per-thread partials afterwards. Using n would give an fp16
+    // tolerance of 15.6, which is 1560% error and would admit anything.
+    //
+    // The category default stays n because that is what a kernel funnelling
+    // every element through one global atomic actually does.
+    int accumulation_length() const override {
+        const auto c = get_launch_config();
+        const long threads = (long)c.grid_x * c.block_x;
+        if (threads <= 0) return n_;
+        return static_cast<int>(std::max(1L, ((long)n_ + threads - 1) / threads));
+    }
+
+    KernelLoader::LaunchConfig get_launch_config() const override {
+        return {
+            .grid_x = static_cast<unsigned>(sm_count() * 4),
+            .grid_y = 1, .grid_z = 1,
+            .block_x = 256, .block_y = 1, .block_z = 1,
+            .shared_mem_bytes = 33 * sizeof(float)
+        };
+    }
+};
+
+struct ReduceFp16AccumFp16 : Fp16AccumBase {
+    std::string name() const override { return "reduce_fp16_accum_fp16"; }
+    std::string function_name() const override { return "reduce_sum_fp16_accum"; }
+    std::string description() const override {
+        return "fp16 input, half accumulator (stops counting past 2048)";
+    }
+};
+
+struct ReduceFp16AccumFp32 : Fp16AccumBase {
+    std::string name() const override { return "reduce_fp16_accum_fp32"; }
+    std::string function_name() const override { return "reduce_sum_fp32_accum"; }
+    std::string description() const override {
+        return "fp16 input, float accumulator";
+    }
+
+    // The accumulator is fp32, so the arithmetic deserves an fp32 budget even
+    // though the storage is half. Judging it at half precision would hide the
+    // whole point of the comparison.
+    double tolerance() const override {
+        return default_tolerance(DType::FP32) * std::sqrt((double)accumulation_length());
+    }
+};
+
+REGISTER_KERNEL(ReduceFp16AccumFp16);
+REGISTER_KERNEL(ReduceFp16AccumFp32);
+
+}
