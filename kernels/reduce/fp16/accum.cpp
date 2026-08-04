@@ -1,7 +1,5 @@
 #include "arena/categories/reduce_base.hpp"
 
-#include <algorithm>
-#include <cmath>
 
 namespace arena {
 
@@ -17,19 +15,6 @@ public:
     bool needs_compilation() const override { return true; }
     std::string module_path() const override { return compile_result_.module_path; }
     std::string source_path() const override { return "reduce/fp16/accum.cu"; }
-
-    // The sequential chain here is one thread's chunk, not all of n: a tree
-    // combines the per-thread partials afterwards. Using n would give an fp16
-    // tolerance of 15.6, which is 1560% error and would admit anything.
-    //
-    // The category default stays n because that is what a kernel funnelling
-    // every element through one global atomic actually does.
-    int accumulation_length() const override {
-        const auto c = get_launch_config();
-        const long threads = (long)c.grid_x * c.block_x;
-        if (threads <= 0) return n_;
-        return static_cast<int>(std::max(1L, ((long)n_ + threads - 1) / threads));
-    }
 
     KernelLoader::LaunchConfig get_launch_config() const override {
         return {

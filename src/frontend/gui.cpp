@@ -1829,6 +1829,19 @@ void Gui::render_results_table() {
             const auto& k = (*kernels)[idx];
             ImGui::TableNextRow();
 
+            // Tint the whole row when something is off, so a bad result is
+            // visible without reading the Status column. Kept low-alpha: it
+            // has to sit under the text without fighting it.
+            if (!k.result.success) {
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                    ImGui::GetColorU32(ImVec4(UITheme::ERROR_RED.x, UITheme::ERROR_RED.y,
+                                              UITheme::ERROR_RED.z, 0.16f)));
+            } else if (!k.result.verified) {
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                    ImGui::GetColorU32(ImVec4(UITheme::WARN_YELLOW.x, UITheme::WARN_YELLOW.y,
+                                              UITheme::WARN_YELLOW.z, 0.14f)));
+            }
+
             // Kernel name with DSL color tag + click-to-select
             ImGui::TableNextColumn();
 
