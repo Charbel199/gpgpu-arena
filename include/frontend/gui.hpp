@@ -1,5 +1,6 @@
 #pragma once
 
+#include "arena/cli_args.hpp"
 #include "arena/runner.hpp"
 #include "arena/kernel_descriptor.hpp"
 #include <GLFW/glfw3.h>
@@ -28,6 +29,12 @@ struct KernelState {
     arena::RunResult result;
     bool selected = true;
     bool has_run = false;
+
+    // Config every later run of this kernel uses, once tuning has found one.
+    // Kernels tune to different block sizes, so this has to be per kernel
+    // rather than a single setting on RunConfig.
+    arena::cli::TuningVariant pinned;
+    bool has_pinned = false;
 };
 
 struct SizedResult {
@@ -41,7 +48,16 @@ struct SizedResult {
 // UI shows, since the two axes have nothing else in common.
 struct TunedResult {
     std::string label;
+    arena::cli::TuningVariant variant;   // kept so the winner can be pinned
     arena::RunResult result;
+};
+
+// One kernel to benchmark, at one config. The config travels with the work
+// item so the benchmark thread never reads kernel state the UI thread owns.
+struct BenchWork {
+    std::string category;
+    arena::KernelDescriptor* descriptor = nullptr;
+    arena::cli::TuningVariant variant;
 };
 
 // Circular buffer for per-kernel timing history across multiple benchmark runs
@@ -107,19 +123,19 @@ private:
     void run_selected_kernels();
     void run_sweep();
     void run_tuning();
+    void apply_best_configs();
+    void clear_pinned_configs();
     void reset_results();
     void refresh_kernels();
     void select_category(const std::string& category);
     void log(LogEntry::Level level, const std::string& msg);
 
     // Threading
-    void benchmark_thread_func(std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
-                               arena::RunConfig config);
-    void sweep_thread_func(std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
+    void benchmark_thread_func(std::vector<BenchWork> work, arena::RunConfig config);
+    void sweep_thread_func(std::vector<BenchWork> work,
                            std::vector<std::map<std::string, int>> sweep_configs,
                            arena::RunConfig config);
-    void tuning_thread_func(std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
-                            arena::RunConfig config);
+    void tuning_thread_func(std::vector<BenchWork> work, arena::RunConfig config);
     void render_tuning_section();
     void drain_pending_results();
     bool is_matmul() const { return current_category_ == "matmul"; }
@@ -176,6 +192,7 @@ private:
         // Set only by a tuning run, and it is what routes the result to the
         // tuning table instead of overwriting the kernel's headline result.
         std::string tuning_label;
+        arena::cli::TuningVariant tuning_variant;
     };
     std::vector<PendingResult> pending_results_;  // guarded by mutex_
 

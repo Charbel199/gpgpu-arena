@@ -28,7 +28,9 @@ std::vector<arena::cli::TuningVariant> tuning_variants(
 }
 
 // What the table shows for one config. A CUDA kernel varies one number, so
-// "block=256" says everything; a DSL kernel varies named knobs.
+// "block=256" says everything; a DSL kernel varies named knobs. A kernel with
+// no axis at all reads "default": a block size of 0 means the descriptor
+// chooses, not that anything launched with zero threads.
 std::string tuning_label_for(const arena::cli::TuningVariant& v) {
     if (!v.defines.empty()) {
         std::string out;
@@ -38,6 +40,7 @@ std::string tuning_label_for(const arena::cli::TuningVariant& v) {
         }
         return out;
     }
+    if (v.block_size <= 0) return "default";
     return "block=" + std::to_string(v.block_size);
 }
 
@@ -304,7 +307,7 @@ void Gui::drain_pending_results() {
         if (!pr.tuning_label.empty()) {
             if (pr.result.success) {
                 tuning_history_[pr.category][pr.kernel_name].push_back(
-                    {pr.tuning_label, pr.result});
+                    {pr.tuning_label, pr.tuning_variant, pr.result});
             }
             continue;
         }
@@ -1049,6 +1052,26 @@ void Gui::render_run_controls() {
         int selected_count = 0;
         if (auto* ks = current_kernels()) {
             for (const auto& k : *ks) if (k.selected) selected_count++;
+        }
+
+        int pinned_count = 0;
+        if (auto* ks = current_kernels()) {
+            for (const auto& k : *ks) if (k.selected && k.has_pinned) pinned_count++;
+        }
+        if (pinned_count > 0) {
+            ImGui::TextColored(UITheme::ACCENT, "%d kernel(s) at a tuned config",
+                               pinned_count);
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                if (auto* ks = current_kernels()) {
+                    for (const auto& k : *ks) {
+                        if (!k.selected || !k.has_pinned || !k.descriptor) continue;
+                        ImGui::BulletText("%s: %s", k.descriptor->name().c_str(),
+                                          tuning_label_for(k.pinned).c_str());
+                    }
+                }
+                ImGui::EndTooltip();
+            }
         }
 
         ImGui::BeginDisabled(selected_count == 0);
@@ -1861,8 +1884,37 @@ void Gui::render_tuning_section() {
 
     if (!ImGui::CollapsingHeader("Tuning", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
+
     ImGui::TextColored(UITheme::TEXT_DIM,
         "Best and worst config per kernel at the current problem size.");
+
+    // Tuning is only half useful if the answer cannot be used, so applying it
+    // lives right next to the numbers that justify it.
+    ImGui::BeginDisabled(benchmark_running_);
+    if (ImGui::Button("Apply Best Configs")) {
+        apply_best_configs();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Pin each kernel's fastest config.\n"
+            "Run Selected and Run Sweep use it from then on.");
+    }
+
+    bool any_pinned = false;
+    if (auto* ks = current_kernels()) {
+        for (const auto& k : *ks) if (k.has_pinned) { any_pinned = true; break; }
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!any_pinned || benchmark_running_);
+    if (ImGui::Button("Clear Pinned")) {
+        clear_pinned_configs();
+    }
+    ImGui::EndDisabled();
+    if (any_pinned) {
+        ImGui::SameLine();
+        ImGui::TextColored(UITheme::ACCENT, "pinned configs active");
+    }
     ImGui::Spacing();
 
     const ImGuiTableFlags flags = ImGuiTableFlags_Borders |
@@ -1898,6 +1950,19 @@ void Gui::render_tuning_section() {
 
             ImGui::TableSetColumnIndex(1);
             ImGui::TextColored(UITheme::ACCENT, "%s", best->label.c_str());
+            bool pinned_here = false;
+            if (auto* ks = current_kernels()) {
+                for (const auto& k : *ks) {
+                    if (k.descriptor && k.descriptor->name() == name && k.has_pinned) {
+                        pinned_here = true;
+                        break;
+                    }
+                }
+            }
+            if (pinned_here) {
+                ImGui::SameLine();
+                ImGui::TextColored(UITheme::CUDA_BADGE, "[pinned]");
+            }
             ImGui::TableSetColumnIndex(2);
             ImGui::Text("%.4f ms", best->result.op_ms);
             ImGui::TableSetColumnIndex(3);
@@ -2661,8 +2726,7 @@ void Gui::render_log_panel() {
 // Benchmark thread (unchanged logic, preserved from original)
 // ============================================================================
 void Gui::benchmark_thread_func(
-    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
-    arena::RunConfig config) {
+    std::vector<BenchWork> work, arena::RunConfig config) {
 
     CUcontext cuda_ctx = runner_.context().handle();
     cuCtxPushCurrent(cuda_ctx);
@@ -2670,7 +2734,7 @@ void Gui::benchmark_thread_func(
     for (int i = 0; i < (int)work.size(); i++) {
         if (cancel_requested_) break;
 
-        auto& [cat, descriptor] = work[i];
+        auto& [cat, descriptor, variant] = work[i];
         benchmark_current_ = i;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2683,7 +2747,10 @@ void Gui::benchmark_thread_func(
         pr.params = config.params;
         pr.logs.push_back({LogEntry::INFO, "Running " + descriptor->name() + " ..."});
 
-        pr.result = runner_.run(*descriptor, config);
+        auto run_config = config;
+        run_config.block_size      = variant.block_size;
+        run_config.compile_options = variant.defines;
+        pr.result = runner_.run(*descriptor, run_config);
 
         if (pr.result.success) {
             char buf[256];
@@ -2730,7 +2797,7 @@ void Gui::benchmark_thread_func(
 }
 
 void Gui::sweep_thread_func(
-    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
+    std::vector<BenchWork> work,
     std::vector<std::map<std::string, int>> sweep_configs,
     arena::RunConfig config) {
 
@@ -2742,7 +2809,7 @@ void Gui::sweep_thread_func(
         if (cancel_requested_) break;
         config.params = params;
 
-        for (auto& [cat, descriptor] : work) {
+        for (auto& [cat, descriptor, variant] : work) {
             if (cancel_requested_) break;
 
             benchmark_current_ = i++;
@@ -2764,7 +2831,10 @@ void Gui::sweep_thread_func(
             pr.logs.push_back({LogEntry::INFO,
                 "Sweep " + descriptor->name() + " [" + size_str + "] ..."});
 
-            pr.result = runner_.run(*descriptor, config);
+            auto run_config = config;
+            run_config.block_size      = variant.block_size;
+            run_config.compile_options = variant.defines;
+            pr.result = runner_.run(*descriptor, run_config);
 
             if (pr.result.success) {
                 char buf[256];
@@ -2800,14 +2870,13 @@ void Gui::sweep_thread_func(
 // block sizes for a hand-written CUDA kernel, compile-time configs for a DSL
 // one. Both come back as labelled points so the table can show them together.
 void Gui::tuning_thread_func(
-    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
-    arena::RunConfig config) {
+    std::vector<BenchWork> work, arena::RunConfig config) {
 
     CUcontext ctx = runner_.context().handle();
     cuCtxPushCurrent(ctx);
 
     int i = 0;
-    for (auto& [cat, descriptor] : work) {
+    for (auto& [cat, descriptor, ignored] : work) {
         if (cancel_requested_) break;
 
         const auto variants = arena::cli::tuning_variants_for(
@@ -2832,6 +2901,7 @@ void Gui::tuning_thread_func(
             pr.kernel_name = descriptor->name();
             pr.params = config.params;
             pr.tuning_label = tuning_label_for(variant);
+            pr.tuning_variant = variant;
 
             pr.result = runner_.run(*descriptor, run_config);
 
@@ -2871,10 +2941,12 @@ void Gui::run_selected_kernels() {
     auto it = kernels_by_category_.find(current_category_);
     if (it == kernels_by_category_.end()) return;
 
-    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work;
+    // A pinned config, if tuning found one, is what this kernel now runs at.
+    std::vector<BenchWork> work;
     for (auto& k : it->second) {
         if (k.selected && k.descriptor) {
-            work.push_back({current_category_, k.descriptor});
+            work.push_back({current_category_, k.descriptor,
+                            k.has_pinned ? k.pinned : arena::cli::TuningVariant{}});
         }
     }
     if (work.empty()) return;
@@ -2897,15 +2969,17 @@ void Gui::run_sweep() {
     auto it = kernels_by_category_.find(current_category_);
     if (it == kernels_by_category_.end()) return;
 
-    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work;
+    // A pinned config, if tuning found one, is what this kernel now runs at.
+    std::vector<BenchWork> work;
     for (auto& k : it->second) {
         if (k.selected && k.descriptor) {
-            work.push_back({current_category_, k.descriptor});
+            work.push_back({current_category_, k.descriptor,
+                            k.has_pinned ? k.pinned : arena::cli::TuningVariant{}});
         }
     }
     if (work.empty()) return;
 
-    auto sweep_configs = work[0].second->get_sweep_configs(config_);
+    auto sweep_configs = work[0].descriptor->get_sweep_configs(config_);
     if (sweep_configs.empty()) {
         log(LogEntry::WARN, "No sweep configs defined for this category");
         return;
@@ -2929,11 +3003,11 @@ void Gui::run_tuning() {
     auto it = kernels_by_category_.find(current_category_);
     if (it == kernels_by_category_.end()) return;
 
-    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work;
+    std::vector<BenchWork> work;
     int total = 0;
     for (auto& k : it->second) {
         if (!k.selected || !k.descriptor) continue;
-        work.push_back({current_category_, k.descriptor});
+        work.push_back({current_category_, k.descriptor, {}});
         total += (int)tuning_variants(*k.descriptor).size();
     }
     if (work.empty()) return;
@@ -2955,6 +3029,47 @@ void Gui::run_tuning() {
 
     benchmark_thread_ = std::thread(&Gui::tuning_thread_func, this,
         std::move(work), config_);
+}
+
+// Pins each kernel's fastest measured config, so Run Selected and Run Sweep
+// use it from here on. Only kernels that actually have an axis are touched:
+// pinning "default" on the rest would just be noise in the UI.
+void Gui::apply_best_configs() {
+    auto cat_it = tuning_history_.find(current_category_);
+    if (cat_it == tuning_history_.end()) return;
+
+    auto* kernels = current_kernels();
+    if (!kernels) return;
+
+    int applied = 0;
+    for (auto& k : *kernels) {
+        if (!k.descriptor) continue;
+        auto hist_it = cat_it->second.find(k.descriptor->name());
+        if (hist_it == cat_it->second.end() || hist_it->second.size() < 2) continue;
+
+        const TunedResult* best = &hist_it->second[0];
+        for (const auto& e : hist_it->second) {
+            if (e.result.op_ms < best->result.op_ms) best = &e;
+        }
+        k.pinned = best->variant;
+        k.has_pinned = true;
+        applied++;
+        log(LogEntry::INFO, k.descriptor->name() + ": pinned " + best->label);
+    }
+
+    if (applied == 0) {
+        log(LogEntry::WARN, "No tuned kernel to pin a config for");
+    } else {
+        log(LogEntry::INFO, "Pinned best config for " + std::to_string(applied) +
+                            " kernel(s); later runs will use them");
+    }
+}
+
+void Gui::clear_pinned_configs() {
+    auto* kernels = current_kernels();
+    if (!kernels) return;
+    for (auto& k : *kernels) { k.has_pinned = false; k.pinned = {}; }
+    log(LogEntry::INFO, "Cleared pinned configs; back to kernel defaults");
 }
 
 void Gui::reset_results() {
