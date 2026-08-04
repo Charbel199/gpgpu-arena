@@ -158,11 +158,22 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         reset_fn();
         launch_kernel();
         check_cuda(cuCtxSynchronize(), "verify sync");
-        result.verified = desc.verify(ctx_);
-        if (result.verified) {
-            log->info("  verify: passed");
+        const auto v = desc.verify(ctx_);
+        result.verified = v.passed;
+        result.dtype = dtype_name(desc.dtype());
+        result.compute_mode = compute_mode_name(desc.compute_mode());
+        result.accuracy.checked = v.elements_checked > 0;
+        result.accuracy.max_rel_error = v.max_rel_error;
+        result.accuracy.mean_rel_error = v.mean_rel_error;
+        result.accuracy.elements_checked = v.elements_checked;
+        result.accuracy.tolerance = v.tolerance;
+
+        if (v.passed) {
+            log->info("  verify: passed (max rel err {:.3e}, tolerance {:.3e})",
+                v.max_rel_error, v.tolerance);
         } else {
-            log->warn("  verify: FAILED");
+            log->warn("  verify: FAILED (max rel err {:.3e} exceeds tolerance {:.3e})",
+                v.max_rel_error, v.tolerance);
         }
 
         // --- energy: LAST, because it dirties the output buffer ---

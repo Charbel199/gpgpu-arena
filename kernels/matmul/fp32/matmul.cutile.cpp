@@ -9,6 +9,11 @@ public:
     std::string module_path() const override { return compile_result_.module_path; }
     std::string function_name() const override { return compile_result_.kernel_name; }
 
+    // ct.mma runs fp32 inputs through tf32 tensor cores, which keep 10
+    // mantissa bits. Declaring that is what earns the wider tolerance; the
+    // base class used to hardcode 5e-2 to let this kernel through.
+    ComputeMode compute_mode() const override { return ComputeMode::TF32; }
+
     bool needs_compilation() const override { return true; }
     std::string source_path() const override { return "matmul/fp32/matmul.cutile.py"; }
 

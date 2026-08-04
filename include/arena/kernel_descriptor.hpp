@@ -3,6 +3,8 @@
 #include "arena/device/context.hpp"
 #include "arena/device/kernel_loader.hpp"
 #include "arena/compilers/backend.hpp"
+#include "arena/dtype.hpp"
+#include "arena/measurement/accuracy.hpp"
 #include <string>
 #include <vector>
 #include <map>
@@ -43,8 +45,23 @@ public:
     virtual double calculate_flops() const = 0;
     virtual double calculate_bytes_accessed() const = 0;
     
-    // verify if the result of the kernel is correct
-    virtual bool verify(Context& ctx) { return true; }
+    // Storage type and compute mode. Part of the kernel's identity: an fp16
+    // variant is a separate descriptor, not the same one run differently.
+    virtual DType dtype() const { return DType::FP32; }
+    virtual ComputeMode compute_mode() const { return ComputeMode::Default; }
+
+    // Tolerance the measured error is judged against. Derived from the dtype
+    // by default; override only when a kernel has a documented reason.
+    virtual double tolerance() const { return default_tolerance(dtype(), compute_mode()); }
+
+    // Compare against a CPU reference and report how far off it was. Returning
+    // a number rather than a boolean means a kernel that is merely imprecise
+    // reads differently from one that is wrong.
+    virtual VerifyResult verify(Context& ctx) {
+        VerifyResult r;
+        r.passed = true;   // nothing to check
+        return r;
+    }
 
 
     // run cubin or cpp code

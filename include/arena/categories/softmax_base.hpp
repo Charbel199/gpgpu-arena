@@ -75,44 +75,31 @@ public:
         return 2.0 * rows_ * cols_ * sizeof(float);
     }
 
-    bool verify(Context& ctx) override {
+    VerifyResult verify(Context& ctx) override {
         std::vector<float> h_input(rows_ * cols_);
         std::vector<float> h_output(rows_ * cols_);
         ctx.copy_to_host(h_input.data(), d_input_, size_data_);
         ctx.copy_to_host(h_output.data(), d_output_, size_data_);
 
-        for (int r = 0; r < std::min(rows_, 8); r++) {
-            const float* in_row = h_input.data() + r * cols_;
+        ErrorAccumulator acc;
+        const int rows_checked = std::min(rows_, 8);
+        for (int r = 0; r < rows_checked; r++) {
+            const float* in_row  = h_input.data()  + r * cols_;
             const float* out_row = h_output.data() + r * cols_;
 
-            // cpu reference: softmax(row)
-            float row_max = *std::max_element(in_row, in_row + cols_);
-            float row_sum = 0.0f;
-            for (int c = 0; c < cols_; c++) {
-                row_sum += expf(in_row[c] - row_max);
-            }
+            const float row_max = *std::max_element(in_row, in_row + cols_);
+            double row_sum = 0.0;
+            for (int c = 0; c < cols_; c++) row_sum += std::exp((double)in_row[c] - row_max);
 
             for (int c = 0; c < cols_; c++) {
-                float expected = expf(in_row[c] - row_max) / row_sum;
-                float rel_err = std::abs(out_row[c] - expected) / (expected + 1e-8f);
-                if (rel_err > 1e-3f) {
-                    spdlog::get("verify")->warn(
-                        "softmax: row {} col {}: got {}, expected {}", r, c, out_row[c], expected);
-                    return false;
-                }
-            }
-
-            // check row sums to ~1.0
-            float sum = 0.0f;
-            for (int c = 0; c < cols_; c++) sum += out_row[c];
-            if (std::abs(sum - 1.0f) > 1e-3f) {
-                spdlog::get("verify")->warn("softmax: row {} sum = {}, expected 1.0", r, sum);
-                return false;
+                acc.add(out_row[c], std::exp((double)in_row[c] - row_max) / row_sum);
             }
         }
 
-        spdlog::get("verify")->debug("verify passed");
-        return true;
+        auto res = acc.finish(tolerance());
+        spdlog::get("verify")->debug("softmax: max rel err {:.3e} over {} elements",
+            res.max_rel_error, res.elements_checked);
+        return res;
     }
 
 protected:

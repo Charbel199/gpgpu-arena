@@ -1662,9 +1662,10 @@ void Gui::render_results_table() {
 
     enum ColumnID { Col_Kernel = 0, Col_Block, Col_Grid, Col_Wall, Col_GPU,
                     Col_Overhead, Col_Launches, Col_Perf, Col_PeakMem, Col_Energy,
-                    Col_Status, Col_Regs, Col_SHMem, Col_Occup, Col_IPC };
+                    Col_Dtype, Col_Error, Col_Status,
+                    Col_Regs, Col_SHMem, Col_Occup, Col_IPC };
 
-    int num_cols = has_profiling ? 15 : 12;
+    int num_cols = has_profiling ? 17 : 14;
 
     float table_h = std::min(ImGui::GetContentRegionAvail().y, 300 * s);
     if (table_h < 100 * s) table_h = 100 * s;
@@ -1693,6 +1694,10 @@ void Gui::render_results_table() {
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_PeakMem);
         ImGui::TableSetupColumn("mJ/op",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Energy);
+        ImGui::TableSetupColumn("Type",
+            ImGuiTableColumnFlags_WidthFixed, 48 * s, Col_Dtype);
+        ImGui::TableSetupColumn("Rel err",
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_Error);
         ImGui::TableSetupColumn("Status",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 50 * s, Col_Status);
 
@@ -1740,6 +1745,8 @@ void Gui::render_results_table() {
                             case Col_Launches: cmp = ra.launch_count - rb.launch_count; break;
                             case Col_PeakMem:  cmp = (ra.peak_device_bytes < rb.peak_device_bytes) ? -1 : (ra.peak_device_bytes > rb.peak_device_bytes) ? 1 : 0; break;
                             case Col_Energy:   cmp = (ra.energy.mj_per_op < rb.energy.mj_per_op) ? -1 : (ra.energy.mj_per_op > rb.energy.mj_per_op) ? 1 : 0; break;
+                            case Col_Dtype: cmp = ra.dtype.compare(rb.dtype); break;
+                            case Col_Error: cmp = (ra.accuracy.max_rel_error < rb.accuracy.max_rel_error) ? -1 : (ra.accuracy.max_rel_error > rb.accuracy.max_rel_error) ? 1 : 0; break;
                             case Col_Regs:  cmp = ra.counters.regs_per_thread - rb.counters.regs_per_thread; break;
                             case Col_SHMem: cmp = ra.counters.shared_mem_bytes - rb.counters.shared_mem_bytes; break;
                             case Col_Occup: cmp = (ra.counters.occupancy < rb.counters.occupancy) ? -1 : 1; break;
@@ -1870,6 +1877,30 @@ void Gui::render_results_table() {
                         "Whole-board energy, so this is an upper bound on the\n"
                         "kernel's marginal cost.",
                         k.result.energy.avg_watts, k.result.energy.iterations);
+                }
+            } else {
+                ImGui::TextColored(UITheme::TEXT_DIM, "--");
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::TextColored(UITheme::TEXT_DIM, "%s", k.result.dtype.c_str());
+            if (k.result.compute_mode != "default" && ImGui::IsItemHovered())
+                ImGui::SetTooltip("compute mode: %s", k.result.compute_mode.c_str());
+
+            // Relative error against a double-precision CPU reference. Coloured
+            // by how close it sits to the tolerance, so an imprecise kernel
+            // reads differently from a wrong one.
+            ImGui::TableNextColumn();
+            if (k.result.accuracy.checked) {
+                const double e = k.result.accuracy.max_rel_error;
+                const double t = k.result.accuracy.tolerance;
+                if (e > t)            ImGui::TextColored(UITheme::ERROR_RED, "%.2e", e);
+                else if (e > t * 0.1) ImGui::TextColored(UITheme::WARN_YELLOW, "%.2e", e);
+                else                  ImGui::Text("%.2e", e);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("max %.3e, mean %.3e over %d elements\ntolerance %.3e",
+                        e, k.result.accuracy.mean_rel_error,
+                        k.result.accuracy.elements_checked, t);
                 }
             } else {
                 ImGui::TextColored(UITheme::TEXT_DIM, "--");

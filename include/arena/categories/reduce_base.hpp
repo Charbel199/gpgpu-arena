@@ -48,8 +48,14 @@ public:
     
     void initialize(Context& ctx) override {
         std::vector<float> h_input(n_, 1.0f);
+
+        // Reference is computed from the data we actually upload, in double,
+        // so it stays correct whatever the generator produces.
+        reference_ = 0.0;
+        for (float v : h_input) reference_ += v;
+
         ctx.copy_to_device(d_input_, h_input.data(), size_input_);
-        
+
         float zero = 0.0f;
         ctx.copy_to_device(d_output_, &zero, sizeof(float));
     }
@@ -72,18 +78,22 @@ public:
         return static_cast<double>(size_input_ + size_output_);
     }
     
-    bool verify(Context& ctx) override {
+    VerifyResult verify(Context& ctx) override {
         float result;
         ctx.copy_to_host(&result, d_output_, sizeof(float));
 
-        float expected = static_cast<float>(n_); //TODO: I don't like the idea of not doing a CPU check, what if we initialize RANDOM weights (This is how it should be anw)
-        spdlog::get("verify")->debug("reduce: got {}, expected {}", result, expected);
-        float rel_error = std::abs(result - expected) / expected;
-        return rel_error < 1e-5f;
+        ErrorAccumulator acc;
+        acc.add(result, reference_);
+        auto r = acc.finish(tolerance());
+
+        spdlog::get("verify")->debug("reduce: got {}, reference {}, rel err {:.3e}",
+            result, reference_, r.max_rel_error);
+        return r;
     }
 
 protected:
     int n_ = 1000000;
+    double reference_ = 0.0;
     CUdeviceptr d_input_ = 0, d_output_ = 0;
     size_t size_input_ = 0, size_output_ = 0;
 };
