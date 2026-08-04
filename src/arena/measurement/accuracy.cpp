@@ -17,10 +17,15 @@ double relative_error(double got, double expected) {
     return diff / denom;
 }
 
-void ErrorAccumulator::add(double got, double expected) {
-    const double e = relative_error(got, expected);
+void ErrorAccumulator::add(double got, double expected_quantized, double expected_exact) {
+    const double e = relative_error(got, expected_quantized);
     if (e > max_) max_ = e;
     sum_ += e;
+
+    const double t = relative_error(got, expected_exact);
+    if (t > max_total_) max_total_ = t;
+    sum_total_ += t;
+
     count_++;
 }
 
@@ -32,6 +37,11 @@ VerifyResult ErrorAccumulator::finish(double tolerance) const {
 
     r.max_rel_error  = max_;
     r.mean_rel_error = sum_ / count_;
+    r.max_total_error  = max_total_;
+    r.mean_total_error = sum_total_ / count_;
+
+    // Judged on arithmetic error: a kernel should not fail for input rounding
+    // that its declared storage type made unavoidable.
     r.passed = max_ <= tolerance;
     return r;
 }

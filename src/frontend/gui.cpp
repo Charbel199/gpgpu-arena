@@ -27,6 +27,12 @@ namespace UITheme {
     constexpr ImVec4 TRITON_BADGE  = {1.0f,   0.42f,  0.169f, 1.0f};  // #FF6B2B orange
     constexpr ImVec4 CUTILE_BADGE  = {0.357f, 0.608f, 0.835f, 1.0f};  // #5B9BD5 blue
     constexpr ImVec4 WARP_BADGE    = {0.6f,   0.4f,   0.8f,   1.0f};  // purple
+
+    // Storage type. Deliberately cool-to-warm as precision drops, so a table
+    // mixing dtypes reads at a glance without checking the Type column.
+    constexpr ImVec4 DTYPE_FP32    = {0.36f,  0.66f,  0.94f,  1.0f};  // blue
+    constexpr ImVec4 DTYPE_FP16    = {0.96f,  0.70f,  0.24f,  1.0f};  // amber
+    constexpr ImVec4 DTYPE_BF16    = {0.90f,  0.45f,  0.55f,  1.0f};  // rose
     constexpr ImVec4 CUB_BADGE     = {0.55f,  0.55f,  0.55f,  1.0f};  // gray
 
     constexpr ImVec4 ERROR_RED     = {1.0f,   0.267f, 0.267f, 1.0f};  // #FF4444
@@ -331,6 +337,12 @@ const KernelState* Gui::selected_kernel() const {
         }
     }
     return nullptr;
+}
+
+static ImVec4 dtype_color(const std::string& dtype) {
+    if (dtype == "fp16") return UITheme::DTYPE_FP16;
+    if (dtype == "bf16") return UITheme::DTYPE_BF16;
+    return UITheme::DTYPE_FP32;
 }
 
 DSLType Gui::detect_dsl_type(const arena::KernelDescriptor* desc) const {
@@ -1746,7 +1758,7 @@ void Gui::render_results_table() {
                             case Col_PeakMem:  cmp = (ra.peak_device_bytes < rb.peak_device_bytes) ? -1 : (ra.peak_device_bytes > rb.peak_device_bytes) ? 1 : 0; break;
                             case Col_Energy:   cmp = (ra.energy.mj_per_op < rb.energy.mj_per_op) ? -1 : (ra.energy.mj_per_op > rb.energy.mj_per_op) ? 1 : 0; break;
                             case Col_Dtype: cmp = ra.dtype.compare(rb.dtype); break;
-                            case Col_Error: cmp = (ra.accuracy.max_rel_error < rb.accuracy.max_rel_error) ? -1 : (ra.accuracy.max_rel_error > rb.accuracy.max_rel_error) ? 1 : 0; break;
+                            case Col_Error: cmp = (ra.accuracy.max_total_error < rb.accuracy.max_total_error) ? -1 : (ra.accuracy.max_total_error > rb.accuracy.max_total_error) ? 1 : 0; break;
                             case Col_Regs:  cmp = ra.counters.regs_per_thread - rb.counters.regs_per_thread; break;
                             case Col_SHMem: cmp = ra.counters.shared_mem_bytes - rb.counters.shared_mem_bytes; break;
                             case Col_Occup: cmp = (ra.counters.occupancy < rb.counters.occupancy) ? -1 : 1; break;
@@ -1764,6 +1776,18 @@ void Gui::render_results_table() {
 
             // Kernel name with DSL color tag + click-to-select
             ImGui::TableNextColumn();
+
+            // Thin dtype stripe on the left edge of the row. Cheaper to scan
+            // than reading the Type column on every line.
+            {
+                const ImVec2 cp = ImGui::GetCursorScreenPos();
+                const float  lh = ImGui::GetTextLineHeight();
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(cp.x - 5.0f * s, cp.y),
+                    ImVec2(cp.x - 2.0f * s, cp.y + lh),
+                    ImGui::GetColorU32(dtype_color(k.result.dtype)),
+                    1.0f * s);
+            }
             DSLType dsl = detect_dsl_type(k.descriptor);
             ImVec4 badge_col;
             const char* badge_tag;
@@ -1890,17 +1914,30 @@ void Gui::render_results_table() {
             // Relative error against a double-precision CPU reference. Coloured
             // by how close it sits to the tolerance, so an imprecise kernel
             // reads differently from a wrong one.
+            // Total error is shown because the table mixes dtypes and this is
+            // the number that is comparable across them. Colour comes from the
+            // arithmetic error, since that is what pass/fail is judged on: a
+            // narrow dtype should look imprecise, not broken.
             ImGui::TableNextColumn();
             if (k.result.accuracy.checked) {
-                const double e = k.result.accuracy.max_rel_error;
-                const double t = k.result.accuracy.tolerance;
-                if (e > t)            ImGui::TextColored(UITheme::ERROR_RED, "%.2e", e);
-                else if (e > t * 0.1) ImGui::TextColored(UITheme::WARN_YELLOW, "%.2e", e);
-                else                  ImGui::Text("%.2e", e);
+                const auto& a = k.result.accuracy;
+                if (a.max_rel_error > a.tolerance)
+                    ImGui::TextColored(UITheme::ERROR_RED, "%.2e", a.max_total_error);
+                else if (a.max_rel_error > a.tolerance * 0.1)
+                    ImGui::TextColored(UITheme::WARN_YELLOW, "%.2e", a.max_total_error);
+                else
+                    ImGui::Text("%.2e", a.max_total_error);
+
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("max %.3e, mean %.3e over %d elements\ntolerance %.3e",
-                        e, k.result.accuracy.mean_rel_error,
-                        k.result.accuracy.elements_checked, t);
+                    ImGui::BeginTooltip();
+                    ImGui::Text("total      max %.3e  mean %.3e", a.max_total_error, a.mean_total_error);
+                    ImGui::TextDisabled("vs the original fp32 data, comparable across dtypes");
+                    ImGui::Separator();
+                    ImGui::Text("arithmetic max %.3e  mean %.3e", a.max_rel_error, a.mean_rel_error);
+                    ImGui::TextDisabled("vs the inputs this kernel received, judged against %.3e", a.tolerance);
+                    ImGui::Separator();
+                    ImGui::Text("%d elements checked", a.elements_checked);
+                    ImGui::EndTooltip();
                 }
             } else {
                 ImGui::TextColored(UITheme::TEXT_DIM, "--");

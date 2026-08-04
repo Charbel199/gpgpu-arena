@@ -53,9 +53,13 @@ public:
         std::vector<float> h_input;
         generate(h_input, n_, distribution_, input_seed_);
 
-        // Round the inputs to the storage type first, then take the reference
-        // from those. A kernel is then judged on its own arithmetic rather
-        // than on input rounding it had no say in.
+        // Two references. The exact one comes from the generated fp32 data;
+        // the quantized one from the same data after rounding to the kernel's
+        // storage type. Comparing against both separates what the kernel got
+        // wrong from what its dtype cost it before it ever ran.
+        reference_exact_ = 0.0;
+        for (float v : h_input) reference_exact_ += v;
+
         quantize_in_place(h_input, dtype());
 
         reference_ = 0.0;
@@ -99,17 +103,19 @@ public:
         ctx.copy_to_host(&result, d_output_, sizeof(float));
 
         ErrorAccumulator acc;
-        acc.add(result, reference_);
+        acc.add(result, reference_, reference_exact_);
         auto r = acc.finish(tolerance());
 
-        spdlog::get("verify")->debug("reduce: got {}, reference {}, rel err {:.3e}",
-            result, reference_, r.max_rel_error);
+        spdlog::get("verify")->debug(
+            "reduce: got {}, reference {}, arithmetic err {:.3e}, total err {:.3e}",
+            result, reference_, r.max_rel_error, r.max_total_error);
         return r;
     }
 
 protected:
     int n_ = 1000000;
-    double reference_ = 0.0;
+    double reference_ = 0.0;        // sum of the quantized inputs
+    double reference_exact_ = 0.0;  // sum of the original fp32 inputs
     CUdeviceptr d_input_ = 0, d_output_ = 0;
     size_t size_input_ = 0, size_output_ = 0;
 };

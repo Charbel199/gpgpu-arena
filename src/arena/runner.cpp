@@ -166,12 +166,14 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         result.accuracy.checked = v.elements_checked > 0;
         result.accuracy.max_rel_error = v.max_rel_error;
         result.accuracy.mean_rel_error = v.mean_rel_error;
+        result.accuracy.max_total_error = v.max_total_error;
+        result.accuracy.mean_total_error = v.mean_total_error;
         result.accuracy.elements_checked = v.elements_checked;
         result.accuracy.tolerance = v.tolerance;
 
         if (v.passed) {
-            log->info("  verify: passed (max rel err {:.3e}, tolerance {:.3e})",
-                v.max_rel_error, v.tolerance);
+            log->info("  verify: passed (arithmetic {:.3e}, total {:.3e}, tolerance {:.3e})",
+                v.max_rel_error, v.max_total_error, v.tolerance);
         } else {
             log->warn("  verify: FAILED (max rel err {:.3e} exceeds tolerance {:.3e})",
                 v.max_rel_error, v.tolerance);

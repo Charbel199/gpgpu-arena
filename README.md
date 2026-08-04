@@ -71,6 +71,19 @@ Kernels are judged on measured error, not a pass/fail. Every category compares
 against a CPU reference accumulated in `double` and reports the max and mean
 relative error alongside the tolerance it was judged against.
 
+Two errors are reported, because they answer different questions:
+
+- **arithmetic** is measured against the inputs the kernel actually received,
+  already rounded to its storage type. This is the kernel's own doing, so it
+  is what pass/fail is judged on, and it is comparable within a dtype.
+- **total** is measured against the original fp32 data, so it includes what a
+  narrower storage type cost before the kernel ever ran. This is the number
+  comparable across dtypes, and the one the results table shows.
+
+For an fp32 kernel the two are identical. For `reduce_fp16_accum_fp32` at 64M
+they are `7.3e-07` and `6.6e-05`: its summation is as clean as a good fp32
+kernel, and storing the inputs in half still costs it two orders of magnitude.
+
 Tolerance comes from the storage type's mantissa, scaled by the square root of
 the accumulation length, since summing more values legitimately costs
 precision. A kernel that is merely imprecise then reads differently from one

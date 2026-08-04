@@ -89,6 +89,8 @@ json to_json(const RunResult& r) {
         {"checked",           r.accuracy.checked},
         {"max_rel_error",     r.accuracy.max_rel_error},
         {"mean_rel_error",    r.accuracy.mean_rel_error},
+        {"max_total_error",   r.accuracy.max_total_error},
+        {"mean_total_error",  r.accuracy.mean_total_error},
         {"elements_checked",  r.accuracy.elements_checked},
         {"tolerance",         r.accuracy.tolerance},
     };
@@ -162,7 +164,8 @@ std::string csv_header() {
            "peak_device_bytes,energy_available,mj_per_op,avg_watts,"
            "module_load_ms,first_launch_ms,cache_hit,compile_ms,import_ms,invoke_ms,"
            "warmup_iterations,warmup_converged,sm_clock_start_mhz,sm_clock_end_mhz,"
-           "dtype,compute_mode,max_rel_error,mean_rel_error,error_tolerance,elements_checked";
+           "dtype,compute_mode,max_rel_error,mean_rel_error,"
+           "max_total_error,mean_total_error,error_tolerance,elements_checked";
 }
 
 std::string csv_row(const RunResult& r, const std::string& dsl) {
@@ -189,6 +192,7 @@ std::string csv_row(const RunResult& r, const std::string& dsl) {
       << r.sm_clock_start_mhz << "," << r.sm_clock_end_mhz << ","
       << r.dtype << "," << r.compute_mode << ","
       << r.accuracy.max_rel_error << "," << r.accuracy.mean_rel_error << ","
+      << r.accuracy.max_total_error << "," << r.accuracy.mean_total_error << ","
       << r.accuracy.tolerance << "," << r.accuracy.elements_checked;
     return f.str();
 }

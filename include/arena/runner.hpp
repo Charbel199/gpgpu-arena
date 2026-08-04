@@ -76,8 +76,10 @@ struct RunResult {
     std::string compute_mode = "default";
     struct Accuracy {
         bool   checked = false;
-        double max_rel_error = 0.0;
+        double max_rel_error = 0.0;     // vs the inputs the kernel received
         double mean_rel_error = 0.0;
+        double max_total_error = 0.0;   // vs the original fp32 data
+        double mean_total_error = 0.0;
         int    elements_checked = 0;
         double tolerance = 0.0;
     } accuracy;
