@@ -11,7 +11,11 @@ set -euo pipefail
 BUILD_DIR=${ARENA_BUILD_DIR:-/workspace/gpgpu-arena/build}
 BUILD_GUI=${ARENA_BUILD_GUI:-ON}
 
-if [ ! -x "${BUILD_DIR}/arena" ] || [ "${ARENA_FORCE_BUILD:-0}" = "1" ]; then
+# Always build. The source tree is bind-mounted, so it can change between
+# runs; skipping the build when ./arena merely exists silently runs stale code
+# against edited sources. cmake --build is incremental, so this is cheap when
+# nothing changed. Set ARENA_SKIP_BUILD=1 to bypass.
+if [ "${ARENA_SKIP_BUILD:-0}" != "1" ]; then
     echo "[entrypoint] building arena (BUILD_GUI=${BUILD_GUI}) ..." >&2
     cmake -S /workspace/gpgpu-arena -B "${BUILD_DIR}" \
           -DBUILD_GUI="${BUILD_GUI}" >&2
