@@ -84,7 +84,8 @@ json to_json(const RunResult& r) {
     j["memory"] = { {"peak_device_bytes", r.peak_device_bytes} };
 
     j["numerics"] = {
-        {"dtype",        r.dtype},
+        {"input_dtype",  r.input_dtype},
+        {"output_dtype", r.output_dtype},
         {"compute_mode", r.compute_mode},
         {"checked",           r.accuracy.checked},
         {"max_rel_error",     r.accuracy.max_rel_error},
@@ -164,7 +165,7 @@ std::string csv_header() {
            "peak_device_bytes,energy_available,mj_per_op,avg_watts,"
            "module_load_ms,first_launch_ms,cache_hit,compile_ms,import_ms,invoke_ms,"
            "warmup_iterations,warmup_converged,sm_clock_start_mhz,sm_clock_end_mhz,"
-           "dtype,compute_mode,max_rel_error,mean_rel_error,"
+           "input_dtype,output_dtype,compute_mode,max_rel_error,mean_rel_error,"
            "max_total_error,mean_total_error,error_tolerance,elements_checked";
 }
 
@@ -190,7 +191,7 @@ std::string csv_row(const RunResult& r, const std::string& dsl) {
       << r.warmup_iterations << ","
       << (r.warmup_converged ? "true" : "false") << ","
       << r.sm_clock_start_mhz << "," << r.sm_clock_end_mhz << ","
-      << r.dtype << "," << r.compute_mode << ","
+      << r.input_dtype << "," << r.output_dtype << "," << r.compute_mode << ","
       << r.accuracy.max_rel_error << "," << r.accuracy.mean_rel_error << ","
       << r.accuracy.max_total_error << "," << r.accuracy.mean_total_error << ","
       << r.accuracy.tolerance << "," << r.accuracy.elements_checked;

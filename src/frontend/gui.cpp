@@ -1757,7 +1757,7 @@ void Gui::render_results_table() {
                             case Col_Launches: cmp = ra.launch_count - rb.launch_count; break;
                             case Col_PeakMem:  cmp = (ra.peak_device_bytes < rb.peak_device_bytes) ? -1 : (ra.peak_device_bytes > rb.peak_device_bytes) ? 1 : 0; break;
                             case Col_Energy:   cmp = (ra.energy.mj_per_op < rb.energy.mj_per_op) ? -1 : (ra.energy.mj_per_op > rb.energy.mj_per_op) ? 1 : 0; break;
-                            case Col_Dtype: cmp = ra.dtype.compare(rb.dtype); break;
+                            case Col_Dtype: cmp = ra.input_dtype.compare(rb.input_dtype); break;
                             case Col_Error: cmp = (ra.accuracy.max_total_error < rb.accuracy.max_total_error) ? -1 : (ra.accuracy.max_total_error > rb.accuracy.max_total_error) ? 1 : 0; break;
                             case Col_Regs:  cmp = ra.counters.regs_per_thread - rb.counters.regs_per_thread; break;
                             case Col_SHMem: cmp = ra.counters.shared_mem_bytes - rb.counters.shared_mem_bytes; break;
@@ -1785,7 +1785,7 @@ void Gui::render_results_table() {
                 ImGui::GetWindowDrawList()->AddRectFilled(
                     ImVec2(cp.x - 5.0f * s, cp.y),
                     ImVec2(cp.x - 2.0f * s, cp.y + lh),
-                    ImGui::GetColorU32(dtype_color(k.result.dtype)),
+                    ImGui::GetColorU32(dtype_color(k.result.input_dtype)),
                     1.0f * s);
             }
             DSLType dsl = detect_dsl_type(k.descriptor);
@@ -1907,9 +1907,18 @@ void Gui::render_results_table() {
             }
 
             ImGui::TableNextColumn();
-            ImGui::TextColored(UITheme::TEXT_DIM, "%s", k.result.dtype.c_str());
-            if (k.result.compute_mode != "default" && ImGui::IsItemHovered())
-                ImGui::SetTooltip("compute mode: %s", k.result.compute_mode.c_str());
+            // "f16>f32" when they differ, just the type when they match.
+            if (k.result.input_dtype == k.result.output_dtype) {
+                ImGui::TextColored(UITheme::TEXT_DIM, "%s", k.result.input_dtype.c_str());
+            } else {
+                ImGui::TextColored(dtype_color(k.result.input_dtype), "%s>%s",
+                    k.result.input_dtype.c_str(), k.result.output_dtype.c_str());
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("in %s, out %s, compute %s\naccuracy is judged against the output type",
+                    k.result.input_dtype.c_str(), k.result.output_dtype.c_str(),
+                    k.result.compute_mode.c_str());
+            }
 
             // Relative error against a double-precision CPU reference. Coloured
             // by how close it sits to the tolerance, so an imprecise kernel

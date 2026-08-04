@@ -161,7 +161,8 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         check_cuda(cuCtxSynchronize(), "verify sync");
         const auto v = desc.verify(ctx_);
         result.verified = v.passed;
-        result.dtype = dtype_name(desc.dtype());
+        result.input_dtype  = dtype_name(desc.input_dtype());
+        result.output_dtype = dtype_name(desc.output_dtype());
         result.compute_mode = compute_mode_name(desc.compute_mode());
         result.accuracy.checked = v.elements_checked > 0;
         result.accuracy.max_rel_error = v.max_rel_error;

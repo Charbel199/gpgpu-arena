@@ -102,6 +102,17 @@ Input data is selectable with `--dist`:
 `--seed` makes a run reproducible; the CPU reference is regenerated from the
 same numbers the GPU saw.
 
+A kernel declares its input and output element types separately, since mixed
+precision is the normal case: `reduce_fp16_accum_fp32` reads fp16 and writes
+fp32. There is deliberately no accumulator type, because a kernel can have
+several at different precisions; the framework models what crosses the buffer
+boundary and leaves internals alone.
+
+Tolerance follows from the output type. A kernel cannot produce an answer more
+precise than the type it writes into, so that is the standard it is held to.
+A kernel whose internals are coarser will miss it, which is the intended
+result: `reduce_fp16_accum_fp16` writes fp32 but sums in half, and fails.
+
 Dtype is part of a kernel's identity rather than a run-time switch, so
 `reduce_fp16_accum_fp16` and `reduce_fp16_accum_fp32` are separate entries in
 the same `reduce` table. Those two differ only in the accumulator type and sit

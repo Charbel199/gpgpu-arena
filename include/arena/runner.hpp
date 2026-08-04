@@ -72,7 +72,8 @@ struct RunResult {
     size_t peak_device_bytes = 0;
 
     // --- numerics ---
-    std::string dtype = "fp32";
+    std::string input_dtype = "fp32";
+    std::string output_dtype = "fp32";
     std::string compute_mode = "default";
     struct Accuracy {
         bool   checked = false;

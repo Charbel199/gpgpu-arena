@@ -53,9 +53,17 @@ public:
     virtual double calculate_flops() const = 0;
     virtual double calculate_bytes_accessed() const = 0;
     
-    // Storage type and compute mode. Part of the kernel's identity: an fp16
-    // variant is a separate descriptor, not the same one run differently.
-    virtual DType dtype() const { return DType::FP32; }
+    // Element types of the input and output buffers. These are what the
+    // framework can actually observe: it allocates those buffers and reads
+    // them back. Anything a kernel does internally is its own business, which
+    // is why there is no accumulator type here. A kernel can easily have
+    // several at different precisions.
+    //
+    // The two default independently. Declaring narrow input must not quietly
+    // relax the accuracy check, which is derived from the output type.
+    virtual DType input_dtype() const { return DType::FP32; }
+    virtual DType output_dtype() const { return DType::FP32; }
+
     virtual ComputeMode compute_mode() const { return ComputeMode::Default; }
 
     // How many values get summed into one output. Reduction error grows with
@@ -63,11 +71,14 @@ public:
     // more drift than a sum over 8.
     virtual int accumulation_length() const { return 1; }
 
-    // Tolerance the measured error is judged against. Per-element budget from
-    // the dtype, scaled by sqrt of the accumulation length, which is how
-    // rounding error grows when the summands have mixed signs.
+    // How far off the answer may be before the kernel counts as broken.
+    //
+    // Based on the output type: a kernel cannot produce an answer more precise
+    // than the type it writes into, so that is the standard it is held to. A
+    // kernel whose internals are coarser than its output will miss this, and
+    // that is the intended result rather than a special case to excuse.
     virtual double tolerance() const {
-        const double per_element = default_tolerance(dtype(), compute_mode());
+        const double per_element = default_tolerance(output_dtype(), compute_mode());
         const int n = accumulation_length() > 1 ? accumulation_length() : 1;
         return per_element * std::sqrt(static_cast<double>(n));
     }

@@ -11,7 +11,9 @@ namespace arena {
 // survives.
 class Fp16AccumBase : public ReduceDescriptorBase {
 public:
-    DType dtype() const override { return DType::FP16; }
+    // fp16 in, fp32 out. Both kernels write a float, they differ only in
+    // what they accumulate in, which is exactly the point of the pair.
+    DType input_dtype() const override { return DType::FP16; }
     bool needs_compilation() const override { return true; }
     std::string module_path() const override { return compile_result_.module_path; }
     std::string source_path() const override { return "reduce/fp16/accum.cu"; }
@@ -52,13 +54,6 @@ struct ReduceFp16AccumFp32 : Fp16AccumBase {
     std::string function_name() const override { return "reduce_sum_fp32_accum"; }
     std::string description() const override {
         return "fp16 input, float accumulator";
-    }
-
-    // The accumulator is fp32, so the arithmetic deserves an fp32 budget even
-    // though the storage is half. Judging it at half precision would hide the
-    // whole point of the comparison.
-    double tolerance() const override {
-        return default_tolerance(DType::FP32) * std::sqrt((double)accumulation_length());
     }
 };
 
