@@ -91,6 +91,13 @@ CliOptions parse_args(int argc, char** argv) {
         } else if (arg_is(a, "--block")) {
             if (!take_value(argc, argv, i, "--block", v, o)) return o;
             o.config.block_size = std::atoi(v.c_str());
+        } else if (arg_is(a, "--define")) {
+            if (!take_value(argc, argv, i, "--define", v, o)) return o;
+            if (!arena::cli::apply_params(v, o.config.compile_options)) {
+                o.ok = false;
+                o.error = "malformed --define '" + v + "' (expected key=integer)";
+                return o;
+            }
         } else if (arg_is(a, "--sweep-block")) {
             o.sweep_block = true;
         } else if (arg_is(a, "--sweep-min")) {
@@ -179,7 +186,9 @@ void print_cli_usage(const char* program) {
         "  --sweep-min/-max <n>      Sweep range; 0 uses the category default\n"
         "  --sweep-factor <x>        Step multiplier between sweep sizes (default 4)\n"
         "  --block <n>               Launch at this block size where the kernel allows it\n"
-        "  --sweep-block             Run every block size each kernel reports as tunable\n"
+        "  --sweep-block             Sweep the tuning axis: block size for CUDA kernels,\n"
+        "                            compile-time config for DSL kernels\n"
+        "  --define <KEY=n>          Compile-time knob for DSL kernels (e.g. BLOCK_SIZE=512)\n"
         "  --warmup <n>              Fixed warmup count (default: auto steady-state)\n"
         "  --profile                 Collect hardware counters (needs perf access)\n"
         "  --energy                  Collect NVML energy (adds a sustained pass)\n"
@@ -252,12 +261,14 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
     int errored = 0, unverified = 0;
 
     for (auto* k : kernels) {
-        const auto block_sizes = arena::cli::block_sizes_for(
-            o.sweep_block, o.config.block_size, k->tunable_block_sizes());
+        const auto variants = arena::cli::tuning_variants_for(
+            o.sweep_block, o.config.block_size, o.config.compile_options,
+            k->tunable_block_sizes(), k->tunable_compile_options());
 
-        for (int bs : block_sizes) {
+        for (const auto& v : variants) {
             auto cfg = o.config;
-            cfg.block_size = bs;
+            cfg.block_size      = v.block_size;
+            cfg.compile_options = v.defines;
             auto r = runner.run(*k, cfg);
             if (!r.success)      errored++;
             else if (!r.verified) unverified++;

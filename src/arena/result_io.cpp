@@ -57,6 +57,7 @@ json to_json(const RunResult& r) {
         {"compile_ms", r.compile_ms},
         {"import_ms",  r.import_ms},
         {"invoke_ms",  r.invoke_ms},
+        {"options",    r.compile_options},
     };
 
     j["throughput"] = {

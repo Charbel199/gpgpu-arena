@@ -47,27 +47,35 @@ Problem size is a range rather than a hard-coded ladder. `--sweep-min`,
 `--sweep-max` and `--sweep-factor` set it; leaving them at zero uses each
 category's own defaults, so a plain `--sweep` behaves as it always did.
 
-Block size is the second axis. `--block <n>` launches at one size and
-`--sweep-block` runs every size a kernel declares tunable, which for the
-hand-written CUDA kernels is 64 through 1024. It is not a free parameter
-everywhere: cuTile emits a `.reqntid` the launch has to match exactly, and
-Triton and Warp fix the block at compile time from `num_warps`. Those kernels
-declare nothing tunable and get a single run, since changing their block size
-means recompiling rather than launching differently.
+Block size is the second axis, and it works differently on the two sides.
+A hand-written CUDA kernel is relaunched at a different size; a DSL kernel
+cannot be, because the size is baked into the cubin. cuTile emits a `.reqntid`
+that the launch has to match exactly, and Triton derives the thread block from
+`num_warps` at compile time. Tuning those means recompiling, which is to say
+that for a DSL, sweeping the block size is autotuning.
 
-The axis matters more than the default suggests. Over `reduce` at n=4M, best
-against worst block size:
+`--sweep-block` covers both. It runs each CUDA kernel at every block size it
+declares, and each DSL kernel at every compile-time config it declares,
+caching one cubin per config. `--block <n>` and `--define KEY=n` pin a single
+point on either axis.
 
-| kernel | best | spread |
+Over `reduce` at n=4M, best against worst config:
+
+| kernel | best config | spread |
 | --- | --- | --- |
-| `reduce_block_atomic` | 64 | 5.0x |
-| `reduce_grid_stride` | 256 | 3.8x |
-| `reduce_warp_shuffle` | 512 | 3.5x |
-| `reduce_vectorized` | 128 | 2.6x |
-| `reduce_baseline` | 1024 | 1.1x |
+| `reduce_block_atomic` | block=64 | 5.1x |
+| `reduce_grid_stride` | block=128 | 3.9x |
+| `reduce_warp_shuffle` | block=512 | 3.6x |
+| `reduce_warp_shmem` | block=256 | 3.0x |
+| `triton_reduce` | BLOCK_SIZE=1024, num_warps=8 | 2.2x |
+| `cutile_reduce` | TILE_SIZE=1024 | 1.6x |
+| `triton_reduce_grid_stride` | BLOCK_SIZE=4096, num_warps=2 | 1.6x |
 
-A fixed 256 would have understated four of these. `reduce_baseline` is flat
-because it is latency-bound on the atomic, not on occupancy.
+The last row is the reason the axis is worth having. Tuned, that kernel runs
+in 0.0084 ms, which beats `cub_reduce` at 0.0133 and every hand-written CUDA
+kernel here. At the value its source file happens to declare it runs in
+0.0131, so a comparison without this axis measures how well each kernel was
+guessed at rather than what the language can do.
 
 ## Measurement Model
 
@@ -170,11 +178,12 @@ in output live in the same file, which is why all three above are in
 
 ## Known Issues
 
-- The compile cache is keyed on source mtime alone, not on target
-  architecture, compiler version, or compile flags. A cubin can outlive the
-  toolchain that produced it and be reused silently. This has been observed
-  producing wrong results that verification caught. Clear it with
-  `rm build/kernels/*.cubin build/kernels/*.json` after a toolchain change.
+- The compile cache is keyed on source mtime and the defines a cubin was
+  built with, but not on target architecture, compiler version, or the rest
+  of the compile flags. A cubin can outlive the toolchain that produced it
+  and be reused silently. This has been observed producing wrong results that
+  verification caught. Clear it with `rm build/kernels/*.cubin
+  build/kernels/*.json` after a toolchain change.
 
 ## How It Works
 

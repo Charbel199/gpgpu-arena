@@ -87,6 +87,17 @@ public:
         return block_size_ > 0 ? block_size_ : fallback;
     }
 
+    // The DSL half of the same axis. A Triton or cuTile kernel cannot be
+    // relaunched at a different block size, so its tuning knob is a set of
+    // compile-time defines and each entry here costs a recompile. Empty means
+    // the kernel has nothing to tune.
+    virtual std::vector<CompileDefines> tunable_compile_options() const { return {}; }
+
+    // Chosen defines, empty for the source's own defaults. Set by the runner
+    // before compilation.
+    void set_compile_options(const CompileDefines& d) { compile_options_ = d; }
+    const CompileDefines& compile_options() const { return compile_options_; }
+
     // kernel launch configuration
     virtual KernelLoader::LaunchConfig get_launch_config() const = 0;
     virtual std::vector<void*> get_kernel_args() = 0;
@@ -165,6 +176,7 @@ public:
 
 protected:
     int block_size_ = 0;   // 0 = descriptor default
+    CompileDefines compile_options_;   // empty = source defaults
 
     Distribution distribution_ = Distribution::Uniform;
     uint64_t     input_seed_ = 42;

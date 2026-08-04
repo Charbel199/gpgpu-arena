@@ -46,6 +46,7 @@ struct RunResult {
     float import_ms  = 0.0f;   // Python import cost, DSL only
     float invoke_ms  = 0.0f;   // full subprocess wall time
     bool  cache_hit  = false;
+    std::map<std::string, int> compile_options;   // knobs this cubin was built with
 
     // --- throughput: denominator is op_ms ---
     double gflops = 0.0;

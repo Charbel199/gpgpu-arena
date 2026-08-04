@@ -15,4 +15,7 @@ nlohmann::json parse_json_output(const std::string& output, const std::string& c
 // build CompileResult from parsed JSON + module path
 CompileResult result_from_json(const nlohmann::json& j, const std::string& module_path);
 
+// " --define BLOCK_SIZE=512 --define num_warps=8", for the Python compilers.
+std::string defines_args(const CompileDefines& defines);
+
 }

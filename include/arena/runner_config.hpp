@@ -34,6 +34,11 @@ struct RunConfig {
     // meaningful for kernels that report tunable_block_sizes().
     int block_size = 0;
 
+    // Compile-time defines for DSL kernels, empty for the source's own
+    // defaults. The DSL equivalent of block_size: it needs a recompile, so
+    // each distinct set gets its own cached cubin.
+    std::map<std::string, int> compile_options;
+
     // Sweep range. Zero means "use the category's own default ladder", so
     // nothing changes until you actually set a range.
     int    sweep_min = 0;

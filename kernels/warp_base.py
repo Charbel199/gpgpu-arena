@@ -47,6 +47,9 @@ def main(kernel_fn, constants=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default=".")
     parser.add_argument("--output-name", type=str, required=True)
+    # Accepted but unused: Warp fixes its block size in the kernel decorator,
+    # so there is nothing here for the tuning axis to turn yet.
+    parser.add_argument("--define", action="append", default=[])
     args = parser.parse_args()
 
     try:

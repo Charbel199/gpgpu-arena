@@ -71,25 +71,51 @@ TEST_CASE("apply_params") {
     }
 }
 
-TEST_CASE("block_sizes_for") {
-    const std::vector<int> tunable{64, 128, 256, 512, 1024};
+TEST_CASE("tuning_variants_for") {
+    const std::vector<int> blocks{64, 128, 256, 512, 1024};
+    const std::vector<std::map<std::string, int>> defines{
+        {{"BLOCK_SIZE", 256}}, {{"BLOCK_SIZE", 1024}},
+    };
+    const std::map<std::string, int> none{};
 
     SUBCASE("no sweep gives one run at the descriptor default") {
-        CHECK(block_sizes_for(false, 0, tunable) == std::vector<int>{0});
+        auto v = tuning_variants_for(false, 0, none, blocks, {});
+        REQUIRE(v.size() == 1);
+        CHECK(v[0].block_size == 0);
+        CHECK(v[0].defines.empty());
     }
     SUBCASE("no sweep honours an explicit --block") {
-        CHECK(block_sizes_for(false, 256, tunable) == std::vector<int>{256});
+        auto v = tuning_variants_for(false, 256, none, blocks, {});
+        REQUIRE(v.size() == 1);
+        CHECK(v[0].block_size == 256);
     }
-    SUBCASE("sweep expands to every tunable size") {
-        CHECK(block_sizes_for(true, 0, tunable) == tunable);
+    SUBCASE("no sweep honours explicit --define") {
+        const std::map<std::string, int> d{{"BLOCK_SIZE", 512}};
+        auto v = tuning_variants_for(false, 0, d, {}, defines);
+        REQUIRE(v.size() == 1);
+        CHECK(v[0].defines == d);
     }
-    SUBCASE("sweep overrides an explicit --block") {
-        CHECK(block_sizes_for(true, 128, tunable) == tunable);
+    SUBCASE("sweep expands over block sizes for a CUDA kernel") {
+        auto v = tuning_variants_for(true, 0, none, blocks, {});
+        REQUIRE(v.size() == blocks.size());
+        for (size_t i = 0; i < blocks.size(); i++) CHECK(v[i].block_size == blocks[i]);
     }
-    SUBCASE("a kernel with a pinned block size still runs once") {
-        // cuTile, Triton and Warp report nothing tunable. Returning an empty
-        // list here would silently drop them from a --sweep-block run.
-        CHECK(block_sizes_for(true, 0, {}) == std::vector<int>{0});
-        CHECK(block_sizes_for(false, 0, {}) == std::vector<int>{0});
+    SUBCASE("sweep expands over compile configs for a DSL kernel") {
+        // A DSL kernel declares no tunable block sizes, because changing its
+        // block means recompiling rather than relaunching.
+        auto v = tuning_variants_for(true, 0, none, {}, defines);
+        REQUIRE(v.size() == 2);
+        CHECK(v[0].defines.at("BLOCK_SIZE") == 256);
+        CHECK(v[1].defines.at("BLOCK_SIZE") == 1024);
+    }
+    SUBCASE("block sizes win when a kernel somehow declares both") {
+        auto v = tuning_variants_for(true, 0, none, blocks, defines);
+        CHECK(v.size() == blocks.size());
+    }
+    SUBCASE("a kernel with nothing tunable still runs once") {
+        // Returning an empty list here would silently drop it from the sweep.
+        auto v = tuning_variants_for(true, 0, none, {}, {});
+        REQUIRE(v.size() == 1);
+        CHECK(v[0].block_size == 0);
     }
 }

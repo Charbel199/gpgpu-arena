@@ -25,14 +25,16 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         desc.set_problem_size(config.params);
         desc.set_input_spec(config.input_distribution, config.input_seed);
         desc.set_block_size(config.block_size);
+        desc.set_compile_options(config.compile_options);
 
         // runtime compilation for DSL kernels
         if (desc.needs_compilation()) {
-            auto cr = compiler_.compile(desc.source_path());
+            auto cr = compiler_.compile(desc.source_path(), desc.compile_options());
             result.cache_hit  = cr.cache_hit;
             result.compile_ms = cr.compile_ms;
             result.import_ms  = cr.import_ms;
             result.invoke_ms  = cr.invoke_ms;
+            result.compile_options = desc.compile_options();
             desc.set_compile_result(cr);
         }
 

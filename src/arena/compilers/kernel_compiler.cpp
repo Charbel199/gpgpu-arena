@@ -11,6 +11,16 @@ namespace arena {
 
 namespace fs = std::filesystem;
 
+std::string defines_suffix(const CompileDefines& defines) {
+    // Sorted, because std::map is, so the same set of knobs always names the
+    // same cubin no matter what order they were set in.
+    std::string out;
+    for (const auto& [key, val] : defines) {
+        out += "_" + key + std::to_string(val);
+    }
+    return out;
+}
+
 KernelCompiler::KernelCompiler(const std::string& cache_dir)
     : cache_dir_(cache_dir) {}
 
@@ -19,9 +29,14 @@ void KernelCompiler::register_compiler(const std::string& extension,
     compilers_[extension] = std::move(compiler);
 }
 
-CompileResult KernelCompiler::compile(const std::string& source_path) {
+CompileResult KernelCompiler::compile(const std::string& source_path,
+                                      const CompileDefines& defines) {
+    // Defines are part of the identity of a build, not a detail of it: the
+    // same source at BLOCK_SIZE 256 and 1024 is two different cubins.
+    const std::string key = source_path + defines_suffix(defines);
+
     // check in-memory cache
-    auto mem_it = cache_.find(source_path);
+    auto mem_it = cache_.find(key);
     if (mem_it != cache_.end()) {
         spdlog::get("compiler")->debug("{}: in-memory cache hit", source_path);
         auto hit = mem_it->second;
@@ -40,7 +55,7 @@ CompileResult KernelCompiler::compile(const std::string& source_path) {
     }
 
     fs::create_directories(cache_dir_);
-    auto output_name = derive_output_name(source_path);
+    auto output_name = derive_output_name(source_path) + defines_suffix(defines);
 
     // fall back disk cache
     CompileResult result;
@@ -51,14 +66,14 @@ CompileResult KernelCompiler::compile(const std::string& source_path) {
         result.compile_ms = 0.0f;
         result.import_ms  = 0.0f;
         result.invoke_ms  = 0.0f;
-        cache_[source_path] = result;
+        cache_[key] = result;
         return result;
     }
 
     // if nothing in cache -> compile
     log->info("{}: compiling ({} compiler) ...", source_path, ext);
     auto t0 = std::chrono::high_resolution_clock::now();
-    result = comp_it->second->compile(source_path, output_name, cache_dir_);
+    result = comp_it->second->compile(source_path, output_name, cache_dir_, defines);
     auto t1 = std::chrono::high_resolution_clock::now();
     result.cache_hit = false;
     result.invoke_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
@@ -68,7 +83,7 @@ CompileResult KernelCompiler::compile(const std::string& source_path) {
 
     // save to both caches
     save_disk_cache(source_path, output_name, result);
-    cache_[source_path] = result;
+    cache_[key] = result;
     return result;
 }
 

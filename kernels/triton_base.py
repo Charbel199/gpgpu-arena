@@ -40,22 +40,51 @@ def count_cubin_params(cubin_path):
     return len(re.findall(r"EIATTR_KPARAM_INFO", result.stdout))
 
 
-def compile_kernel(fn, signature, constants):
+def parse_defines(pairs):
+    """--define KEY=int, repeated. Compile-time knobs from the C++ side."""
+    out = {}
+    for p in pairs or []:
+        key, _, val = p.partition("=")
+        if not key or not val:
+            raise ValueError(f"malformed --define {p!r}, expected KEY=int")
+        out[key] = int(val)
+    return out
+
+
+def compile_kernel(fn, signature, constants, options=None):
+    # num_warps is a compile option rather than a constexpr, so it is pulled
+    # out of the defines instead of being passed through as one. Triton derives
+    # the thread block from it, which is why a DSL kernel cannot be relaunched
+    # at a different block size the way a hand-written one can.
+    opts = dict(options or {})
+    num_warps = opts.pop("num_warps", None)
+
+    constants = {**constants, **opts}
+
     src = ASTSource(fn=fn, signature=signature, constexprs=constants)
-    compiled = triton.compile(src, target=triton.runtime.driver.active.get_current_target())
+    kwargs = {} if num_warps is None else {"options": {"num_warps": num_warps}}
+    compiled = triton.compile(src, target=triton.runtime.driver.active.get_current_target(),
+                              **kwargs)
     cubin = compiled.asm["cubin"]
     metadata = compiled.metadata
     kernel_name = getattr(metadata, "name", fn.__name__)
     num_warps = getattr(metadata, "num_warps", 4)
     shared = getattr(metadata, "shared", 0)
-    return cubin, kernel_name, num_warps, shared
+    return cubin, kernel_name, num_warps, shared, constants
 
 
 def main(fn, signature, constants):
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default=".")
     parser.add_argument("--output-name", type=str, required=True)
+    parser.add_argument("--define", action="append", default=[])
     args = parser.parse_args()
+
+    try:
+        defines = parse_defines(args.define)
+    except ValueError as e:
+        print(f"[triton] {e}", file=sys.stderr)
+        sys.exit(1)
 
     supported, reason = check_gpu_supported()
     if not supported:
@@ -65,7 +94,8 @@ def main(fn, signature, constants):
     try:
         print(f"[triton] Compiling {args.output_name} ...", file=sys.stderr)
         _compile_t0 = time.perf_counter()
-        cubin, kernel_name, num_warps, shared = compile_kernel(fn, signature, constants)
+        cubin, kernel_name, num_warps, shared, constants = compile_kernel(
+            fn, signature, constants, defines)
         compile_ms = (time.perf_counter() - _compile_t0) * 1000.0
     except Exception as e:
         print(f"[triton] Compilation failed: {e}", file=sys.stderr)
