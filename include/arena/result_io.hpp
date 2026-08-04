@@ -13,6 +13,13 @@
 
 namespace arena::result_io {
 
+// Which language a kernel was written in.
+//
+// Determined by the source file, NOT by uses_module(). uses_module()==false
+// only means the descriptor drives its own launches -- reduce_two_stage does
+// that for its two stages while being plain CUDA C++.
+std::string detect_dsl(const KernelDescriptor* d);
+
 // Full three-tier record. Field names match the CSV columns.
 nlohmann::json to_json(const RunResult& r);
 

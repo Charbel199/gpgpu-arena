@@ -334,12 +334,14 @@ const KernelState* Gui::selected_kernel() const {
 }
 
 DSLType Gui::detect_dsl_type(const arena::KernelDescriptor* desc) const {
-    if (!desc->uses_module()) return DSLType::CUB;
-    if (!desc->needs_compilation()) return DSLType::CUDA;
-    std::string src = desc->source_path();
-    if (src.find(".triton.") != std::string::npos) return DSLType::Triton;
-    if (src.find(".cutile.") != std::string::npos) return DSLType::CuTile;
-    if (src.find(".warp.")   != std::string::npos) return DSLType::Warp;
+    // One source of truth, shared with the CLI. Previously this tested
+    // uses_module() first, which mislabelled reduce_two_stage as CUB: that
+    // flag describes how a kernel is launched, not what it is written in.
+    const std::string dsl = arena::result_io::detect_dsl(desc);
+    if (dsl == "triton") return DSLType::Triton;
+    if (dsl == "cutile") return DSLType::CuTile;
+    if (dsl == "warp")   return DSLType::Warp;
+    if (dsl == "cub")    return DSLType::CUB;
     return DSLType::CUDA;
 }
 

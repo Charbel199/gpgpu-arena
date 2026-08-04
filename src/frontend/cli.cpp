@@ -27,17 +27,6 @@ struct CliOptions {
     std::string error;
 };
 
-// Mirrors the GUI's DSL detection, keyed off the source path extension.
-std::string detect_dsl(const arena::KernelDescriptor* d) {
-    if (!d) return "unknown";
-    const std::string src = d->source_path();
-    if (src.find(".triton.py") != std::string::npos) return "triton";
-    if (src.find(".cutile.py") != std::string::npos) return "cutile";
-    if (src.find(".warp.py")   != std::string::npos) return "warp";
-    if (!d->uses_module())                           return "cub";
-    return "cuda";
-}
-
 bool arg_is(const char* a, const char* name) { return std::strcmp(a, name) == 0; }
 
 // Reads the value that follows a flag, or records a usage error.
@@ -192,7 +181,7 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
                 {"name",        k->name()},
                 {"category",    k->category()},
                 {"description", k->description()},
-                {"dsl",         detect_dsl(k)},
+                {"dsl",         arena::result_io::detect_dsl(k)},
                 {"parameters",  k->get_parameter_names()},
                 {"source",      k->source_path()},
             });
@@ -250,7 +239,7 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
     if (o.format == "csv") {
         *out << arena::result_io::csv_header() << "\n";
         for (size_t i = 0; i < results.size(); i++) {
-            *out << arena::result_io::csv_row(results[i], detect_dsl(kernels[i])) << "\n";
+            *out << arena::result_io::csv_row(results[i], arena::result_io::detect_dsl(kernels[i])) << "\n";
         }
     } else {
         json j;
@@ -260,7 +249,7 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
         j["results"] = json::array();
         for (size_t i = 0; i < results.size(); i++) {
             auto rj = arena::result_io::to_json(results[i]);
-            rj["dsl"] = detect_dsl(kernels[i]);
+            rj["dsl"] = arena::result_io::detect_dsl(kernels[i]);
             j["results"].push_back(std::move(rj));
         }
         j["summary"] = {

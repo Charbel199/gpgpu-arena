@@ -7,6 +7,22 @@ namespace arena::result_io {
 
 using nlohmann::json;
 
+std::string detect_dsl(const KernelDescriptor* d) {
+    if (!d) return "unknown";
+    const std::string src = d->source_path();
+
+    if (src.find(".triton.") != std::string::npos) return "triton";
+    if (src.find(".cutile.") != std::string::npos) return "cutile";
+    if (src.find(".warp.")   != std::string::npos) return "warp";
+    if (src.size() >= 3 && src.compare(src.size() - 3, 3, ".cu") == 0) return "cuda";
+
+    // No runtime-compiled source: nvcc compiled it into the binary at build
+    // time. That is how the CUB/Thrust descriptors are wired up.
+    if (src.empty()) return "cub";
+
+    return "cuda";
+}
+
 json to_json(const RunResult& r) {
     json j;
     j["kernel"]      = r.kernel_name;
