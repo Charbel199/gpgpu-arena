@@ -339,6 +339,27 @@ const KernelState* Gui::selected_kernel() const {
     return nullptr;
 }
 
+// Compact type label for the narrow sidebar: "f16>f32", or "f32" when input
+// and output match.
+static std::string dtype_label_short(const arena::KernelDescriptor* d) {
+    auto shorten = [](const std::string& t) {
+        if (t == "fp32") return std::string("f32");
+        if (t == "fp16") return std::string("f16");
+        if (t == "bf16") return std::string("b16");
+        return t;
+    };
+    const std::string in  = shorten(arena::dtype_name(d->input_dtype()));
+    const std::string out = shorten(arena::dtype_name(d->output_dtype()));
+    return (in == out) ? in : in + ">" + out;
+}
+
+// True for the plain fp32 case, which is most kernels and does not need
+// spelling out on every row.
+static bool is_plain_fp32(const arena::KernelDescriptor* d) {
+    return d->input_dtype() == arena::DType::FP32
+        && d->output_dtype() == arena::DType::FP32;
+}
+
 static ImVec4 dtype_color(const std::string& dtype) {
     if (dtype == "fp16") return UITheme::DTYPE_FP16;
     if (dtype == "bf16") return UITheme::DTYPE_BF16;
@@ -717,6 +738,31 @@ void Gui::render_kernel_sidebar() {
     if (ImGui::SmallButton("None")) { for (auto& k : *kernels) k.selected = false; }
     ImGui::Separator();
 
+    // Type legend. Only the types actually present, so a category of plain
+    // fp32 kernels costs one short line. Selectable text is not clipped by
+    // ImGui, so labelling every row would collide with the longer names.
+    {
+        std::vector<std::string> seen;
+        for (const auto& k : *kernels) {
+            const std::string lbl = dtype_label_short(k.descriptor);
+            if (std::find(seen.begin(), seen.end(), lbl) == seen.end()) seen.push_back(lbl);
+        }
+        for (size_t li = 0; li < seen.size(); li++) {
+            if (li) ImGui::SameLine();
+            const ImVec2 cp = ImGui::GetCursorScreenPos();
+            const float  th = ImGui::GetTextLineHeight();
+            const std::string base = seen[li].substr(0, 3) == "f16" ? "fp16"
+                                   : seen[li].substr(0, 3) == "b16" ? "bf16" : "fp32";
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(cp.x, cp.y + 2 * s), ImVec2(cp.x + 3 * s, cp.y + th),
+                ImGui::GetColorU32(dtype_color(base)), 1.5f * s);
+            ImGui::Dummy({5 * s, th});
+            ImGui::SameLine(0, 2 * s);
+            ImGui::TextColored(UITheme::TEXT_DIM, "%s", seen[li].c_str());
+        }
+        ImGui::Separator();
+    }
+
     // Read running kernel name once (avoid repeated locking)
     std::string running_name;
     if (benchmark_running_) {
@@ -736,6 +782,21 @@ void Gui::render_kernel_sidebar() {
         bool is_running = benchmark_running_ && (k.descriptor->name() == running_name);
 
         ImGui::PushID((int)i);
+
+        // Dtype stripe pinned to the panel's left edge, so a mixed-precision
+        // list reads without checking the type text on every row. Taken from
+        // the descriptor, not the result: this list exists before anything runs.
+        {
+            const float  x0 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x;
+            const ImVec2 rp = ImGui::GetCursorScreenPos();
+            const float  rh = ImGui::GetFrameHeight();
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(x0, rp.y), ImVec2(x0 + 3.0f * s, rp.y + rh),
+                ImGui::GetColorU32(dtype_color(
+                    arena::dtype_name(k.descriptor->input_dtype()))),
+                1.5f * s);
+        }
+        ImGui::Indent(8.0f * s);
 
         // Checkbox for benchmark selection
         ImGui::Checkbox("##chk", &k.selected);
@@ -765,7 +826,7 @@ void Gui::render_kernel_sidebar() {
         ImGui::SameLine();
 
         // Selectable kernel name
-        float name_w = ImGui::GetContentRegionAvail().x - 60 * s;
+        float name_w = ImGui::GetContentRegionAvail().x - 62 * s;
         if (name_w < 30 * s) name_w = 30 * s;
         if (ImGui::Selectable(k.descriptor->name().c_str(), is_display_sel,
                 ImGuiSelectableFlags_None, {name_w, 0})) {
@@ -782,6 +843,10 @@ void Gui::render_kernel_sidebar() {
             ImGui::BeginTooltip();
             ImGui::PushTextWrapPos(300.0f * s);
             ImGui::TextUnformatted(k.descriptor->description().c_str());
+            ImGui::Separator();
+            ImGui::TextDisabled("in %s, out %s",
+                arena::dtype_name(k.descriptor->input_dtype()),
+                arena::dtype_name(k.descriptor->output_dtype()));
             ImGui::PopTextWrapPos();
             ImGui::EndTooltip();
         }
@@ -801,6 +866,7 @@ void Gui::render_kernel_sidebar() {
             ImGui::TextColored(UITheme::ERROR_RED, "ERR");
         }
 
+        ImGui::Unindent(8.0f * s);
         ImGui::PopID();
     }
 
