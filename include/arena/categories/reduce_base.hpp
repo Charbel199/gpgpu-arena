@@ -48,8 +48,8 @@ public:
     
     void allocate(Context& ctx) override {
         capture_device_props(ctx);
-        size_input_  = (size_t)n_ * dtype_size(input_dtype());
-        size_output_ = dtype_size(output_dtype());
+        size_input_  = dtype_buffer_bytes((size_t)n_, input_dtype());
+        size_output_ = dtype_buffer_bytes(1, output_dtype());
         
         d_input_ = ctx.allocate(size_input_);
         d_output_ = ctx.allocate(size_output_);
@@ -74,17 +74,13 @@ public:
         if (input_dtype() == DType::FP32) {
             ctx.copy_to_device(d_input_, h_input.data(), size_input_);
         } else {
-            std::vector<uint16_t> packed(n_);
-            for (int i = 0; i < n_; i++) {
-                packed[i] = (input_dtype() == DType::FP16) ? float_to_half(h_input[i])
-                                                           : float_to_bf16(h_input[i]);
-            }
+            const auto packed = pack_values(h_input, input_dtype());
             ctx.copy_to_device(d_input_, packed.data(), size_input_);
         }
 
         // Zero through the output type, not always as a float: the buffer is
-        // only dtype_size(output_dtype()) bytes, so writing a float into an
-        // fp16 output would run two bytes past the end of the allocation.
+        // only as wide as the output type, so writing a float into a narrower
+        // output would run past the end of the allocation.
         const uint64_t zero = 0;
         ctx.copy_to_device(d_output_, &zero, size_output_);
     }
@@ -108,15 +104,10 @@ public:
     }
     
     VerifyResult verify(Context& ctx) override {
-        float result = 0.0f;
-        if (output_dtype() == DType::FP32) {
-            ctx.copy_to_host(&result, d_output_, sizeof(float));
-        } else {
-            uint16_t packed = 0;
-            ctx.copy_to_host(&packed, d_output_, sizeof(uint16_t));
-            result = (output_dtype() == DType::FP16) ? half_to_float(packed)
-                                                     : bf16_to_float(packed);
-        }
+        // Read back through the output type, whatever its width.
+        uint8_t raw[8] = {};
+        ctx.copy_to_host(raw, d_output_, size_output_);
+        const float result = unpack_value(raw, 0, output_dtype());
 
         ErrorAccumulator acc;
         acc.add(result, reference_, reference_exact_);

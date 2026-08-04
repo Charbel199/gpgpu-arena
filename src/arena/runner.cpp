@@ -70,7 +70,16 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         auto launch_kernel = [&]() {
             if (desc.uses_module()) {
                 auto args = desc.get_kernel_args();
-                loader_.launch(func, launch_config, args.data());
+                const auto lr = loader_.launch(func, launch_config, args.data());
+                // A rejected launch used to be logged and then ignored, which
+                // made the kernel look extremely fast while producing nothing.
+                // Both the Warp and cuTile breakages presented that way.
+                if (lr.result != CUDA_SUCCESS) {
+                    const char* msg = nullptr;
+                    cuGetErrorString(lr.result, &msg);
+                    throw std::runtime_error(
+                        std::string("kernel launch failed: ") + (msg ? msg : "unknown"));
+                }
             } else {
                 desc.execute(ctx_);
             }

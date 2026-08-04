@@ -9,9 +9,9 @@ public:
     std::string module_path() const override { return compile_result_.module_path; }
     std::string function_name() const override { return compile_result_.kernel_name; }
 
-    // ct.mma runs fp32 inputs through tf32 tensor cores, which keep 10
-    // mantissa bits. Declaring that is what earns the wider tolerance; the
-    // base class used to hardcode 5e-2 to let this kernel through.
+    // The kernel casts its fp32 inputs to fp16 before ct.mma, so the multiply
+    // keeps 11 mantissa bits. TF32 is the same 11 bits, so it gives the right
+    // tolerance; this is what the hardcoded 5e-2 used to stand in for.
     ComputeMode compute_mode() const override { return ComputeMode::TF32; }
 
     bool needs_compilation() const override { return true; }
@@ -30,8 +30,12 @@ public:
         };
     }
 
-    // TODO: cuTile ABI for 2D tensors reverse-engineered layout, verify with cuobjdump
-    //       Each 2D tensor: ptr(u64) + shape[0](u32) + shape[1](u32) + stride[0](u32) + stride[1](u32)
+    // Each 2D array becomes ptr(u64) + shape[0] + shape[1] + stride[0] +
+    // stride[1], all u32, then K as a runtime scalar. Confirmed against the
+    // cubin with cuobjdump: 16 parameters, the three arrays at offsets 0x00,
+    // 0x18 and 0x30. Strides are in elements.
+    //
+    // BLOCK_M/N/K stay ct.Constant and are baked in, so they take no slot.
     std::vector<void*> get_kernel_args() override {
         // A (M x K)
         arg_a_ptr_       = d_a_;
@@ -52,17 +56,13 @@ public:
         arg_c_stride_[0] = static_cast<uint32_t>(N_);
         arg_c_stride_[1] = 1u;
 
-        // cuTile ct.Constant params still occupy slots in the cubin (values baked in, slots must exist)
-        arg_const_[0] = static_cast<uint32_t>(K_);   // K_DIM
-        arg_const_[1] = static_cast<uint32_t>(compile_result_.constants.at("BLOCK_M"));
-        arg_const_[2] = static_cast<uint32_t>(compile_result_.constants.at("BLOCK_N"));
-        arg_const_[3] = static_cast<uint32_t>(compile_result_.constants.at("BLOCK_K"));
+        arg_k_ = static_cast<int32_t>(K_);
 
         return {
             &arg_a_ptr_, &arg_a_shape_[0], &arg_a_shape_[1], &arg_a_stride_[0], &arg_a_stride_[1],
             &arg_b_ptr_, &arg_b_shape_[0], &arg_b_shape_[1], &arg_b_stride_[0], &arg_b_stride_[1],
             &arg_c_ptr_, &arg_c_shape_[0], &arg_c_shape_[1], &arg_c_stride_[0], &arg_c_stride_[1],
-            &arg_const_[0], &arg_const_[1], &arg_const_[2], &arg_const_[3],
+            &arg_k_,
         };
     }
 
@@ -71,7 +71,7 @@ private:
     uint32_t arg_a_shape_[2] = {}, arg_a_stride_[2] = {};
     uint32_t arg_b_shape_[2] = {}, arg_b_stride_[2] = {};
     uint32_t arg_c_shape_[2] = {}, arg_c_stride_[2] = {};
-    uint32_t arg_const_[4] = {};
+    int32_t  arg_k_ = 0;
 };
 
 REGISTER_KERNEL(CuTileMatmulDescriptor);
