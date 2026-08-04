@@ -6,7 +6,7 @@ struct MatmulNaive : MatmulDescriptorBase {
     std::string name() const override { return "matmul_naive"; }
     std::string module_path() const override { return compile_result_.module_path; }
     bool needs_compilation() const override { return true; }
-    std::string source_path() const override { return "matmul/naive.cu"; }
+    std::string source_path() const override { return "matmul/fp32/naive.cu"; }
     std::string function_name() const override { return "matmul_naive"; }
     std::string description() const override {
         return "Naive global memory matmul";

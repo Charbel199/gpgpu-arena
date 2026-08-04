@@ -143,11 +143,21 @@ void KernelCompiler::save_disk_cache(const std::string& source_path,
 }
 
 std::string KernelCompiler::derive_output_name(const std::string& source_path) {
-    // "reduce/reduce.triton.py" -> "reduce_triton_reduce"
-    // "reduce/baseline.cu"      -> "reduce_baseline"
+    // "reduce/fp32/baseline.cu"        -> "reduce_fp32_baseline"
+    // "reduce/fp32/reduce.triton.py"   -> "reduce_fp32_triton_reduce"
+    //
+    // Every directory component is folded into the name, not just the parent,
+    // so the dtype folder keeps fp32 and fp16 builds of the same kernel from
+    // overwriting each other's cubin.
     fs::path p(source_path);
 
-    std::string category = p.parent_path().filename().string();
+    std::string prefix;
+    for (const auto& part : p.parent_path()) {
+        if (part.empty()) continue;
+        if (!prefix.empty()) prefix += "_";
+        prefix += part.string();
+    }
+
     std::string filename = p.filename().string();
 
     auto dot1 = filename.find('.');
@@ -161,8 +171,8 @@ std::string KernelCompiler::derive_output_name(const std::string& source_path) {
         }
     }
 
-    if (dsl.empty()) return category + "_" + name;
-    return category + "_" + dsl + "_" + name;
+    if (dsl.empty()) return prefix + "_" + name;
+    return prefix + "_" + dsl + "_" + name;
 }
 
 std::string KernelCompiler::get_extension(const std::string& source_path) {

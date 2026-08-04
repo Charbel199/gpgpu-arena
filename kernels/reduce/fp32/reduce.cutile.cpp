@@ -10,7 +10,7 @@ public:
     std::string function_name() const override { return compile_result_.kernel_name; }
 
     bool needs_compilation() const override { return true; }
-    std::string source_path() const override { return "reduce/reduce.cutile.py"; }
+    std::string source_path() const override { return "reduce/fp32/reduce.cutile.py"; }
 
     KernelLoader::LaunchConfig get_launch_config() const override {
         int tile_size = compile_result_.constants.at("TILE_SIZE");

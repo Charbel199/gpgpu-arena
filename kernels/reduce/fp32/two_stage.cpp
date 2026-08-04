@@ -12,7 +12,7 @@ public:
     }
     std::string module_path() const override { return compile_result_.module_path; }
     bool needs_compilation() const override { return true; }
-    std::string source_path() const override { return "reduce/two_stage.cu"; }
+    std::string source_path() const override { return "reduce/fp32/two_stage.cu"; }
     std::string function_name() const override { return "reduce_sum_blocks"; }
 
     // two_stage manages its own module + two-kernel launch in execute()
