@@ -31,6 +31,8 @@ public:
         };
     }
 
+    int accumulation_length() const override { return cols_; }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         rows_ = params.count("rows") ? params.at("rows") : 1024;
         cols_ = params.count("cols") ? params.at("cols") : 1024;
@@ -44,10 +46,14 @@ public:
     }
 
     void initialize(Context& ctx) override {
-        // fill with small values so exp() doesn't overflow
-        std::vector<float> h_input(rows_ * cols_);
-        for (int i = 0; i < rows_ * cols_; i++) {
-            h_input[i] = (float)(i % 7) - 3.0f; // values in [-3, 3]
+        // Softmax subtracts the row max before exp(), so scale rather than
+        // clamp: keeping the shape of the distribution matters more than the
+        // absolute range, and huge magnitudes would just saturate every row
+        // to a one-hot vector and hide any real difference between kernels.
+        std::vector<float> h_input;
+        generate(h_input, (size_t)rows_ * cols_, distribution_, input_seed_);
+        for (float& v : h_input) {
+            v = std::isfinite(v) ? std::max(-20.0f, std::min(20.0f, v * 3.0f)) : 0.0f;
         }
         ctx.copy_to_device(d_input_, h_input.data(), size_data_);
 

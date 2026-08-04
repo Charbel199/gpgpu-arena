@@ -33,6 +33,8 @@ public:
         };
     }
     
+    int accumulation_length() const override { return n_; }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         n_ = params.count("n") ? params.at("n") : 1000000;
     }
@@ -46,7 +48,7 @@ public:
     }
     
     void initialize(Context& ctx) override {
-        h_input_.assign(n_, 1.0f);
+        generate(h_input_, n_, distribution_, input_seed_);
         ctx.copy_to_device(d_input_, h_input_.data(), size_data_);
 
         std::vector<float> h_output(n_, 0.0f);

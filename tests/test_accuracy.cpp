@@ -99,8 +99,10 @@ TEST_CASE("dtype") {
         CHECK(default_tolerance(DType::FP32, ComputeMode::TF32)
               > default_tolerance(DType::FP32, ComputeMode::Default));
     }
-    SUBCASE("fp32 tolerance is tight enough to catch saturation") {
-        // 0.738 relative error from a saturated accumulator must not pass.
-        CHECK(default_tolerance(DType::FP32) < 0.738);
+    SUBCASE("per-element budget stays tight enough to catch saturation") {
+        // Even scaled by sqrt(64e6), the fp32 budget must not admit the
+        // 0.738 error a saturated accumulator produces.
+        const double scaled = default_tolerance(DType::FP32) * std::sqrt(64e6);
+        CHECK(scaled < 0.738);
     }
 }

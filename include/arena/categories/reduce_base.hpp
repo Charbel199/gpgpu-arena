@@ -33,6 +33,8 @@ public:
         };
     }
     
+    int accumulation_length() const override { return n_; }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         n_ = params.count("n") ? params.at("n") : 1000000;
     }
@@ -47,7 +49,8 @@ public:
     }
     
     void initialize(Context& ctx) override {
-        std::vector<float> h_input(n_, 1.0f);
+        std::vector<float> h_input;
+        generate(h_input, n_, distribution_, input_seed_);
 
         // Reference is computed from the data we actually upload, in double,
         // so it stays correct whatever the generator produces.

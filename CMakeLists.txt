@@ -131,6 +131,7 @@ set(ARENA_SOURCES
     src/arena/measurement/measure_policy.cpp
     src/arena/cli_args.cpp
     src/arena/dtype.cpp
+    src/arena/distribution.cpp
     src/arena/measurement/accuracy.cpp
     src/arena/result_io.cpp
     src/arena/runner.cpp

@@ -30,6 +30,8 @@ public:
         };
     }
 
+    int accumulation_length() const override { return K_; }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         M_ = params.count("M") ? params.at("M") : 1024;
         K_ = params.count("K") ? params.at("K") : M_;
@@ -48,13 +50,8 @@ public:
     }
 
     void initialize(Context& ctx) override {
-        std::mt19937 rng(42);
-        std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
-
-        h_a_.resize(M_ * K_);
-        h_b_.resize(K_ * N_);
-        for (float& v : h_a_) v = dist(rng);
-        for (float& v : h_b_) v = dist(rng);
+        generate(h_a_, (size_t)M_ * K_, distribution_, input_seed_);
+        generate(h_b_, (size_t)K_ * N_, distribution_, input_seed_ + 1);
 
         ctx.copy_to_device(d_a_, h_a_.data(), size_a_);
         ctx.copy_to_device(d_b_, h_b_.data(), size_b_);

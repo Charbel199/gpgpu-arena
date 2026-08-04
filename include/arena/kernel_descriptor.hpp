@@ -4,6 +4,7 @@
 #include "arena/device/kernel_loader.hpp"
 #include "arena/compilers/backend.hpp"
 #include "arena/dtype.hpp"
+#include "arena/distribution.hpp"
 #include "arena/measurement/accuracy.hpp"
 #include <string>
 #include <vector>
@@ -11,6 +12,7 @@
 #include <memory>
 #include <set>
 #include <stdexcept>
+#include <cmath>
 
 namespace arena {
 
@@ -32,6 +34,12 @@ public:
     virtual void set_problem_size(const std::map<std::string, int>& params) = 0;
     virtual std::vector<std::map<std::string, int>> get_sweep_configs() const { return {}; }
     
+    // Input generation settings, pushed in by the runner before allocate().
+    void set_input_spec(Distribution d, uint64_t seed) {
+        distribution_ = d;
+        input_seed_ = seed;
+    }
+
     // memory management (through the context class)
     virtual void allocate(Context& ctx) = 0;
     virtual void initialize(Context& ctx) = 0;
@@ -50,9 +58,19 @@ public:
     virtual DType dtype() const { return DType::FP32; }
     virtual ComputeMode compute_mode() const { return ComputeMode::Default; }
 
-    // Tolerance the measured error is judged against. Derived from the dtype
-    // by default; override only when a kernel has a documented reason.
-    virtual double tolerance() const { return default_tolerance(dtype(), compute_mode()); }
+    // How many values get summed into one output. Reduction error grows with
+    // this, so it scales the tolerance: a sum over 4M elements is allowed
+    // more drift than a sum over 8.
+    virtual int accumulation_length() const { return 1; }
+
+    // Tolerance the measured error is judged against. Per-element budget from
+    // the dtype, scaled by sqrt of the accumulation length, which is how
+    // rounding error grows when the summands have mixed signs.
+    virtual double tolerance() const {
+        const double per_element = default_tolerance(dtype(), compute_mode());
+        const int n = accumulation_length() > 1 ? accumulation_length() : 1;
+        return per_element * std::sqrt(static_cast<double>(n));
+    }
 
     // Compare against a CPU reference and report how far off it was. Returning
     // a number rather than a boolean means a kernel that is merely imprecise
@@ -79,6 +97,9 @@ public:
     int sm_count() const { return sm_count_; }
 
 protected:
+    Distribution distribution_ = Distribution::Uniform;
+    uint64_t     input_seed_ = 42;
+
     CompileResult compile_result_;
     int sm_count_ = 0;
 

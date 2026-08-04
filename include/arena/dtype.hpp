@@ -26,8 +26,9 @@ const char* compute_mode_name(ComputeMode m);
 // tolerance and explains why an fp16 accumulator stops counting at 2048.
 int dtype_mantissa_bits(DType d);
 
-// Error budget a kernel of this type is expected to stay within. Derived from
-// the mantissa rather than hand-picked, with headroom for accumulation order.
+// Per-element error budget for this type, derived from the mantissa rather
+// than hand-picked. Scale it by the accumulation length to get a kernel's
+// tolerance: summing more values legitimately costs more precision.
 double default_tolerance(DType d, ComputeMode m = ComputeMode::Default);
 
 }
