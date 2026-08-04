@@ -31,9 +31,15 @@ namespace UITheme {
 
     // Storage type. Deliberately cool-to-warm as precision drops, so a table
     // mixing dtypes reads at a glance without checking the Type column.
-    constexpr ImVec4 DTYPE_FP32    = {0.36f,  0.66f,  0.94f,  1.0f};  // blue
-    constexpr ImVec4 DTYPE_FP16    = {0.96f,  0.70f,  0.24f,  1.0f};  // amber
-    constexpr ImVec4 DTYPE_BF16    = {0.90f,  0.45f,  0.55f,  1.0f};  // rose
+    // Keyed on the input>output pair, not just the input: fp16>fp32 and
+    // fp16>fp16 keep very different amounts of precision and should not look
+    // alike. Cooler is more precise.
+    constexpr ImVec4 DTYPE_F32_F32 = {0.36f,  0.66f,  0.94f,  1.0f};  // blue
+    constexpr ImVec4 DTYPE_F16_F32 = {0.96f,  0.70f,  0.24f,  1.0f};  // amber
+    constexpr ImVec4 DTYPE_F16_F16 = {0.93f,  0.39f,  0.24f,  1.0f};  // burnt orange
+    constexpr ImVec4 DTYPE_B16_F32 = {0.72f,  0.55f,  0.90f,  1.0f};  // violet
+    constexpr ImVec4 DTYPE_B16_B16 = {0.90f,  0.42f,  0.62f,  1.0f};  // rose
+    constexpr ImVec4 DTYPE_OTHER   = {0.60f,  0.60f,  0.60f,  1.0f};
     constexpr ImVec4 CUB_BADGE     = {0.55f,  0.55f,  0.55f,  1.0f};  // gray
 
     constexpr ImVec4 ERROR_RED     = {1.0f,   0.267f, 0.267f, 1.0f};  // #FF4444
@@ -351,10 +357,14 @@ static std::string dtype_label(const std::string& in, const std::string& out) {
     return in + ">" + out;
 }
 
-static ImVec4 dtype_color(const std::string& dtype) {
-    if (dtype == "fp16") return UITheme::DTYPE_FP16;
-    if (dtype == "bf16") return UITheme::DTYPE_BF16;
-    return UITheme::DTYPE_FP32;
+// Colour for an "input>output" label.
+static ImVec4 dtype_color(const std::string& label) {
+    if (label == "fp32>fp32") return UITheme::DTYPE_F32_F32;
+    if (label == "fp16>fp32") return UITheme::DTYPE_F16_F32;
+    if (label == "fp16>fp16") return UITheme::DTYPE_F16_F16;
+    if (label == "bf16>fp32") return UITheme::DTYPE_B16_F32;
+    if (label == "bf16>bf16") return UITheme::DTYPE_B16_B16;
+    return UITheme::DTYPE_OTHER;
 }
 
 DSLType Gui::detect_dsl_type(const arena::KernelDescriptor* desc) const {
@@ -729,9 +739,9 @@ void Gui::render_kernel_sidebar() {
     if (ImGui::SmallButton("None")) { for (auto& k : *kernels) k.selected = false; }
     ImGui::Separator();
 
-    // Type legend. Only the types actually present, so a category of plain
-    // fp32 kernels costs one short line. Selectable text is not clipped by
-    // ImGui, so labelling every row would collide with the longer names.
+    // Type legend, doubling as a filter: clicking one selects exactly the
+    // kernels of that type. Only the types actually present are listed, so a
+    // category of plain fp32 kernels costs one short line.
     {
         std::vector<std::string> seen;
         for (const auto& k : *kernels) {
@@ -739,16 +749,20 @@ void Gui::render_kernel_sidebar() {
             if (std::find(seen.begin(), seen.end(), lbl) == seen.end()) seen.push_back(lbl);
         }
         for (size_t li = 0; li < seen.size(); li++) {
-            if (li) ImGui::SameLine();
-            const ImVec2 cp = ImGui::GetCursorScreenPos();
-            const float  th = ImGui::GetTextLineHeight();
-            const std::string base = seen[li].substr(0, seen[li].find('>'));
-            ImGui::GetWindowDrawList()->AddRectFilled(
-                ImVec2(cp.x, cp.y + 2 * s), ImVec2(cp.x + 3 * s, cp.y + th),
-                ImGui::GetColorU32(dtype_color(base)), 1.5f * s);
-            ImGui::Dummy({5 * s, th});
-            ImGui::SameLine(0, 2 * s);
-            ImGui::TextColored(UITheme::TEXT_DIM, "%s", seen[li].c_str());
+            if (li) ImGui::SameLine(0, 6 * s);
+            const ImVec4 col = dtype_color(seen[li]);
+
+            ImGui::PushID((int)li + 9000);
+            ImGui::PushStyleColor(ImGuiCol_Text, col);
+            ImGui::PushStyleColor(ImGuiCol_Button, {col.x, col.y, col.z, 0.14f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {col.x, col.y, col.z, 0.30f});
+            if (ImGui::SmallButton(seen[li].c_str())) {
+                for (auto& k : *kernels) k.selected = (dtype_label(k.descriptor) == seen[li]);
+            }
+            ImGui::PopStyleColor(3);
+            ImGui::PopID();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Select only %s kernels", seen[li].c_str());
         }
         ImGui::Separator();
     }
@@ -782,8 +796,7 @@ void Gui::render_kernel_sidebar() {
             const float  rh = ImGui::GetFrameHeight();
             ImGui::GetWindowDrawList()->AddRectFilled(
                 ImVec2(x0, rp.y), ImVec2(x0 + 3.0f * s, rp.y + rh),
-                ImGui::GetColorU32(dtype_color(
-                    arena::dtype_name(k.descriptor->input_dtype()))),
+                ImGui::GetColorU32(dtype_color(dtype_label(k.descriptor))),
                 1.5f * s);
         }
         ImGui::Indent(8.0f * s);
@@ -926,7 +939,25 @@ void Gui::render_problem_config() {
 void Gui::render_run_controls() {
     float s = ui_scale_;
 
-    ImGui::SliderInt("Warmup", &config_.warmup_runs, 0, 50);
+    // No warmup slider: warmup runs until the timings stop drifting, so a
+    // fixed count is not a thing to set. Auto is the mode; the fixed count
+    // stays reachable from the CLI with --warmup for reproducing a run.
+    bool fixed_warmup = (config_.warmup_mode == arena::RunConfig::WarmupMode::Fixed);
+    if (ImGui::Checkbox("Fixed warmup", &fixed_warmup)) {
+        config_.warmup_mode = fixed_warmup ? arena::RunConfig::WarmupMode::Fixed
+                                           : arena::RunConfig::WarmupMode::Auto;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Off: warm up until the median stops drifting (up to %d runs or %.0f ms).\n"
+            "On: always run exactly %d, for reproducing a specific run.",
+            config_.warmup_max, config_.warmup_max_ms, config_.warmup_runs);
+    }
+    if (fixed_warmup) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90 * s);
+        ImGui::SliderInt("##warmupn", &config_.warmup_runs, 1, 50);
+    }
     ImGui::SliderInt("Runs", &config_.number_of_runs, 1, 100);
     ImGui::Checkbox("Profile", &config_.collect_metrics);
     ImGui::SameLine();
@@ -1877,7 +1908,8 @@ void Gui::render_results_table() {
                 ImGui::GetWindowDrawList()->AddRectFilled(
                     ImVec2(cp.x - 5.0f * s, cp.y),
                     ImVec2(cp.x - 2.0f * s, cp.y + lh),
-                    ImGui::GetColorU32(dtype_color(k.result.input_dtype)),
+                    ImGui::GetColorU32(dtype_color(
+                        k.result.input_dtype + ">" + k.result.output_dtype)),
                     1.0f * s);
             }
             DSLType dsl = detect_dsl_type(k.descriptor);
@@ -1999,8 +2031,8 @@ void Gui::render_results_table() {
             }
 
             ImGui::TableNextColumn();
-            ImGui::TextColored(dtype_color(k.result.input_dtype), "%s",
-                dtype_label(k.result.input_dtype, k.result.output_dtype).c_str());
+            const std::string tl = dtype_label(k.result.input_dtype, k.result.output_dtype);
+            ImGui::TextColored(dtype_color(tl), "%s", tl.c_str());
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("in %s, out %s, compute %s\naccuracy is judged against the output type",
                     k.result.input_dtype.c_str(), k.result.output_dtype.c_str(),
