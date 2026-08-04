@@ -13,7 +13,7 @@ M, K, N = 1024, 1024, 1024
 @ct.kernel(occupancy=2)
 def matmul_kernel(
     A: ct.Array, B: ct.Array, C: ct.Array,
-    K_DIM: ct.Constant[int],
+    K_DIM: int,   # runtime, not ct.Constant: baking it locks the cubin to one K
     BLOCK_M: ct.Constant[int],
     BLOCK_N: ct.Constant[int],
     BLOCK_K: ct.Constant[int],
@@ -38,5 +38,5 @@ dummy_C = cp.zeros((M, N), dtype=cp.float32)
 main(
     kernel_fn=matmul_kernel,
     dummy_args=(dummy_A, dummy_B, dummy_C, K, BLOCK_M, BLOCK_N, BLOCK_K),
-    constants={"K_DIM": K, "BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N, "BLOCK_K": BLOCK_K},
+    constants={"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N, "BLOCK_K": BLOCK_K},
 )

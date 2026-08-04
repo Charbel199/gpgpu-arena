@@ -23,22 +23,21 @@ public:
         };
     }
 
-    // TODO: cuTile ABI expands each tensor arg into (ptr, shape, stride) at the PTX level.
-    //       The layout below was reverse-engineered for 1D, verify for 2D+ tensors
+    // Each array becomes (ptr, shape[0..ndim), stride[0..ndim)) in the launch
+    // signature. Confirmed against the cubin with cuobjdump under cuTile 1.5's
+    // cutile_python_v2 convention: six parameters at offsets 0x00, 0x08, 0x0c,
+    // 0x10, 0x18, 0x1c. ct.Constant values are baked in and take no slot, so
+    // TILE_SIZE is not passed.
     std::vector<void*> get_kernel_args() override {
-        // reduce_sum(input, output, TILE_SIZE: Constant)
-        // PTX params: input(ptr,shape[0],stride[0]) output(ptr,shape[0],stride[0]) padding
         arg_input_ptr_     = d_input_;
         arg_input_shape_   = static_cast<uint32_t>(n_);
         arg_input_stride_  = 1u;
         arg_output_ptr_    = d_output_;
         arg_output_shape_  = 1u;
         arg_output_stride_ = 1u;
-        arg_const_tile_sz_ = static_cast<uint32_t>(compile_result_.constants.at("TILE_SIZE"));
         return {
             &arg_input_ptr_, &arg_input_shape_, &arg_input_stride_,
             &arg_output_ptr_, &arg_output_shape_, &arg_output_stride_,
-            &arg_const_tile_sz_
         };
     }
 
@@ -46,7 +45,6 @@ private:
     uint64_t arg_input_ptr_ = 0, arg_output_ptr_ = 0;
     uint32_t arg_input_shape_ = 0, arg_input_stride_ = 0;
     uint32_t arg_output_shape_ = 0, arg_output_stride_ = 0;
-    uint32_t arg_const_tile_sz_ = 0;
 };
 
 REGISTER_KERNEL(CuTileReduceDescriptor);

@@ -9,6 +9,11 @@ public:
     std::string module_path() const override { return compile_result_.module_path; }
     std::string function_name() const override { return compile_result_.kernel_name; }
 
+    // tl.dot is called with input_precision="tf32", so the multiply keeps 11
+    // mantissa bits rather than fp32's 24. Without declaring that it is judged
+    // against an fp32 budget and fails on precision it never promised.
+    ComputeMode compute_mode() const override { return ComputeMode::TF32; }
+
     bool needs_compilation() const override { return true; }
     std::string source_path() const override { return "matmul/fp32/matmul.triton.py"; }
 
