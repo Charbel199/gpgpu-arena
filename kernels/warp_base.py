@@ -71,12 +71,20 @@ def main(kernel_fn, constants=None):
           file=sys.stderr)
 
     # JSON metadata to stdout parsed by KernelCompiler on the C++ side
+    # Version goes out with the constants so the descriptor can refuse to run
+    # against a layout its hand-written ABI structs do not match. warp 1.13
+    # changed launch_bounds_t and a mismatch fails silently.
+    major, minor = (list(map(int, wp.config.version.split(".")[:2])) + [0, 0])[:2]
+    out_constants = dict(constants or {})
+    out_constants["warp_major"] = major
+    out_constants["warp_minor"] = minor
+
     print(json.dumps({
         "kernel_name": kernel_name,
         "num_warps": 0,
         "shared_memory": 0,
         "num_params": num_params,
-        "constants": constants or {},
+        "constants": out_constants,
         "import_ms": _IMPORT_MS,
         "compile_ms": compile_ms,
     }))

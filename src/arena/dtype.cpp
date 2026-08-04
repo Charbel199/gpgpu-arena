@@ -1,6 +1,5 @@
 #include "arena/dtype.hpp"
 
-#include <cassert>
 #include <cmath>
 #include <cstring>
 
@@ -21,12 +20,6 @@ int dtype_bits(DType d) {
 size_t dtype_buffer_bytes(size_t count, DType d) {
     const size_t bits = count * static_cast<size_t>(dtype_bits(d));
     return (bits + 7) / 8;
-}
-
-size_t dtype_size(DType d) {
-    const int bits = dtype_bits(d);
-    assert(bits % 8 == 0 && "sub-byte type: use dtype_buffer_bytes");
-    return static_cast<size_t>(bits / 8);
 }
 
 bool dtype_is_block_scaled(DType d) {

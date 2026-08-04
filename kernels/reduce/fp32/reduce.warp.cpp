@@ -12,8 +12,8 @@ namespace arena {
 // This layout changed in warp 1.13: shape went from a fixed int[4] plus an
 // ndim field to int[N], and coord_mult was added. A kernel built against the
 // old layout still launches, reads a garbage thread count, exits immediately
-// and reports an impossible bandwidth, so the version is checked at run time
-// rather than trusted.
+// and reports an impossible bandwidth, so check_warp_version() refuses to run
+// against a version whose layout these structs do not match.
 struct WarpLaunchBounds {
     int32_t  shape[1];    // launch extent for a 1D kernel
     int32_t  _pad;
@@ -41,6 +41,24 @@ public:
 
     bool needs_compilation() const override { return true; }
     std::string source_path() const override { return "reduce/fp32/reduce.warp.py"; }
+
+    // Refuse to run against a Warp whose layout these structs do not match,
+    // rather than launching, reading a garbage thread count and reporting an
+    // impossible bandwidth. warp_base reports its version in the constants.
+    void allocate(Context& ctx) override {
+        const auto& c = compile_result_.constants;
+        if (c.count("warp_major") && c.count("warp_minor")) {
+            const int major = c.at("warp_major");
+            const int minor = c.at("warp_minor");
+            if (major != 1 || minor < 13) {
+                throw std::runtime_error(
+                    "warp " + std::to_string(major) + "." + std::to_string(minor) +
+                    ": launch_bounds_t has a different layout than this descriptor "
+                    "expects (needs 1.13 or later)");
+            }
+        }
+        ReduceDescriptorBase::allocate(ctx);
+    }
 
     KernelLoader::LaunchConfig get_launch_config() const override {
         return {

@@ -79,9 +79,9 @@ TEST_CASE("ErrorAccumulator") {
 
 TEST_CASE("dtype") {
     SUBCASE("sizes") {
-        CHECK(dtype_size(DType::FP32) == 4);
-        CHECK(dtype_size(DType::FP16) == 2);
-        CHECK(dtype_size(DType::BF16) == 2);
+        CHECK(dtype_buffer_bytes(1, DType::FP32) == 4);
+        CHECK(dtype_buffer_bytes(1, DType::FP16) == 2);
+        CHECK(dtype_buffer_bytes(1, DType::BF16) == 2);
     }
     SUBCASE("names round-trip into result files") {
         CHECK(std::string(dtype_name(DType::FP32)) == "fp32");

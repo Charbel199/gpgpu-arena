@@ -34,10 +34,6 @@ int dtype_bits(DType d);
 // Bytes needed to hold count elements, rounded up to a whole byte.
 size_t dtype_buffer_bytes(size_t count, DType d);
 
-// Bytes per element for byte-aligned types. Asserts on sub-byte types, which
-// have no meaningful answer; use dtype_buffer_bytes instead.
-size_t dtype_size(DType d);
-
 // True for formats that carry a separate per-block scale tensor. NVFP4 is
 // FP4_E2M1 plus an e4m3 scale per 16 elements, so a descriptor using it needs
 // a second buffer the current base classes do not allocate.
