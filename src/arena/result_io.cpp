@@ -152,6 +152,9 @@ json config_json(const RunConfig& cfg) {
     j["collect_metrics"]  = cfg.collect_metrics;
     j["collect_energy"]   = cfg.collect_energy;
     j["energy_window_ms"] = cfg.energy_window_ms;
+    j["sweep_min"]        = cfg.sweep_min;
+    j["sweep_max"]        = cfg.sweep_max;
+    j["sweep_factor"]     = cfg.sweep_factor;
     j["input_distribution"] = distribution_name(cfg.input_distribution);
     j["input_seed"]         = cfg.input_seed;
     j["params"]           = cfg.params;

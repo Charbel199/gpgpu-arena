@@ -1029,7 +1029,7 @@ void Gui::render_run_controls() {
             if (auto* ks = current_kernels()) {
                 for (const auto& k : *ks) {
                     if (k.selected && k.descriptor) {
-                        auto configs = k.descriptor->get_sweep_configs();
+                        auto configs = k.descriptor->get_sweep_configs(config_);
                         if (!configs.empty()) {
                             ImGui::BeginTooltip();
                             ImGui::Text("Run at %zu sizes:", configs.size());
@@ -2671,7 +2671,7 @@ void Gui::run_sweep() {
     }
     if (work.empty()) return;
 
-    auto sweep_configs = work[0].second->get_sweep_configs();
+    auto sweep_configs = work[0].second->get_sweep_configs(config_);
     if (sweep_configs.empty()) {
         log(LogEntry::WARN, "No sweep configs defined for this category");
         return;

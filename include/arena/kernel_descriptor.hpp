@@ -5,6 +5,7 @@
 #include "arena/compilers/backend.hpp"
 #include "arena/dtype.hpp"
 #include "arena/distribution.hpp"
+#include "arena/runner_config.hpp"
 #include "arena/measurement/accuracy.hpp"
 #include <string>
 #include <vector>
@@ -33,7 +34,32 @@ public:
     // problem configuration
     virtual std::vector<std::string> get_parameter_names() const = 0;
     virtual void set_problem_size(const std::map<std::string, int>& params) = 0;
-    virtual std::vector<std::map<std::string, int>> get_sweep_configs() const { return {}; }
+    // Sizes to sweep over. A category supplies its own sensible range and the
+    // generator below turns it into a ladder, so the range is one pair of
+    // numbers rather than a hand-written list per category.
+    virtual int sweep_default_min() const { return 0; }
+    virtual int sweep_default_max() const { return 0; }
+
+    virtual std::vector<std::map<std::string, int>> get_sweep_configs(
+        const RunConfig& cfg) const {
+        const int lo = cfg.sweep_min > 0 ? cfg.sweep_min : sweep_default_min();
+        const int hi = cfg.sweep_max > 0 ? cfg.sweep_max : sweep_default_max();
+        const double factor = cfg.sweep_factor > 1.0 ? cfg.sweep_factor : 4.0;
+        if (lo <= 0 || hi < lo) return {};
+
+        // Every parameter takes the same value at each step. Both multi-param
+        // categories here are square (M=K=N, rows=cols), and a per-parameter
+        // range would be a lot of UI for a case nothing needs yet.
+        std::vector<std::map<std::string, int>> out;
+        const auto names = get_parameter_names();
+        for (double v = lo; v <= (double)hi * 1.0001; v *= factor) {
+            std::map<std::string, int> params;
+            for (const auto& n : names) params[n] = (int)(v + 0.5);
+            out.push_back(std::move(params));
+            if (factor <= 1.0) break;
+        }
+        return out;
+    }
     
     // Input generation settings, pushed in by the runner before allocate().
     void set_input_spec(Distribution d, uint64_t seed) {

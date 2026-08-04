@@ -87,6 +87,15 @@ CliOptions parse_args(int argc, char** argv) {
         } else if (arg_is(a, "--seed")) {
             if (!take_value(argc, argv, i, "--seed", v, o)) return o;
             o.config.input_seed = std::strtoull(v.c_str(), nullptr, 10);
+        } else if (arg_is(a, "--sweep-min")) {
+            if (!take_value(argc, argv, i, "--sweep-min", v, o)) return o;
+            o.config.sweep_min = std::atoi(v.c_str());
+        } else if (arg_is(a, "--sweep-max")) {
+            if (!take_value(argc, argv, i, "--sweep-max", v, o)) return o;
+            o.config.sweep_max = std::atoi(v.c_str());
+        } else if (arg_is(a, "--sweep-factor")) {
+            if (!take_value(argc, argv, i, "--sweep-factor", v, o)) return o;
+            o.config.sweep_factor = std::atof(v.c_str());
         } else if (arg_is(a, "--profile")) {
             o.config.collect_metrics = true;
         } else if (arg_is(a, "--energy")) {
@@ -161,6 +170,8 @@ void print_cli_usage(const char* program) {
         "  --runs <n>                Timed runs per kernel (default 10)\n"
         "  --dist <name>             Input data: ones, uniform, normal, adversarial\n"
         "  --seed <n>                Input seed, for reproducible runs (default 42)\n"
+        "  --sweep-min/-max <n>      Sweep range; 0 uses the category default\n"
+        "  --sweep-factor <x>        Step multiplier between sweep sizes (default 4)\n"
         "  --warmup <n>              Fixed warmup count (default: auto steady-state)\n"
         "  --profile                 Collect hardware counters (needs perf access)\n"
         "  --energy                  Collect NVML energy (adds a sustained pass)\n"

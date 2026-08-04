@@ -24,21 +24,8 @@ public:
         return {"n"};
     }
 
-    std::vector<std::map<std::string, int>> get_sweep_configs() const override {
-        return {
-            {{"n", 256}},
-            {{"n", 1024}},
-            {{"n", 4096}},
-            {{"n", 16384}},
-            {{"n", 65536}},
-            {{"n", 262144}},
-            {{"n", 1000000}},
-            {{"n", 4000000}},
-            {{"n", 16000000}},
-            {{"n", 64000000}},
-            {{"n", 256000000}},
-        };
-    }
+    int sweep_default_min() const override { return 256; }
+    int sweep_default_max() const override { return 256000000; }
     
     int accumulation_length() const override { return n_; }
 

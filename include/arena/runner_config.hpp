@@ -30,6 +30,12 @@ struct RunConfig {
     bool  collect_energy   = false;
     float energy_window_ms = 500.0f;
 
+    // Sweep range. Zero means "use the category's own default ladder", so
+    // nothing changes until you actually set a range.
+    int    sweep_min = 0;
+    int    sweep_max = 0;
+    double sweep_factor = 4.0;   // each step multiplies the size by this
+
     // Input data. The seed makes a run reproducible and lets the CPU
     // reference be regenerated from the same numbers the GPU saw.
     Distribution input_distribution = Distribution::Uniform;
