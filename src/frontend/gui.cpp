@@ -1,4 +1,5 @@
 #include "frontend/gui.hpp"
+#include "arena/cli_args.hpp"
 #include "arena/result_io.hpp"
 
 #include <imgui.h>
@@ -16,6 +17,31 @@
 #include <unistd.h>
 
 namespace frontend {
+
+namespace {
+
+// The configs a kernel will be tried at, whichever axis it happens to have.
+std::vector<arena::cli::TuningVariant> tuning_variants(
+    const arena::KernelDescriptor& d) {
+    return arena::cli::tuning_variants_for(
+        true, 0, {}, d.tunable_block_sizes(), d.tunable_compile_options());
+}
+
+// What the table shows for one config. A CUDA kernel varies one number, so
+// "block=256" says everything; a DSL kernel varies named knobs.
+std::string tuning_label_for(const arena::cli::TuningVariant& v) {
+    if (!v.defines.empty()) {
+        std::string out;
+        for (const auto& [key, val] : v.defines) {
+            if (!out.empty()) out += ", ";
+            out += key + "=" + std::to_string(val);
+        }
+        return out;
+    }
+    return "block=" + std::to_string(v.block_size);
+}
+
+}   // namespace
 
 // ============================================================================
 // Theme colors  dark GPU/compute aesthetic
@@ -270,6 +296,17 @@ void Gui::drain_pending_results() {
     for (auto& pr : results) {
         for (auto& entry : pr.logs) {
             log(entry.level, entry.message);
+        }
+
+        // A tuning run measures configs the kernel is not normally launched
+        // at, so it goes to its own table rather than replacing the headline
+        // result the rest of the UI reads.
+        if (!pr.tuning_label.empty()) {
+            if (pr.result.success) {
+                tuning_history_[pr.category][pr.kernel_name].push_back(
+                    {pr.tuning_label, pr.result});
+            }
+            continue;
         }
 
         auto cat_it = kernels_by_category_.find(pr.category);
@@ -1050,6 +1087,45 @@ void Gui::render_run_controls() {
         }
         ImGui::EndDisabled();
 
+        // Tuning is a separate axis from problem size: it holds n fixed and
+        // varies how the kernel is launched or built.
+        int tuning_runs = 0, tunable_kernels = 0;
+        if (auto* ks = current_kernels()) {
+            for (const auto& k : *ks) {
+                if (!k.selected || !k.descriptor) continue;
+                const auto n = tuning_variants(*k.descriptor).size();
+                if (n > 1) { tunable_kernels++; tuning_runs += (int)n; }
+            }
+        }
+
+        ImGui::BeginDisabled(tunable_kernels == 0);
+        snprintf(lbl, sizeof(lbl), "Run Tuning (%d)", tuning_runs);
+        if (ImGui::Button(lbl, {-1, 30 * s})) {
+            run_tuning();
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            if (tunable_kernels == 0) {
+                ImGui::Text("No selected kernel has a tuning axis.");
+            } else {
+                ImGui::Text("Sweep block size (CUDA) or compile config (DSL)");
+                ImGui::Text("at the current problem size.");
+                ImGui::Separator();
+                if (auto* ks = current_kernels()) {
+                    for (const auto& k : *ks) {
+                        if (!k.selected || !k.descriptor) continue;
+                        const auto v = tuning_variants(*k.descriptor);
+                        if (v.size() < 2) continue;
+                        ImGui::BulletText("%s: %zu configs", k.descriptor->name().c_str(), v.size());
+                    }
+                }
+                ImGui::TextColored(UITheme::WARN_YELLOW,
+                    "DSL configs recompile on first use.");
+            }
+            ImGui::EndTooltip();
+        }
+
         bool has_results = false;
         if (auto* ks = current_kernels()) {
             for (const auto& k : *ks) if (k.has_run) { has_results = true; break; }
@@ -1703,6 +1779,8 @@ void Gui::render_benchmark_panel() {
         ImGui::Spacing();
     }
 
+    render_tuning_section();
+
     // ================================================================
     // Scaling Chart (multi-size history)
     // ================================================================
@@ -1769,6 +1847,96 @@ void Gui::render_benchmark_panel() {
             }
         }
     }
+}
+
+
+// ============================================================================
+// Tuning results  one row per kernel, expandable to every config tried
+// ============================================================================
+void Gui::render_tuning_section() {
+    float s = ui_scale_;
+
+    auto cat_it = tuning_history_.find(current_category_);
+    if (cat_it == tuning_history_.end() || cat_it->second.empty()) return;
+
+    if (!ImGui::CollapsingHeader("Tuning", ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    ImGui::TextColored(UITheme::TEXT_DIM,
+        "Best and worst config per kernel at the current problem size.");
+    ImGui::Spacing();
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_Borders |
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp;
+
+    if (ImGui::BeginTable("##tuning", 5, flags)) {
+        ImGui::TableSetupColumn("Kernel", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        ImGui::TableSetupColumn("Best config", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+        ImGui::TableSetupColumn("Best", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+        ImGui::TableSetupColumn("Worst", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+        ImGui::TableSetupColumn("Spread", ImGuiTableColumnFlags_WidthStretch, 0.7f);
+        ImGui::TableHeadersRow();
+
+        for (const auto& [name, entries] : cat_it->second) {
+            if (entries.empty()) continue;
+
+            const TunedResult* best = &entries[0];
+            const TunedResult* worst = &entries[0];
+            for (const auto& e : entries) {
+                if (e.result.op_ms < best->result.op_ms)  best = &e;
+                if (e.result.op_ms > worst->result.op_ms) worst = &e;
+            }
+            const double spread = best->result.op_ms > 0.0
+                ? worst->result.op_ms / best->result.op_ms : 1.0;
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+
+            // The tree opens the full list of configs for this kernel; the
+            // summary stays on the same row so the table still scans.
+            const bool open = ImGui::TreeNodeEx(name.c_str(),
+                ImGuiTreeNodeFlags_SpanAvailWidth);
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextColored(UITheme::ACCENT, "%s", best->label.c_str());
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%.4f ms", best->result.op_ms);
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%.4f ms", worst->result.op_ms);
+            ImGui::TableSetColumnIndex(4);
+            // A flat kernel is the useful negative result: it says the axis is
+            // not what limits this one.
+            ImGui::TextColored(spread >= 1.5 ? UITheme::WARN_YELLOW : UITheme::TEXT_DIM,
+                "%.2fx", spread);
+
+            if (open) {
+                auto sorted = entries;
+                std::sort(sorted.begin(), sorted.end(),
+                    [](const TunedResult& a, const TunedResult& b) {
+                        return a.result.op_ms < b.result.op_ms;
+                    });
+                for (const auto& e : sorted) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextColored(&e == &sorted.front() ? UITheme::ACCENT
+                                                             : UITheme::TEXT_DIM,
+                        "%s", e.label.c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%.4f ms", e.result.op_ms);
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::TextColored(UITheme::TEXT_DIM, "%.1f %s",
+                        is_matmul() ? e.result.gflops : e.result.bandwidth_gbps,
+                        is_matmul() ? "GFLOPS" : "GB/s");
+                    ImGui::TableSetColumnIndex(4);
+                    if (!e.result.verified) {
+                        ImGui::TextColored(UITheme::ERROR_RED, "unverified");
+                    }
+                }
+                ImGui::TreePop();
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::Spacing();
 }
 
 // ============================================================================
@@ -2627,6 +2795,72 @@ void Gui::sweep_thread_func(
     benchmark_running_ = false;
 }
 
+
+// A tuning run walks each kernel's own axis instead of the problem size:
+// block sizes for a hand-written CUDA kernel, compile-time configs for a DSL
+// one. Both come back as labelled points so the table can show them together.
+void Gui::tuning_thread_func(
+    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
+    arena::RunConfig config) {
+
+    CUcontext ctx = runner_.context().handle();
+    cuCtxPushCurrent(ctx);
+
+    int i = 0;
+    for (auto& [cat, descriptor] : work) {
+        if (cancel_requested_) break;
+
+        const auto variants = arena::cli::tuning_variants_for(
+            true, 0, {}, descriptor->tunable_block_sizes(),
+            descriptor->tunable_compile_options());
+
+        for (const auto& variant : variants) {
+            if (cancel_requested_) break;
+
+            benchmark_current_ = i++;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                benchmark_current_name_ = descriptor->name();
+            }
+
+            auto run_config = config;
+            run_config.block_size      = variant.block_size;
+            run_config.compile_options = variant.defines;
+
+            PendingResult pr;
+            pr.category = cat;
+            pr.kernel_name = descriptor->name();
+            pr.params = config.params;
+            pr.tuning_label = tuning_label_for(variant);
+
+            pr.result = runner_.run(*descriptor, run_config);
+
+            char buf[256];
+            if (pr.result.success) {
+                snprintf(buf, sizeof(buf), "%s [%s]: op=%.4f ms",
+                    descriptor->name().c_str(), pr.tuning_label.c_str(),
+                    pr.result.op_ms);
+                pr.logs.push_back({LogEntry::INFO, buf});
+            } else {
+                pr.logs.push_back({LogEntry::ERR,
+                    descriptor->name() + " [" + pr.tuning_label + "]: " + pr.result.error});
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                pending_results_.push_back(std::move(pr));
+            }
+        }
+    }
+
+    benchmark_current_ = benchmark_total_.load();
+
+    CUcontext popped;
+    cuCtxPopCurrent(&popped);
+
+    benchmark_running_ = false;
+}
+
 // ============================================================================
 // Run commands
 // ============================================================================
@@ -2686,6 +2920,41 @@ void Gui::run_sweep() {
 
     benchmark_thread_ = std::thread(&Gui::sweep_thread_func, this,
         std::move(work), std::move(sweep_configs), config_);
+}
+
+void Gui::run_tuning() {
+    if (current_category_.empty()) return;
+    if (benchmark_running_) return;
+
+    auto it = kernels_by_category_.find(current_category_);
+    if (it == kernels_by_category_.end()) return;
+
+    std::vector<std::pair<std::string, arena::KernelDescriptor*>> work;
+    int total = 0;
+    for (auto& k : it->second) {
+        if (!k.selected || !k.descriptor) continue;
+        work.push_back({current_category_, k.descriptor});
+        total += (int)tuning_variants(*k.descriptor).size();
+    }
+    if (work.empty()) return;
+
+    if (total == (int)work.size()) {
+        log(LogEntry::WARN,
+            "None of the selected kernels has a tuning axis; nothing to sweep");
+        return;
+    }
+
+    if (benchmark_thread_.joinable()) benchmark_thread_.join();
+
+    tuning_history_[current_category_].clear();
+
+    cancel_requested_ = false;
+    benchmark_running_ = true;
+    benchmark_current_ = 0;
+    benchmark_total_ = total;
+
+    benchmark_thread_ = std::thread(&Gui::tuning_thread_func, this,
+        std::move(work), config_);
 }
 
 void Gui::reset_results() {

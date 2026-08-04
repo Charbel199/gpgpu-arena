@@ -35,6 +35,15 @@ struct SizedResult {
     arena::RunResult result;
 };
 
+// One point on a kernel's tuning axis. For a hand-written CUDA kernel that is
+// a block size and the run is a relaunch; for a DSL kernel it is a set of
+// compile-time defines and the run needed a recompile. The label is what the
+// UI shows, since the two axes have nothing else in common.
+struct TunedResult {
+    std::string label;
+    arena::RunResult result;
+};
+
 // Circular buffer for per-kernel timing history across multiple benchmark runs
 template<typename T, size_t Cap>
 struct RingBuffer {
@@ -97,6 +106,7 @@ private:
     // Actions
     void run_selected_kernels();
     void run_sweep();
+    void run_tuning();
     void reset_results();
     void refresh_kernels();
     void select_category(const std::string& category);
@@ -108,6 +118,9 @@ private:
     void sweep_thread_func(std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
                            std::vector<std::map<std::string, int>> sweep_configs,
                            arena::RunConfig config);
+    void tuning_thread_func(std::vector<std::pair<std::string, arena::KernelDescriptor*>> work,
+                            arena::RunConfig config);
+    void render_tuning_section();
     void drain_pending_results();
     bool is_matmul() const { return current_category_ == "matmul"; }
     std::vector<KernelState>* current_kernels();
@@ -160,6 +173,9 @@ private:
         arena::RunResult result;
         std::vector<LogEntry> logs;
         std::map<std::string, int> params;
+        // Set only by a tuning run, and it is what routes the result to the
+        // tuning table instead of overwriting the kernel's headline result.
+        std::string tuning_label;
     };
     std::vector<PendingResult> pending_results_;  // guarded by mutex_
 
@@ -167,6 +183,9 @@ private:
     enum class ScalingMetric { Performance, OpTime, GpuTime };
     ScalingMetric scaling_metric_ = ScalingMetric::Performance;
     std::map<std::string, std::map<std::string, std::vector<SizedResult>>> scaling_history_;
+
+    // Tuning: category -> kernel -> one entry per config tried.
+    std::map<std::string, std::map<std::string, std::vector<TunedResult>>> tuning_history_;
 };
 
 int run_gui(arena::Runner& runner);
