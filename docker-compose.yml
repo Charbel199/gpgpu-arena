@@ -1,44 +1,50 @@
-services:
-  # Headless mode (no X required) - override the command to pick a run
-  arena:
-    build: .
-    volumes:
-      - .:/workspace/gpgpu-arena
-      - kernel-cache:/workspace/gpgpu-arena/build/kernels
-    working_dir: /workspace/gpgpu-arena
-    command: bash -c "mkdir -p build && cd build && cmake -DBUILD_GUI=OFF .. && make -j$$(nproc) && ./arena --list"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+x-arena: &arena
+  build: .
+  working_dir: /workspace/gpgpu-arena
+  volumes:
+    - .:/workspace/gpgpu-arena
+    - kernel-cache:/workspace/gpgpu-arena/build/kernels
+  entrypoint: ["/workspace/gpgpu-arena/docker/entrypoint.sh"]
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
 
-  # GUI mode
+services:
+  # Headless CLI. Arguments pass straight through to the binary:
+  #
+  #   docker compose run --rm cli --list
+  #   docker compose run --rm cli --run reduce -p n=4000000 --runs 20
+  #   docker compose run --rm cli --run all --profile --format csv -o results.csv
+  #
+  # stdout carries only the payload, so piping works (-T disables the TTY):
+  #   docker compose run --rm -T cli --run cub_reduce | jq .results[0].timing
+  cli:
+    <<: *arena
+    command: ["--help"]
+
+  # Interactive shell in the same environment, for poking around.
+  shell:
+    <<: *arena
+    entrypoint: ["/bin/bash"]
+    stdin_open: true
+    tty: true
+
+  # GUI. Run `xhost +local:docker` on the host first.
   gui:
-    build: .
-    volumes:
-      - .:/workspace/gpgpu-arena
-      - kernel-cache:/workspace/gpgpu-arena/build/kernels
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    working_dir: /workspace/gpgpu-arena
+    <<: *arena
     environment:
       - DISPLAY=${DISPLAY}
       - NVIDIA_DRIVER_CAPABILITIES=all
       - __GLX_VENDOR_LIBRARY_NAME=nvidia
       - __NV_PRIME_RENDER_OFFLOAD=1
-    command: bash -c "mkdir -p build && cd build && cmake -DBUILD_GUI=ON .. && make -j$$(nproc) && ./arena --gui"
+    command: ["--gui"]
     stdin_open: true
     tty: true
     network_mode: host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
 volumes:
   kernel-cache:

@@ -65,6 +65,20 @@ more slowly than a single kernel runs. It reports whole-board energy, so
 `mj_per_op` is an upper bound on a kernel's marginal cost; the runner logs a
 device-busy estimate and warns when the loop is launch-bound.
 
+## Known Issues
+
+- **cuTile kernels fail to compile** against current `cuda-tile` releases:
+  `'ndarray' object has no attribute 'symbol'`. `cutile_base.py` passes cupy
+  ndarrays as dummy args to `compile_tile`, which newer versions no longer
+  accept. Reproduces identically on older commits, so it is an upstream API
+  change rather than a regression.
+
+- **The compile cache is keyed on source mtime only** — not on target
+  architecture, compiler version, or compile flags. A cubin can outlive the
+  toolchain that produced it and be reused silently. This has been observed
+  producing wrong results that verification caught. Clear it with
+  `rm build/kernels/*.cubin build/kernels/*.json` after a toolchain change.
+
 ## How It Works
 
 ```
