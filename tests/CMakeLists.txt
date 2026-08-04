@@ -1,7 +1,7 @@
 add_executable(arena_tests
     test_measure_policy.cpp
     test_cli_args.cpp
-    ${CMAKE_SOURCE_DIR}/src/arena/measure_policy.cpp
+    ${CMAKE_SOURCE_DIR}/src/arena/measurement/measure_policy.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/cli_args.cpp
 )
 

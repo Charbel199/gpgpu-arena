@@ -1,15 +1,15 @@
 #include <iostream>
 #include <cstring>
 
-#include "arena/context.hpp"
-#include "arena/kernel_loader.hpp"
+#include "arena/device/context.hpp"
+#include "arena/device/kernel_loader.hpp"
 #include "arena/compilers/kernel_compiler.hpp"
-#include "arena/compilers/cuda_compiler.hpp"
-#include "arena/compilers/triton_compiler.hpp"
-#include "arena/compilers/cutile_compiler.hpp"
-#include "arena/compilers/warp_compiler.hpp"
-#include "arena/profiler.hpp"
-#include "arena/power.hpp"
+#include "arena/compilers/cuda_backend.hpp"
+#include "arena/compilers/triton_backend.hpp"
+#include "arena/compilers/cutile_backend.hpp"
+#include "arena/compilers/warp_backend.hpp"
+#include "arena/measurement/profiler.hpp"
+#include "arena/measurement/power.hpp"
 #include "arena/runner.hpp"
 #include "arena/logger.hpp"
 #include "frontend/cli.hpp"
@@ -61,13 +61,13 @@ int main(int argc, char** argv) {
         arena::KernelLoader loader;
         arena::KernelCompiler compiler("kernels");
         compiler.register_compiler(".cu",
-            std::make_unique<arena::CudaCompiler>(ARENA_KERNEL_DIR));
+            std::make_unique<arena::CudaBackend>(ARENA_KERNEL_DIR));
         compiler.register_compiler(".triton.py",
-            std::make_unique<arena::TritonCompiler>(ARENA_KERNEL_DIR));
+            std::make_unique<arena::TritonBackend>(ARENA_KERNEL_DIR));
         compiler.register_compiler(".cutile.py",
-            std::make_unique<arena::CuTileCompiler>(ARENA_KERNEL_DIR));
+            std::make_unique<arena::CuTileBackend>(ARENA_KERNEL_DIR));
         compiler.register_compiler(".warp.py",
-            std::make_unique<arena::WarpCompiler>(ARENA_KERNEL_DIR));
+            std::make_unique<arena::WarpBackend>(ARENA_KERNEL_DIR));
 
         arena::Profiler profiler;
         arena::PowerMonitor power(0);

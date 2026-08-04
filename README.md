@@ -124,10 +124,10 @@ The descriptor declares `needs_compilation() = true` and `source_path()`. The ar
 
 ## Architecture
 
-- **Runtime Compilers** (`src/arena/compilers/`) - one per DSL. `CudaCompiler` runs nvcc, `TritonCompiler` and `CuTileCompiler` run Python scripts. Disk-cached with mtime invalidation.
-- **Kernel Loader** - loads `.cubin` via `cuModuleLoad`, launches via `cuLaunchKernel`.
-- **Benchmark** - CUDA events, median over N runs.
-- **Profiler** - CUPTI Activity API (kernel time, registers, shared memory) + Range Profiler (occupancy, IPC, DRAM throughput).
+- **Compiler backends** (`src/arena/compilers/`) - one per DSL. `CudaBackend` runs nvcc; `TritonBackend`, `CuTileBackend` and `WarpBackend` run Python scripts that emit a cubin plus JSON metadata.
+- **KernelCompiler** - picks a backend by file extension and owns the two-level cache (in-memory, then disk with mtime invalidation), the output naming, and the compile timing.
+- **Kernel Loader** (`src/arena/device/`) - loads `.cubin` via `cuModuleLoad`, launches via `cuLaunchKernel`.
+- **Measurement** (`src/arena/measurement/`) - warmup, timing, CUPTI profiling, NVML energy.
 - **Runner** - orchestrates: compile -> warmup -> benchmark -> profile -> verify.
 
 ## Profiling

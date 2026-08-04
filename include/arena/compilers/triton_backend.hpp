@@ -1,14 +1,14 @@
 #pragma once
 
-#include "arena/compilers/compiler.hpp"
+#include "arena/compilers/backend.hpp"
 #include <string>
 
 namespace arena {
 
 // triton DSL compiler produces cubin via Triton's built-in compilation
-class TritonCompiler : public Compiler {
+class TritonBackend : public CompilerBackend {
 public:
-    explicit TritonCompiler(const std::string& kernel_dir);
+    explicit TritonBackend(const std::string& kernel_dir);
     CompileResult compile(const std::string& source_path,
                           const std::string& output_name,
                           const std::string& cache_dir) override;

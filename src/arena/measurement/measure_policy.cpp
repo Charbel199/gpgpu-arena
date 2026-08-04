@@ -1,4 +1,4 @@
-#include "arena/measure_policy.hpp"
+#include "arena/measurement/measure_policy.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -1,5 +1,5 @@
-#include "arena/profiler.hpp"
-#include "arena/utils.hpp"
+#include "arena/measurement/profiler.hpp"
+#include "arena/device/utils.hpp"
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <unordered_map>

@@ -1,5 +1,5 @@
-#include "arena/kernel_loader.hpp"
-#include "arena/utils.hpp"
+#include "arena/device/kernel_loader.hpp"
+#include "arena/device/utils.hpp"
 #include <spdlog/spdlog.h>
 
 namespace arena {

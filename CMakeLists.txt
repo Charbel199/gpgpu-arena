@@ -117,18 +117,18 @@ file(GLOB CUDA_DESCRIPTORS "${CMAKE_SOURCE_DIR}/kernels/*/cub_*.cu" "${CMAKE_SOU
 
 set(ARENA_SOURCES
     src/main.cpp
-    src/arena/context.cpp
-    src/arena/kernel_loader.cpp
+    src/arena/device/context.cpp
+    src/arena/device/kernel_loader.cpp
     src/arena/compilers/compiler_utils.cpp
-    src/arena/compilers/cuda_compiler.cpp
-    src/arena/compilers/triton_compiler.cpp
-    src/arena/compilers/cutile_compiler.cpp
-    src/arena/compilers/warp_compiler.cpp
+    src/arena/compilers/cuda_backend.cpp
+    src/arena/compilers/triton_backend.cpp
+    src/arena/compilers/cutile_backend.cpp
+    src/arena/compilers/warp_backend.cpp
     src/arena/compilers/kernel_compiler.cpp
-    src/arena/profiler.cpp
-    src/arena/power.cpp
-    src/arena/measure.cpp
-    src/arena/measure_policy.cpp
+    src/arena/measurement/profiler.cpp
+    src/arena/measurement/power.cpp
+    src/arena/measurement/measure.cpp
+    src/arena/measurement/measure_policy.cpp
     src/arena/cli_args.cpp
     src/arena/result_io.cpp
     src/arena/runner.cpp

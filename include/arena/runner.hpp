@@ -1,12 +1,12 @@
 #pragma once
 
-#include "arena/context.hpp"
-#include "arena/kernel_loader.hpp"
+#include "arena/device/context.hpp"
+#include "arena/device/kernel_loader.hpp"
 #include "arena/compilers/kernel_compiler.hpp"
 #include "arena/runner_config.hpp"
-#include "arena/measure.hpp"
-#include "arena/profiler.hpp"
-#include "arena/power.hpp"
+#include "arena/measurement/measure.hpp"
+#include "arena/measurement/profiler.hpp"
+#include "arena/measurement/power.hpp"
 #include "arena/kernel_descriptor.hpp"
 #include <string>
 #include <vector>

@@ -1,4 +1,4 @@
-#include "arena/power.hpp"
+#include "arena/measurement/power.hpp"
 #include <spdlog/spdlog.h>
 
 namespace arena {

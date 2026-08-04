@@ -1,4 +1,4 @@
-#include "arena/measure.hpp"
+#include "arena/measurement/measure.hpp"
 
 #include <nvtx3/nvToolsExt.h>
 #include <spdlog/spdlog.h>

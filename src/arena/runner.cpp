@@ -1,5 +1,5 @@
 #include "arena/runner.hpp"
-#include "arena/utils.hpp"
+#include "arena/device/utils.hpp"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>

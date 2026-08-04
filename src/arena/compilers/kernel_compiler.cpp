@@ -15,7 +15,7 @@ KernelCompiler::KernelCompiler(const std::string& cache_dir)
     : cache_dir_(cache_dir) {}
 
 void KernelCompiler::register_compiler(const std::string& extension,
-                                        std::unique_ptr<Compiler> compiler) {
+                                        std::unique_ptr<CompilerBackend> compiler) {
     compilers_[extension] = std::move(compiler);
 }
 

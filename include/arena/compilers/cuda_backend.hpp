@@ -1,14 +1,14 @@
 #pragma once
 
-#include "arena/compilers/compiler.hpp"
+#include "arena/compilers/backend.hpp"
 #include <string>
 
 namespace arena {
 
-// cuTile DSL compiler produces cubin via tileiras
-class CuTileCompiler : public Compiler {
+// CUDA C++ compiler - nvcc -cubin, parses kernel name from source
+class CudaBackend : public CompilerBackend {
 public:
-    explicit CuTileCompiler(const std::string& kernel_dir);
+    explicit CudaBackend(const std::string& kernel_dir);
     CompileResult compile(const std::string& source_path,
                           const std::string& output_name,
                           const std::string& cache_dir) override;

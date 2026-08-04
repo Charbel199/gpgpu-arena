@@ -1,5 +1,5 @@
-#include "arena/context.hpp"
-#include "arena/utils.hpp"
+#include "arena/device/context.hpp"
+#include "arena/device/utils.hpp"
 #include <spdlog/spdlog.h>
 #include <cuda.h>
 

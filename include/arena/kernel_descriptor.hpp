@@ -1,8 +1,8 @@
 #pragma once
 
-#include "arena/context.hpp"
-#include "arena/kernel_loader.hpp"
-#include "arena/compilers/compiler.hpp"
+#include "arena/device/context.hpp"
+#include "arena/device/kernel_loader.hpp"
+#include "arena/compilers/backend.hpp"
 #include <string>
 #include <vector>
 #include <map>

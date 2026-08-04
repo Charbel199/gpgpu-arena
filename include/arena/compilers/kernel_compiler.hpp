@@ -1,6 +1,6 @@
 #pragma once
 
-#include "arena/compilers/compiler.hpp"
+#include "arena/compilers/backend.hpp"
 #include <string>
 #include <unordered_map>
 #include <memory>
@@ -12,7 +12,7 @@ class KernelCompiler {
 public:
     explicit KernelCompiler(const std::string& cache_dir);
 
-    void register_compiler(const std::string& extension, std::unique_ptr<Compiler> compiler);
+    void register_compiler(const std::string& extension, std::unique_ptr<CompilerBackend> compiler);
 
     CompileResult compile(const std::string& source_path);
 
@@ -28,7 +28,7 @@ private:
                          const CompileResult& result);
 
     std::string cache_dir_;
-    std::unordered_map<std::string, std::unique_ptr<Compiler>> compilers_;
+    std::unordered_map<std::string, std::unique_ptr<CompilerBackend>> compilers_;
     std::unordered_map<std::string, CompileResult> cache_;
 };
 

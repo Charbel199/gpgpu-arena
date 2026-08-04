@@ -1,8 +1,8 @@
 #pragma once
 
-#include "arena/measure_policy.hpp"
+#include "arena/measurement/measure_policy.hpp"
 #include "arena/runner_config.hpp"
-#include "arena/power.hpp"
+#include "arena/measurement/power.hpp"
 
 #include <cuda.h>
 #include <functional>

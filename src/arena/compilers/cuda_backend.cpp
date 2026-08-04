@@ -1,4 +1,4 @@
-#include "arena/compilers/cuda_compiler.hpp"
+#include "arena/compilers/cuda_backend.hpp"
 #include "arena/compilers/compiler_utils.hpp"
 #include <chrono>
 #include <fstream>
@@ -6,10 +6,10 @@
 
 namespace arena {
 
-CudaCompiler::CudaCompiler(const std::string& kernel_dir)
+CudaBackend::CudaBackend(const std::string& kernel_dir)
     : kernel_dir_(kernel_dir) {}
 
-CompileResult CudaCompiler::compile(const std::string& source_path,
+CompileResult CudaBackend::compile(const std::string& source_path,
                                      const std::string& output_name,
                                      const std::string& cache_dir) {
     auto full_source = kernel_dir_ + "/" + source_path;

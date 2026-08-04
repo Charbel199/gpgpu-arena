@@ -19,10 +19,12 @@ struct CompileResult {
     float invoke_ms  = 0.0f;   // full subprocess wall time as seen from C++
 };
 
-// base class each DSL implements its own compilation logic
-class Compiler {
+// One backend per DSL. KernelCompiler owns the set of these and picks one by
+// file extension; a backend only has to turn a source file into a cubin plus
+// metadata. Caching, output naming and timing all live in KernelCompiler.
+class CompilerBackend {
 public:
-    virtual ~Compiler() = default;
+    virtual ~CompilerBackend() = default;
     virtual CompileResult compile(const std::string& source_path,
                                   const std::string& output_name,
                                   const std::string& cache_dir) = 0;

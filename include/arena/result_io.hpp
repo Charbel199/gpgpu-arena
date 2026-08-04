@@ -1,8 +1,8 @@
 #pragma once
 
 #include "arena/runner.hpp"
-#include "arena/context.hpp"
-#include "arena/power.hpp"
+#include "arena/device/context.hpp"
+#include "arena/measurement/power.hpp"
 
 #include <nlohmann/json.hpp>
 #include <string>

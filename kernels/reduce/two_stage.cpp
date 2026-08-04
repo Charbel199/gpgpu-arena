@@ -1,4 +1,4 @@
-#include "arena/kernels/reduce_base.hpp"
+#include "arena/categories/reduce_base.hpp"
 #include <cuda.h>
 #include <string>
 
