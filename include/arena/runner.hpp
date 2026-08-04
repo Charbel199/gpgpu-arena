@@ -97,6 +97,7 @@ public:
     const Context& context() const { return ctx_; }
     Context& mutable_context() { return ctx_; }
     KernelCompiler& compiler() { return compiler_; }
+    const PowerMonitor& power() const { return power_; }
 
 private:
     Context& ctx_;

@@ -129,7 +129,10 @@ set(ARENA_SOURCES
     src/arena/power.cpp
     src/arena/measure.cpp
     src/arena/measure_policy.cpp
+    src/arena/cli_args.cpp
+    src/arena/result_io.cpp
     src/arena/runner.cpp
+    src/frontend/cli.cpp
     ${KERNEL_DESCRIPTORS}
     ${CUDA_DESCRIPTORS}
 )

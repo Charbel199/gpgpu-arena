@@ -1,4 +1,5 @@
 #include "frontend/gui.hpp"
+#include "arena/result_io.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -371,38 +372,14 @@ void Gui::export_results_csv() {
     std::ofstream f(path);
     if (!f.is_open()) { log(LogEntry::ERR, "Failed to open " + path); return; }
 
-    f << "kernel,category,dsl,block,grid,op_ms,gpu_ms,overhead_ms,launch_count,"
-         "gflops,bandwidth_gbps,status,counters_available,regs,shmem_bytes,"
-         "occupancy_pct,ipc,dram_read_gbps,dram_write_gbps,"
-         "peak_device_bytes,energy_available,mj_per_op,avg_watts,"
-         "module_load_ms,first_launch_ms,cache_hit,compile_ms,import_ms,invoke_ms,"
-         "warmup_iterations,warmup_converged,sm_clock_start_mhz,sm_clock_end_mhz\n";
+    f << arena::result_io::csv_header() << "\n";
 
     for (const auto& [cat, states] : kernels_by_category_) {
         for (const auto& k : states) {
             if (!k.has_run) continue;
-            const auto& r = k.result;
-            f << r.kernel_name << "," << r.category << ","
-              << dsl_type_name(detect_dsl_type(k.descriptor)) << ","
-              << r.block_x << "x" << r.block_y << "x" << r.block_z << ","
-              << r.grid_x << "x" << r.grid_y << "x" << r.grid_z << ","
-              << r.op_ms << "," << r.gpu_ms << "," << r.overhead_ms << ","
-              << r.launch_count << ","
-              << r.gflops << "," << r.bandwidth_gbps << ","
-              << (r.success ? (r.verified ? "OK" : "WARN") : "FAIL") << ","
-              << (r.counters.available ? "true" : "false") << ","
-              << r.counters.regs_per_thread << "," << r.counters.shared_mem_bytes << ","
-              << r.counters.occupancy * 100.0 << "," << r.counters.ipc << ","
-              << r.counters.dram_read_gbps << "," << r.counters.dram_write_gbps << ","
-              << r.peak_device_bytes << ","
-              << (r.energy.available ? "true" : "false") << ","
-              << r.energy.mj_per_op << "," << r.energy.avg_watts << ","
-              << r.module_load_ms << "," << r.first_launch_ms << ","
-              << (r.cache_hit ? "true" : "false") << ","
-              << r.compile_ms << "," << r.import_ms << "," << r.invoke_ms << ","
-              << r.warmup_iterations << ","
-              << (r.warmup_converged ? "true" : "false") << ","
-              << r.sm_clock_start_mhz << "," << r.sm_clock_end_mhz << "\n";
+            f << arena::result_io::csv_row(
+                     k.result, dsl_type_name(detect_dsl_type(k.descriptor)))
+              << "\n";
         }
     }
     log(LogEntry::INFO, "Exported to " + path);

@@ -12,6 +12,7 @@
 #include "arena/power.hpp"
 #include "arena/runner.hpp"
 #include "arena/logger.hpp"
+#include "frontend/cli.hpp"
 
 #ifdef ARENA_GUI_ENABLED
 #include "frontend/gui.hpp"
@@ -19,9 +20,12 @@
 
 void print_usage(const char* program) {
     std::cout << "Usage: " << program << " [OPTIONS]\n\n"
-              << "Options:\n"
-              << "  --gui       Run with graphical interface (default)\n"
-              << "  --help      Show this help message\n";
+#ifdef ARENA_GUI_ENABLED
+              << "  (no options)              Launch the graphical interface\n"
+              << "  --gui                     Launch the graphical interface\n"
+#endif
+              << "  --help, -h                Show this help message\n\n";
+    frontend::print_cli_usage(program);
 }
 
 int main(int argc, char** argv) {
@@ -32,12 +36,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    const bool cli_mode = frontend::wants_cli(argc, argv);
+
 #ifndef ARENA_GUI_ENABLED
-    std::cerr << "Error: this binary was built with BUILD_GUI=OFF and has no frontend.\n"
-              << "Rebuild with -DBUILD_GUI=ON.\n";
-    return 1;
-#else
-    arena::init_logging();
+    if (!cli_mode) {
+        std::cerr << "Error: this binary was built with BUILD_GUI=OFF.\n"
+                  << "Use headless mode (--list / --run), or rebuild with "
+                     "-DBUILD_GUI=ON for the GUI.\n\n";
+        frontend::print_cli_usage(argv[0]);
+        return 3;
+    }
+#endif
+
+    // When the payload goes to stdout, stdout must carry the payload alone.
+    // The file sink keeps the full log either way.
+    const bool quiet = frontend::cli_writes_to_stdout(argc, argv);
+    arena::init_logging(!quiet);
 
     try {
         spdlog::info("Initializing CUDA context ...");
@@ -68,12 +82,19 @@ int main(int argc, char** argv) {
             spdlog::info("  {} - {} kernels", cat, kernels.size());
         }
 
+        if (cli_mode) {
+            return frontend::run_cli(runner, argc, argv);
+        }
+
+#ifdef ARENA_GUI_ENABLED
         spdlog::info("Starting GUI mode");
         return frontend::run_gui(runner);
+#else
+        return 3;
+#endif
 
     } catch (const std::exception& e) {
         spdlog::error("Fatal: {}", e.what());
-        return 1;
+        return 2;
     }
-#endif
 }

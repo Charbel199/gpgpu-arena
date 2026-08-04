@@ -18,9 +18,13 @@ inline void set_console_logging(bool enabled) {
     }
 }
 
-inline void init_logging() {
+// console_logging=false mutes stdout from the very first line. Headless mode
+// needs this: init_logging() logs on its own way out, so muting afterwards is
+// already too late to keep stdout clean for a machine reader.
+inline void init_logging(bool console_logging = true) {
     auto stdout_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     stdout_sink->set_pattern("[%H:%M:%S] [%^%l%$] [%n] %v");
+    if (!console_logging) stdout_sink->set_level(spdlog::level::off);
     console_sink() = stdout_sink;
 
     auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("arena.log", true);
