@@ -28,7 +28,7 @@ public:
     std::string function_name() const override { return compile_result_.kernel_name; }
 
     bool needs_compilation() const override { return true; }
-    std::string source_path() const override { return "reduce/reduce.warp.py"; }
+    std::string source_path() const override { return "reduce/fp32/reduce.warp.py"; }
 
     KernelLoader::LaunchConfig get_launch_config() const override {
         return {

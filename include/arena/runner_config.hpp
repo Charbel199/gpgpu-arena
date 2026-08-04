@@ -1,5 +1,8 @@
 #pragma once
 
+#include "arena/distribution.hpp"
+
+#include <cstdint>
 #include <map>
 #include <string>
 
@@ -26,6 +29,11 @@ struct RunConfig {
 
     bool  collect_energy   = false;
     float energy_window_ms = 500.0f;
+
+    // Input data. The seed makes a run reproducible and lets the CPU
+    // reference be regenerated from the same numbers the GPU saw.
+    Distribution input_distribution = Distribution::Uniform;
+    uint64_t     input_seed = 42;
 
     std::map<std::string, int> params;
 };

@@ -23,6 +23,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
 
     try {
         desc.set_problem_size(config.params);
+        desc.set_input_spec(config.input_distribution, config.input_seed);
 
         // runtime compilation for DSL kernels
         if (desc.needs_compilation()) {
@@ -158,11 +159,25 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         reset_fn();
         launch_kernel();
         check_cuda(cuCtxSynchronize(), "verify sync");
-        result.verified = desc.verify(ctx_);
-        if (result.verified) {
-            log->info("  verify: passed");
+        const auto v = desc.verify(ctx_);
+        result.verified = v.passed;
+        result.input_dtype  = dtype_name(desc.input_dtype());
+        result.output_dtype = dtype_name(desc.output_dtype());
+        result.compute_mode = compute_mode_name(desc.compute_mode());
+        result.accuracy.checked = v.elements_checked > 0;
+        result.accuracy.max_rel_error = v.max_rel_error;
+        result.accuracy.mean_rel_error = v.mean_rel_error;
+        result.accuracy.max_total_error = v.max_total_error;
+        result.accuracy.mean_total_error = v.mean_total_error;
+        result.accuracy.elements_checked = v.elements_checked;
+        result.accuracy.tolerance = v.tolerance;
+
+        if (v.passed) {
+            log->info("  verify: passed (arithmetic {:.3e}, total {:.3e}, tolerance {:.3e})",
+                v.max_rel_error, v.max_total_error, v.tolerance);
         } else {
-            log->warn("  verify: FAILED");
+            log->warn("  verify: FAILED (max rel err {:.3e} exceeds tolerance {:.3e})",
+                v.max_rel_error, v.tolerance);
         }
 
         // --- energy: LAST, because it dirties the output buffer ---

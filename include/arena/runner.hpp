@@ -6,6 +6,8 @@
 #include "arena/runner_config.hpp"
 #include "arena/measurement/measure.hpp"
 #include "arena/measurement/profiler.hpp"
+#include "arena/measurement/accuracy.hpp"
+#include "arena/dtype.hpp"
 #include "arena/measurement/power.hpp"
 #include "arena/kernel_descriptor.hpp"
 #include <string>
@@ -68,6 +70,20 @@ struct RunResult {
     } energy;
 
     size_t peak_device_bytes = 0;
+
+    // --- numerics ---
+    std::string input_dtype = "fp32";
+    std::string output_dtype = "fp32";
+    std::string compute_mode = "default";
+    struct Accuracy {
+        bool   checked = false;
+        double max_rel_error = 0.0;     // vs the inputs the kernel received
+        double mean_rel_error = 0.0;
+        double max_total_error = 0.0;   // vs the original fp32 data
+        double mean_total_error = 0.0;
+        int    elements_checked = 0;
+        double tolerance = 0.0;
+    } accuracy;
 
     // --- diagnostics ---
     int  warmup_iterations = 0;

@@ -30,6 +30,8 @@ public:
         };
     }
 
+    int accumulation_length() const override { return K_; }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         M_ = params.count("M") ? params.at("M") : 1024;
         K_ = params.count("K") ? params.at("K") : M_;
@@ -48,13 +50,8 @@ public:
     }
 
     void initialize(Context& ctx) override {
-        std::mt19937 rng(42);
-        std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
-
-        h_a_.resize(M_ * K_);
-        h_b_.resize(K_ * N_);
-        for (float& v : h_a_) v = dist(rng);
-        for (float& v : h_b_) v = dist(rng);
+        generate(h_a_, (size_t)M_ * K_, distribution_, input_seed_);
+        generate(h_b_, (size_t)K_ * N_, distribution_, input_seed_ + 1);
 
         ctx.copy_to_device(d_a_, h_a_.data(), size_a_);
         ctx.copy_to_device(d_b_, h_b_.data(), size_b_);
@@ -81,38 +78,33 @@ public:
         return static_cast<double>(size_a_ + size_b_ + size_c_);
     }
 
-    bool verify(Context& ctx) override {
+    VerifyResult verify(Context& ctx) override {
         std::vector<float> h_c(M_ * N_);
         ctx.copy_to_host(h_c.data(), d_c_, size_c_);
 
-        // spot-check 64 random output elements via CPU dot product
+        // Spot-check random output elements against a double-accumulated CPU
+        // dot product. Checking all of them would cost O(M*N*K) on the host.
         std::mt19937 rng(1337);
         std::uniform_int_distribution<int> row_dist(0, M_ - 1);
         std::uniform_int_distribution<int> col_dist(0, N_ - 1);
 
-        auto log = spdlog::get("verify");
-        float max_err = 0.0f;
+        ErrorAccumulator acc;
         const int checks = 64;
         for (int t = 0; t < checks; t++) {
-            int row = row_dist(rng);
-            int col = col_dist(rng);
+            const int row = row_dist(rng);
+            const int col = col_dist(rng);
 
             double ref = 0.0;
             for (int k = 0; k < K_; k++)
                 ref += (double)h_a_[row * K_ + k] * (double)h_b_[k * N_ + col];
 
-            float got = h_c[row * N_ + col];
-            float rel_err = std::abs((float)ref - got) / (std::abs((float)ref) + 1e-6f);
-            max_err = std::max(max_err, rel_err);
-            // fp16/tf32 tensor core kernels have lower precision than fp32
-            if (rel_err > 5e-2f) {
-                log->warn("matmul: [{},{}] got={}, expected={}, rel_err={:.6f}",
-                    row, col, got, (float)ref, rel_err);
-                return false;
-            }
+            acc.add(h_c[row * N_ + col], ref);
         }
-        log->debug("matmul: max relative error = {:.6f}", max_err);
-        return true;
+
+        auto r = acc.finish(tolerance());
+        spdlog::get("verify")->debug("matmul: max rel err {:.3e} over {} checks",
+            r.max_rel_error, r.elements_checked);
+        return r;
     }
 
 protected:

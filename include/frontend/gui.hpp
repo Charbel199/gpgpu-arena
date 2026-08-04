@@ -164,7 +164,7 @@ private:
     std::vector<PendingResult> pending_results_;  // guarded by mutex_
 
     // Scaling
-    enum class ScalingMetric { Performance, WallTime, GpuTime };
+    enum class ScalingMetric { Performance, OpTime, GpuTime };
     ScalingMetric scaling_metric_ = ScalingMetric::Performance;
     std::map<std::string, std::map<std::string, std::vector<SizedResult>>> scaling_history_;
 };

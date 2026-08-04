@@ -4,6 +4,7 @@
 #include <spdlog/spdlog.h>
 #include <vector>
 #include <cmath>
+#include <algorithm>
 
 namespace arena {
 
@@ -32,6 +33,8 @@ public:
         };
     }
     
+    int accumulation_length() const override { return n_; }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         n_ = params.count("n") ? params.at("n") : 1000000;
     }
@@ -45,9 +48,9 @@ public:
     }
     
     void initialize(Context& ctx) override {
-        std::vector<float> h_input(n_, 1.0f);
-        ctx.copy_to_device(d_input_, h_input.data(), size_data_);
-        
+        generate(h_input_, n_, distribution_, input_seed_);
+        ctx.copy_to_device(d_input_, h_input_.data(), size_data_);
+
         std::vector<float> h_output(n_, 0.0f);
         ctx.copy_to_device(d_output_, h_output.data(), size_data_);
     }
@@ -56,6 +59,7 @@ public:
         ctx.free(d_input_);
         ctx.free(d_output_);
         d_input_ = d_output_ = 0;
+        h_input_.clear();
     }
     
     std::vector<void*> get_kernel_args() override {
@@ -70,33 +74,30 @@ public:
         return static_cast<double>(2 * size_data_); // we read all elements and write all of them back
     }
     
-    bool verify(Context& ctx) override {
+    VerifyResult verify(Context& ctx) override {
         std::vector<float> h_output(n_);
         ctx.copy_to_host(h_output.data(), d_output_, size_data_);
-        
-        // output[i] should equal i (0, 1, 2, 3, ...) since we have an array of 1's
-        int check_count = std::min(1000, n_);
-        for (int i = 0; i < check_count; i++) {
-            float expected = static_cast<float>(i);
-            if (std::abs(h_output[i] - expected) > 1e-2f) {
-                spdlog::get("verify")->warn("scan: mismatch at index {}: got {}, expected {}", i, h_output[i], expected);
-                return false;
-            }
+
+        // Exclusive scan: out[i] is the sum of in[0..i-1]. The running total
+        // has to walk every element, but only a strided sample is scored so
+        // large n stays cheap.
+        ErrorAccumulator acc;
+        const int stride = std::max(1, n_ / 1000);
+        double running = 0.0;
+        for (int i = 0; i < n_; i++) {
+            if (i % stride == 0) acc.add(h_output[i], running);
+            running += h_input_[i];
         }
-        
-        // also check last element: should be n-1
-        float last_expected = static_cast<float>(n_ - 1);
-        if (std::abs(h_output[n_ - 1] - last_expected) > 1e-2f) {
-            spdlog::get("verify")->warn("scan: mismatch at last index: got {}, expected {}", h_output[n_ - 1], last_expected);
-            return false;
-        }
-        spdlog::get("verify")->debug("verify passed");
-        
-        return true;
+
+        auto r = acc.finish(tolerance());
+        spdlog::get("verify")->debug("scan: {} points checked, max rel err {:.3e}",
+            r.elements_checked, r.max_rel_error);
+        return r;
     }
 
 protected:
     int n_ = 1000000;
+    std::vector<float> h_input_;
     CUdeviceptr d_input_ = 0, d_output_ = 0;
     size_t size_data_ = 0;
 };

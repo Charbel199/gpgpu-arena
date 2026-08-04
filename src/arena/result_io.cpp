@@ -83,6 +83,19 @@ json to_json(const RunResult& r) {
 
     j["memory"] = { {"peak_device_bytes", r.peak_device_bytes} };
 
+    j["numerics"] = {
+        {"input_dtype",  r.input_dtype},
+        {"output_dtype", r.output_dtype},
+        {"compute_mode", r.compute_mode},
+        {"checked",           r.accuracy.checked},
+        {"max_rel_error",     r.accuracy.max_rel_error},
+        {"mean_rel_error",    r.accuracy.mean_rel_error},
+        {"max_total_error",   r.accuracy.max_total_error},
+        {"mean_total_error",  r.accuracy.mean_total_error},
+        {"elements_checked",  r.accuracy.elements_checked},
+        {"tolerance",         r.accuracy.tolerance},
+    };
+
     j["quality"] = {
         {"warmup_iterations",  r.warmup_iterations},
         {"warmup_converged",   r.warmup_converged},
@@ -139,6 +152,8 @@ json config_json(const RunConfig& cfg) {
     j["collect_metrics"]  = cfg.collect_metrics;
     j["collect_energy"]   = cfg.collect_energy;
     j["energy_window_ms"] = cfg.energy_window_ms;
+    j["input_distribution"] = distribution_name(cfg.input_distribution);
+    j["input_seed"]         = cfg.input_seed;
     j["params"]           = cfg.params;
     return j;
 }
@@ -149,7 +164,9 @@ std::string csv_header() {
            "occupancy_pct,ipc,dram_read_gbps,dram_write_gbps,"
            "peak_device_bytes,energy_available,mj_per_op,avg_watts,"
            "module_load_ms,first_launch_ms,cache_hit,compile_ms,import_ms,invoke_ms,"
-           "warmup_iterations,warmup_converged,sm_clock_start_mhz,sm_clock_end_mhz";
+           "warmup_iterations,warmup_converged,sm_clock_start_mhz,sm_clock_end_mhz,"
+           "input_dtype,output_dtype,compute_mode,max_rel_error,mean_rel_error,"
+           "max_total_error,mean_total_error,error_tolerance,elements_checked";
 }
 
 std::string csv_row(const RunResult& r, const std::string& dsl) {
@@ -173,7 +190,11 @@ std::string csv_row(const RunResult& r, const std::string& dsl) {
       << r.compile_ms << "," << r.import_ms << "," << r.invoke_ms << ","
       << r.warmup_iterations << ","
       << (r.warmup_converged ? "true" : "false") << ","
-      << r.sm_clock_start_mhz << "," << r.sm_clock_end_mhz;
+      << r.sm_clock_start_mhz << "," << r.sm_clock_end_mhz << ","
+      << r.input_dtype << "," << r.output_dtype << "," << r.compute_mode << ","
+      << r.accuracy.max_rel_error << "," << r.accuracy.mean_rel_error << ","
+      << r.accuracy.max_total_error << "," << r.accuracy.mean_total_error << ","
+      << r.accuracy.tolerance << "," << r.accuracy.elements_checked;
     return f.str();
 }
 

@@ -56,7 +56,7 @@ Throughput (GFLOPS, GB/s) divides by `op_ms`. Hardware counters divide by
 `gpu_ms`, because the range profiler samples a single launch replay.
 
 Warmup runs until timings stabilise rather than a fixed count, using median
-drift between consecutive windows — a sliding-variance test reports a
+drift between consecutive windows. A sliding-variance test would report a
 steadily boosting clock as stable. Results record `warmup_converged` so you
 can tell when a number was measured on an unsettled clock.
 
@@ -64,6 +64,70 @@ Energy uses NVML over a sustained back-to-back window, since NVML updates far
 more slowly than a single kernel runs. It reports whole-board energy, so
 `mj_per_op` is an upper bound on a kernel's marginal cost; the runner logs a
 device-busy estimate and warns when the loop is launch-bound.
+
+## Numerics
+
+Kernels are judged on measured error, not a pass/fail. Every category compares
+against a CPU reference accumulated in `double` and reports the max and mean
+relative error alongside the tolerance it was judged against.
+
+Two errors are reported, because they answer different questions:
+
+- **arithmetic** is measured against the inputs the kernel actually received,
+  already rounded to its storage type. This is the kernel's own doing, so it
+  is what pass/fail is judged on, and it is comparable within a dtype.
+- **total** is measured against the original fp32 data, so it includes what a
+  narrower storage type cost before the kernel ever ran. This is the number
+  comparable across dtypes, and the one the results table shows.
+
+For an fp32 kernel the two are identical. For `reduce_fp16_accum_fp32` at 64M
+they are `7.3e-07` and `6.6e-05`: its summation is as clean as a good fp32
+kernel, and storing the inputs in half still costs it two orders of magnitude.
+
+Tolerance comes from the storage type's mantissa, scaled by the square root of
+the accumulation length, since summing more values legitimately costs
+precision. A kernel that is merely imprecise then reads differently from one
+that is wrong: `reduce_baseline` over 64M ones reports `7.4e-01`, which is an
+fp32 accumulator saturating at 2^24, not a bug.
+
+Input data is selectable with `--dist`:
+
+| Distribution | Use |
+| --- | --- |
+| `ones` | Fast sanity check. Hides ordering bugs: every reduce kernel scores exactly zero. |
+| `uniform` | Default. Mixed signs, so accumulation order starts to matter. |
+| `normal` | Occasional large magnitudes. |
+| `adversarial` | Mixed magnitudes, denormals and exact zeros. |
+
+`--seed` makes a run reproducible; the CPU reference is regenerated from the
+same numbers the GPU saw.
+
+A kernel declares its input and output element types separately, since mixed
+precision is the normal case: `reduce_fp16_accum_fp32` reads fp16 and writes
+fp32. There is deliberately no accumulator type, because a kernel can have
+several at different precisions; the framework models what crosses the buffer
+boundary and leaves internals alone.
+
+Tolerance follows from the output type. A kernel cannot produce an answer more
+precise than the type it writes into, so that is the standard it is held to.
+A kernel whose internals are coarser will miss it, which is the intended
+result: `reduce_fp16_accum_fp16` writes fp32 but sums in half, and fails.
+
+Dtype is part of a kernel's identity rather than a run-time switch, so the
+fp16 variants are separate entries in the same `reduce` table. At n=4M:
+
+| kernel | in>out | error | |
+| --- | --- | --- | --- |
+| `reduce_fp16_accum_fp16` | fp16>fp32 | 7.8e-03 | accumulates in half, fails |
+| `reduce_fp16_accum_fp32` | fp16>fp32 | 1.5e-07 | accumulates in float |
+| `reduce_fp16_out_fp16` | fp16>fp16 | 5.8e-04 | clean arithmetic, half output |
+
+Sources live under `kernels/<category>/<input dtype>/`. The folder is named for
+what a kernel reads, since that is what shapes the source: reading `__half*`
+rather than `float*` changes the signature and the load path, while the output
+type is a single store at the end. Variants sharing an input type but differing
+in output live in the same file, which is why all three above are in
+`kernels/reduce/fp16/accum.cu`.
 
 ## Known Issues
 
@@ -73,7 +137,7 @@ device-busy estimate and warns when the loop is launch-bound.
   accept. Reproduces identically on older commits, so it is an upstream API
   change rather than a regression.
 
-- **The compile cache is keyed on source mtime only** — not on target
+- The compile cache is keyed on source mtime alone, not on target
   architecture, compiler version, or compile flags. A cubin can outlive the
   toolchain that produced it and be reused silently. This has been observed
   producing wrong results that verification caught. Clear it with

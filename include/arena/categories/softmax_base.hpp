@@ -31,6 +31,8 @@ public:
         };
     }
 
+    int accumulation_length() const override { return cols_; }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         rows_ = params.count("rows") ? params.at("rows") : 1024;
         cols_ = params.count("cols") ? params.at("cols") : 1024;
@@ -44,10 +46,14 @@ public:
     }
 
     void initialize(Context& ctx) override {
-        // fill with small values so exp() doesn't overflow
-        std::vector<float> h_input(rows_ * cols_);
-        for (int i = 0; i < rows_ * cols_; i++) {
-            h_input[i] = (float)(i % 7) - 3.0f; // values in [-3, 3]
+        // Softmax subtracts the row max before exp(), so scale rather than
+        // clamp: keeping the shape of the distribution matters more than the
+        // absolute range, and huge magnitudes would just saturate every row
+        // to a one-hot vector and hide any real difference between kernels.
+        std::vector<float> h_input;
+        generate(h_input, (size_t)rows_ * cols_, distribution_, input_seed_);
+        for (float& v : h_input) {
+            v = std::isfinite(v) ? std::max(-20.0f, std::min(20.0f, v * 3.0f)) : 0.0f;
         }
         ctx.copy_to_device(d_input_, h_input.data(), size_data_);
 
@@ -75,44 +81,31 @@ public:
         return 2.0 * rows_ * cols_ * sizeof(float);
     }
 
-    bool verify(Context& ctx) override {
+    VerifyResult verify(Context& ctx) override {
         std::vector<float> h_input(rows_ * cols_);
         std::vector<float> h_output(rows_ * cols_);
         ctx.copy_to_host(h_input.data(), d_input_, size_data_);
         ctx.copy_to_host(h_output.data(), d_output_, size_data_);
 
-        for (int r = 0; r < std::min(rows_, 8); r++) {
-            const float* in_row = h_input.data() + r * cols_;
+        ErrorAccumulator acc;
+        const int rows_checked = std::min(rows_, 8);
+        for (int r = 0; r < rows_checked; r++) {
+            const float* in_row  = h_input.data()  + r * cols_;
             const float* out_row = h_output.data() + r * cols_;
 
-            // cpu reference: softmax(row)
-            float row_max = *std::max_element(in_row, in_row + cols_);
-            float row_sum = 0.0f;
-            for (int c = 0; c < cols_; c++) {
-                row_sum += expf(in_row[c] - row_max);
-            }
+            const float row_max = *std::max_element(in_row, in_row + cols_);
+            double row_sum = 0.0;
+            for (int c = 0; c < cols_; c++) row_sum += std::exp((double)in_row[c] - row_max);
 
             for (int c = 0; c < cols_; c++) {
-                float expected = expf(in_row[c] - row_max) / row_sum;
-                float rel_err = std::abs(out_row[c] - expected) / (expected + 1e-8f);
-                if (rel_err > 1e-3f) {
-                    spdlog::get("verify")->warn(
-                        "softmax: row {} col {}: got {}, expected {}", r, c, out_row[c], expected);
-                    return false;
-                }
-            }
-
-            // check row sums to ~1.0
-            float sum = 0.0f;
-            for (int c = 0; c < cols_; c++) sum += out_row[c];
-            if (std::abs(sum - 1.0f) > 1e-3f) {
-                spdlog::get("verify")->warn("softmax: row {} sum = {}, expected 1.0", r, sum);
-                return false;
+                acc.add(out_row[c], std::exp((double)in_row[c] - row_max) / row_sum);
             }
         }
 
-        spdlog::get("verify")->debug("verify passed");
-        return true;
+        auto res = acc.finish(tolerance());
+        spdlog::get("verify")->debug("softmax: max rel err {:.3e} over {} elements",
+            res.max_rel_error, res.elements_checked);
+        return res;
     }
 
 protected:

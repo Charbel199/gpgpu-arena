@@ -8,6 +8,7 @@
 #include <cuda.h>
 #include <stdexcept>
 #include <algorithm>
+#include <implot_internal.h>
 #include <cstdio>
 #include <cmath>
 #include <fstream>
@@ -27,6 +28,12 @@ namespace UITheme {
     constexpr ImVec4 TRITON_BADGE  = {1.0f,   0.42f,  0.169f, 1.0f};  // #FF6B2B orange
     constexpr ImVec4 CUTILE_BADGE  = {0.357f, 0.608f, 0.835f, 1.0f};  // #5B9BD5 blue
     constexpr ImVec4 WARP_BADGE    = {0.6f,   0.4f,   0.8f,   1.0f};  // purple
+
+    // Storage type. Deliberately cool-to-warm as precision drops, so a table
+    // mixing dtypes reads at a glance without checking the Type column.
+    constexpr ImVec4 DTYPE_FP32    = {0.36f,  0.66f,  0.94f,  1.0f};  // blue
+    constexpr ImVec4 DTYPE_FP16    = {0.96f,  0.70f,  0.24f,  1.0f};  // amber
+    constexpr ImVec4 DTYPE_BF16    = {0.90f,  0.45f,  0.55f,  1.0f};  // rose
     constexpr ImVec4 CUB_BADGE     = {0.55f,  0.55f,  0.55f,  1.0f};  // gray
 
     constexpr ImVec4 ERROR_RED     = {1.0f,   0.267f, 0.267f, 1.0f};  // #FF4444
@@ -331,6 +338,23 @@ const KernelState* Gui::selected_kernel() const {
         }
     }
     return nullptr;
+}
+
+// Always "input>output", even when they match. Collapsing fp32>fp32 to "fp32"
+// leaves the reader guessing whether it meant the input, the output, or both.
+static std::string dtype_label(const arena::KernelDescriptor* d) {
+    return std::string(arena::dtype_name(d->input_dtype())) + ">"
+         + arena::dtype_name(d->output_dtype());
+}
+
+static std::string dtype_label(const std::string& in, const std::string& out) {
+    return in + ">" + out;
+}
+
+static ImVec4 dtype_color(const std::string& dtype) {
+    if (dtype == "fp16") return UITheme::DTYPE_FP16;
+    if (dtype == "bf16") return UITheme::DTYPE_BF16;
+    return UITheme::DTYPE_FP32;
 }
 
 DSLType Gui::detect_dsl_type(const arena::KernelDescriptor* desc) const {
@@ -705,6 +729,30 @@ void Gui::render_kernel_sidebar() {
     if (ImGui::SmallButton("None")) { for (auto& k : *kernels) k.selected = false; }
     ImGui::Separator();
 
+    // Type legend. Only the types actually present, so a category of plain
+    // fp32 kernels costs one short line. Selectable text is not clipped by
+    // ImGui, so labelling every row would collide with the longer names.
+    {
+        std::vector<std::string> seen;
+        for (const auto& k : *kernels) {
+            const std::string lbl = dtype_label(k.descriptor);
+            if (std::find(seen.begin(), seen.end(), lbl) == seen.end()) seen.push_back(lbl);
+        }
+        for (size_t li = 0; li < seen.size(); li++) {
+            if (li) ImGui::SameLine();
+            const ImVec2 cp = ImGui::GetCursorScreenPos();
+            const float  th = ImGui::GetTextLineHeight();
+            const std::string base = seen[li].substr(0, seen[li].find('>'));
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(cp.x, cp.y + 2 * s), ImVec2(cp.x + 3 * s, cp.y + th),
+                ImGui::GetColorU32(dtype_color(base)), 1.5f * s);
+            ImGui::Dummy({5 * s, th});
+            ImGui::SameLine(0, 2 * s);
+            ImGui::TextColored(UITheme::TEXT_DIM, "%s", seen[li].c_str());
+        }
+        ImGui::Separator();
+    }
+
     // Read running kernel name once (avoid repeated locking)
     std::string running_name;
     if (benchmark_running_) {
@@ -724,6 +772,21 @@ void Gui::render_kernel_sidebar() {
         bool is_running = benchmark_running_ && (k.descriptor->name() == running_name);
 
         ImGui::PushID((int)i);
+
+        // Dtype stripe pinned to the panel's left edge, so a mixed-precision
+        // list reads without checking the type text on every row. Taken from
+        // the descriptor, not the result: this list exists before anything runs.
+        {
+            const float  x0 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x;
+            const ImVec2 rp = ImGui::GetCursorScreenPos();
+            const float  rh = ImGui::GetFrameHeight();
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(x0, rp.y), ImVec2(x0 + 3.0f * s, rp.y + rh),
+                ImGui::GetColorU32(dtype_color(
+                    arena::dtype_name(k.descriptor->input_dtype()))),
+                1.5f * s);
+        }
+        ImGui::Indent(8.0f * s);
 
         // Checkbox for benchmark selection
         ImGui::Checkbox("##chk", &k.selected);
@@ -753,7 +816,7 @@ void Gui::render_kernel_sidebar() {
         ImGui::SameLine();
 
         // Selectable kernel name
-        float name_w = ImGui::GetContentRegionAvail().x - 60 * s;
+        float name_w = ImGui::GetContentRegionAvail().x - 62 * s;
         if (name_w < 30 * s) name_w = 30 * s;
         if (ImGui::Selectable(k.descriptor->name().c_str(), is_display_sel,
                 ImGuiSelectableFlags_None, {name_w, 0})) {
@@ -770,6 +833,10 @@ void Gui::render_kernel_sidebar() {
             ImGui::BeginTooltip();
             ImGui::PushTextWrapPos(300.0f * s);
             ImGui::TextUnformatted(k.descriptor->description().c_str());
+            ImGui::Separator();
+            ImGui::TextDisabled("in %s, out %s",
+                arena::dtype_name(k.descriptor->input_dtype()),
+                arena::dtype_name(k.descriptor->output_dtype()));
             ImGui::PopTextWrapPos();
             ImGui::EndTooltip();
         }
@@ -789,6 +856,7 @@ void Gui::render_kernel_sidebar() {
             ImGui::TextColored(UITheme::ERROR_RED, "ERR");
         }
 
+        ImGui::Unindent(8.0f * s);
         ImGui::PopID();
     }
 
@@ -1159,12 +1227,29 @@ void Gui::render_benchmark_panel() {
                 ImPlot::SetupAxisTicks(ImAxis_X1, tick_positions.data(),
                     (int)tick_positions.size(), tick_labels.data());
 
+                // Track which series the legend is currently showing, so the
+                // speedup labels can be suppressed alongside their bars.
+                std::vector<const char*> shown;
                 auto plot_dsl = [&](DSLType type, const char* name, ImVec4 color) {
                     auto it = groups.find(type);
                     if (it == groups.end()) return;
                     ImPlot::SetNextFillStyle(color);
                     ImPlot::PlotBars(name, it->second.positions.data(),
                         it->second.values.data(), (int)it->second.positions.size(), 0.6);
+                    const ImPlotItem* item = ImPlot::GetItem(name);
+                    if (!item || item->Show) shown.push_back(name);
+                };
+
+                auto dsl_shown = [&](DSLType type) {
+                    const char* n = nullptr;
+                    switch (type) {
+                        case DSLType::CUDA:   n = "CUDA";   break;
+                        case DSLType::Triton: n = "Triton"; break;
+                        case DSLType::CuTile: n = "cuTile"; break;
+                        case DSLType::Warp:   n = "Warp";   break;
+                        case DSLType::CUB:    n = "CUB";    break;
+                    }
+                    return std::find(shown.begin(), shown.end(), n) != shown.end();
                 };
 
                 plot_dsl(DSLType::CUDA,   "CUDA",   UITheme::CUDA_BADGE);
@@ -1173,8 +1258,11 @@ void Gui::render_benchmark_panel() {
                 plot_dsl(DSLType::Warp,   "Warp",   UITheme::WARP_BADGE);
                 plot_dsl(DSLType::CUB,    "CUB",    UITheme::CUB_BADGE);
 
-                // Speedup labels above bars
+                // Speedup labels above bars. PlotText is not a plot item, so it
+                // does not hide itself when its series is toggled off in the
+                // legend; the visibility check has to be explicit.
                 for (size_t i = 0; i < bars.size(); i++) {
+                    if (!dsl_shown(bars[i].dsl)) continue;
                     double speedup = slowest / bars[i].median_ms;
                     if (speedup > 1.01) {
                         char txt[32];
@@ -1193,12 +1281,12 @@ void Gui::render_benchmark_panel() {
     }
 
     // ================================================================
-    // Wall Time vs GPU Time Comparison
+    // Op Time vs GPU Time Comparison
     // ================================================================
     {
         struct TimeEntry {
             std::string name;
-            double wall_ms;
+            double bar_op_ms;
             double gpu_ms;
         };
         std::vector<TimeEntry> entries;
@@ -1210,60 +1298,60 @@ void Gui::render_benchmark_panel() {
         }
 
         if (!entries.empty()) {
-            if (ImGui::CollapsingHeader("Wall vs GPU Time", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::CollapsingHeader("Op vs GPU Time", ImGuiTreeNodeFlags_DefaultOpen)) {
                 static int time_sort = 0;
                 ImGui::SetNextItemWidth(150 * s);
-                const char* sort_opts[] = {"Sort: Wall Time", "Sort: GPU Time", "Sort: Overhead"};
+                const char* sort_opts[] = {"Sort: Op Time", "Sort: GPU Time", "Sort: Overhead"};
                 ImGui::Combo("##timesort", &time_sort, sort_opts, 3);
 
                 std::sort(entries.begin(), entries.end(),
                     [&](const TimeEntry& a, const TimeEntry& b) {
                         switch (time_sort) {
                             case 1:  return a.gpu_ms < b.gpu_ms;
-                            case 2:  return (a.wall_ms - a.gpu_ms) > (b.wall_ms - b.gpu_ms);
-                            default: return a.wall_ms < b.wall_ms;
+                            case 2:  return (a.bar_op_ms - a.gpu_ms) > (b.bar_op_ms - b.gpu_ms);
+                            default: return a.bar_op_ms < b.bar_op_ms;
                         }
                     });
 
                 int n = (int)entries.size();
                 std::vector<std::string> label_store(n);
                 std::vector<const char*> labels(n);
-                std::vector<double> positions(n), wall_vals(n), gpu_vals(n);
+                std::vector<double> positions(n), op_vals(n), gpu_vals(n);
                 for (int i = 0; i < n; i++) {
                     positions[i] = (double)i;
                     label_store[i] = entries[i].name;
                     labels[i] = label_store[i].c_str();
-                    wall_vals[i] = entries[i].wall_ms;
+                    op_vals[i] = entries[i].bar_op_ms;
                     gpu_vals[i] = entries[i].gpu_ms;
                 }
 
                 double bw = 0.3;
-                std::vector<double> pos_wall(n), pos_gpu(n);
+                std::vector<double> pos_op(n), pos_gpu(n);
                 for (int i = 0; i < n; i++) {
-                    pos_wall[i] = positions[i] - bw * 0.55;
+                    pos_op[i] = positions[i] - bw * 0.55;
                     pos_gpu[i]  = positions[i] + bw * 0.55;
                 }
 
                 float plot_h = 220 * s;
-                if (ImPlot::BeginPlot("##WallGPU", {-1, plot_h})) {
+                if (ImPlot::BeginPlot("##OpGPU", {-1, plot_h})) {
                     ImPlot::SetupAxes("", "Time (ms)",
                         ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
                     ImPlot::SetupAxisTicks(ImAxis_X1, positions.data(), n, labels.data());
 
                     ImPlot::SetNextFillStyle(UITheme::ACCENT);
-                    ImPlot::PlotBars("Wall Time", pos_wall.data(), wall_vals.data(), n, bw);
+                    ImPlot::PlotBars("Op Time", pos_op.data(), op_vals.data(), n, bw);
 
                     ImPlot::SetNextFillStyle({0.35f, 0.60f, 0.85f, 1.0f});
                     ImPlot::PlotBars("GPU Time", pos_gpu.data(), gpu_vals.data(), n, bw);
 
-                    // Overhead % annotation above wall bar
+                    // Overhead % annotation above the op bar
                     for (int i = 0; i < n; i++) {
-                        double overhead = wall_vals[i] > 0
-                            ? ((wall_vals[i] - gpu_vals[i]) / wall_vals[i]) * 100.0 : 0;
+                        double overhead = op_vals[i] > 0
+                            ? ((op_vals[i] - gpu_vals[i]) / op_vals[i]) * 100.0 : 0;
                         if (overhead > 1.0) {
                             char txt[32];
                             snprintf(txt, sizeof(txt), "+%.0f%%", overhead);
-                            ImPlot::PlotText(txt, positions[i], wall_vals[i], {0, -10});
+                            ImPlot::PlotText(txt, positions[i], op_vals[i], {0, -10});
                         }
                     }
 
@@ -1590,7 +1678,7 @@ void Gui::render_benchmark_panel() {
             if (has_multi) {
                 ImGui::TextColored(UITheme::HEADER_TEXT, "Scaling");
 
-                const char* metric_names[] = {"Performance", "Wall Time", "GPU Time"};
+                const char* metric_names[] = {"Performance", "Op Time", "GPU Time"};
                 int metric_idx = (int)scaling_metric_;
                 ImGui::SetNextItemWidth(160 * s);
                 if (ImGui::Combo("Metric##scaling", &metric_idx, metric_names, 3)) {
@@ -1603,8 +1691,8 @@ void Gui::render_benchmark_panel() {
                 switch (scaling_metric_) {
                     case ScalingMetric::Performance:
                         y_label = is_matmul() ? "GFLOPS" : "GB/s"; break;
-                    case ScalingMetric::WallTime:
-                        y_label = "Wall Time (ms)"; break;
+                    case ScalingMetric::OpTime:
+                        y_label = "Op Time (ms)"; break;
                     case ScalingMetric::GpuTime:
                         y_label = "GPU Time (ms)"; break;
                 }
@@ -1625,7 +1713,7 @@ void Gui::render_benchmark_panel() {
                                     ys.push_back(is_matmul() ? entry.result.gflops
                                                              : entry.result.bandwidth_gbps);
                                     break;
-                                case ScalingMetric::WallTime:
+                                case ScalingMetric::OpTime:
                                     ys.push_back((double)entry.result.op_ms);
                                     break;
                                 case ScalingMetric::GpuTime:
@@ -1660,11 +1748,12 @@ void Gui::render_results_table() {
         }
     }
 
-    enum ColumnID { Col_Kernel = 0, Col_Block, Col_Grid, Col_Wall, Col_GPU,
+    enum ColumnID { Col_Kernel = 0, Col_Block, Col_Grid, Col_Op, Col_GPU,
                     Col_Overhead, Col_Launches, Col_Perf, Col_PeakMem, Col_Energy,
-                    Col_Status, Col_Regs, Col_SHMem, Col_Occup, Col_IPC };
+                    Col_Dtype, Col_Error, Col_Status,
+                    Col_Regs, Col_SHMem, Col_Occup, Col_IPC };
 
-    int num_cols = has_profiling ? 15 : 12;
+    int num_cols = has_profiling ? 17 : 14;
 
     float table_h = std::min(ImGui::GetContentRegionAvail().y, 300 * s);
     if (table_h < 100 * s) table_h = 100 * s;
@@ -1675,26 +1764,33 @@ void Gui::render_results_table() {
             ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate,
             {0, table_h})) {
 
+        // Kernel is fixed rather than stretched. As the only stretch column it
+        // absorbed all the slack, leaving the numeric columns cramped enough to
+        // ellipsize their headers.
         ImGui::TableSetupColumn("Kernel",
-            ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort, 0, Col_Kernel);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort, 200 * s, Col_Kernel);
         ImGui::TableSetupColumn("Block",  ImGuiTableColumnFlags_WidthFixed, 70 * s, Col_Block);
         ImGui::TableSetupColumn("Grid",   ImGuiTableColumnFlags_WidthFixed, 80 * s, Col_Grid);
         ImGui::TableSetupColumn("Op (ms)",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Wall);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Op);
         ImGui::TableSetupColumn("GPU (ms)",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 60 * s, Col_GPU);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_GPU);
         ImGui::TableSetupColumn("Overhead",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 70 * s, Col_Overhead);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 76 * s, Col_Overhead);
         ImGui::TableSetupColumn("Lch",
             ImGuiTableColumnFlags_WidthFixed, 38 * s, Col_Launches);
         ImGui::TableSetupColumn(show_gflops ? "GFLOPS" : "GB/s",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 60 * s, Col_Perf);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 70 * s, Col_Perf);
         ImGui::TableSetupColumn("Peak Mem",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_PeakMem);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 80 * s, Col_PeakMem);
         ImGui::TableSetupColumn("mJ/op",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Energy);
+        ImGui::TableSetupColumn("Type",
+            ImGuiTableColumnFlags_WidthFixed, 82 * s, Col_Dtype);
+        ImGui::TableSetupColumn("Rel err",
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_Error);
         ImGui::TableSetupColumn("Status",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 50 * s, Col_Status);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 58 * s, Col_Status);
 
         if (has_profiling) {
             ImGui::TableSetupColumn("Regs",   ImGuiTableColumnFlags_WidthFixed, 40 * s, Col_Regs);
@@ -1729,7 +1825,7 @@ void Gui::render_results_table() {
                             case Col_Kernel: cmp = ra.kernel_name.compare(rb.kernel_name); break;
                             case Col_Block:  cmp = (int)(ra.block_x * ra.block_y) - (int)(rb.block_x * rb.block_y); break;
                             case Col_Grid:   cmp = (int)(ra.grid_x * ra.grid_y) - (int)(rb.grid_x * rb.grid_y); break;
-                            case Col_Wall:   cmp = (ra.op_ms < rb.op_ms) ? -1 : (ra.op_ms > rb.op_ms) ? 1 : 0; break;
+                            case Col_Op:   cmp = (ra.op_ms < rb.op_ms) ? -1 : (ra.op_ms > rb.op_ms) ? 1 : 0; break;
                             case Col_GPU:    cmp = (ra.gpu_ms < rb.gpu_ms) ? -1 : (ra.gpu_ms > rb.gpu_ms) ? 1 : 0; break;
                             case Col_Perf: {
                                 double va = show_gflops ? ra.gflops : ra.bandwidth_gbps;
@@ -1740,6 +1836,8 @@ void Gui::render_results_table() {
                             case Col_Launches: cmp = ra.launch_count - rb.launch_count; break;
                             case Col_PeakMem:  cmp = (ra.peak_device_bytes < rb.peak_device_bytes) ? -1 : (ra.peak_device_bytes > rb.peak_device_bytes) ? 1 : 0; break;
                             case Col_Energy:   cmp = (ra.energy.mj_per_op < rb.energy.mj_per_op) ? -1 : (ra.energy.mj_per_op > rb.energy.mj_per_op) ? 1 : 0; break;
+                            case Col_Dtype: cmp = ra.input_dtype.compare(rb.input_dtype); break;
+                            case Col_Error: cmp = (ra.accuracy.max_total_error < rb.accuracy.max_total_error) ? -1 : (ra.accuracy.max_total_error > rb.accuracy.max_total_error) ? 1 : 0; break;
                             case Col_Regs:  cmp = ra.counters.regs_per_thread - rb.counters.regs_per_thread; break;
                             case Col_SHMem: cmp = ra.counters.shared_mem_bytes - rb.counters.shared_mem_bytes; break;
                             case Col_Occup: cmp = (ra.counters.occupancy < rb.counters.occupancy) ? -1 : 1; break;
@@ -1755,8 +1853,33 @@ void Gui::render_results_table() {
             const auto& k = (*kernels)[idx];
             ImGui::TableNextRow();
 
+            // Tint the whole row when something is off, so a bad result is
+            // visible without reading the Status column. Kept low-alpha: it
+            // has to sit under the text without fighting it.
+            if (!k.result.success) {
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                    ImGui::GetColorU32(ImVec4(UITheme::ERROR_RED.x, UITheme::ERROR_RED.y,
+                                              UITheme::ERROR_RED.z, 0.16f)));
+            } else if (!k.result.verified) {
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                    ImGui::GetColorU32(ImVec4(UITheme::WARN_YELLOW.x, UITheme::WARN_YELLOW.y,
+                                              UITheme::WARN_YELLOW.z, 0.14f)));
+            }
+
             // Kernel name with DSL color tag + click-to-select
             ImGui::TableNextColumn();
+
+            // Thin dtype stripe on the left edge of the row. Cheaper to scan
+            // than reading the Type column on every line.
+            {
+                const ImVec2 cp = ImGui::GetCursorScreenPos();
+                const float  lh = ImGui::GetTextLineHeight();
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(cp.x - 5.0f * s, cp.y),
+                    ImVec2(cp.x - 2.0f * s, cp.y + lh),
+                    ImGui::GetColorU32(dtype_color(k.result.input_dtype)),
+                    1.0f * s);
+            }
             DSLType dsl = detect_dsl_type(k.descriptor);
             ImVec4 badge_col;
             const char* badge_tag;
@@ -1801,7 +1924,7 @@ void Gui::render_results_table() {
             ImGui::TableNextColumn(); ImGui::Text("%ux%u", k.result.block_x, k.result.block_y);
             ImGui::TableNextColumn(); ImGui::Text("%ux%u", k.result.grid_x, k.result.grid_y);
 
-            // Wall time with min/max/stddev tooltip
+            // Op time with min/max/stddev tooltip
             ImGui::TableNextColumn(); ImGui::Text("%.3f", k.result.op_ms);
             if (ImGui::IsItemHovered() && !k.result.all_times_ms.empty()) {
                 const auto& t = k.result.all_times_ms;
@@ -1870,6 +1993,47 @@ void Gui::render_results_table() {
                         "Whole-board energy, so this is an upper bound on the\n"
                         "kernel's marginal cost.",
                         k.result.energy.avg_watts, k.result.energy.iterations);
+                }
+            } else {
+                ImGui::TextColored(UITheme::TEXT_DIM, "--");
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::TextColored(dtype_color(k.result.input_dtype), "%s",
+                dtype_label(k.result.input_dtype, k.result.output_dtype).c_str());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("in %s, out %s, compute %s\naccuracy is judged against the output type",
+                    k.result.input_dtype.c_str(), k.result.output_dtype.c_str(),
+                    k.result.compute_mode.c_str());
+            }
+
+            // Relative error against a double-precision CPU reference. Coloured
+            // by how close it sits to the tolerance, so an imprecise kernel
+            // reads differently from a wrong one.
+            // Total error is shown because the table mixes dtypes and this is
+            // the number comparable across them. The colour tracks that same
+            // number, so a bigger figure never reads as safer than a smaller
+            // one. Pass/fail is already carried by the row tint and Status.
+            ImGui::TableNextColumn();
+            if (k.result.accuracy.checked) {
+                const auto& a = k.result.accuracy;
+                if (a.max_total_error > a.tolerance)
+                    ImGui::TextColored(UITheme::ERROR_RED, "%.2e", a.max_total_error);
+                else if (a.max_total_error > a.tolerance * 0.1)
+                    ImGui::TextColored(UITheme::WARN_YELLOW, "%.2e", a.max_total_error);
+                else
+                    ImGui::Text("%.2e", a.max_total_error);
+
+                if (ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    ImGui::Text("total      max %.3e  mean %.3e", a.max_total_error, a.mean_total_error);
+                    ImGui::TextDisabled("vs the original fp32 data, comparable across dtypes");
+                    ImGui::Separator();
+                    ImGui::Text("arithmetic max %.3e  mean %.3e", a.max_rel_error, a.mean_rel_error);
+                    ImGui::TextDisabled("vs the inputs this kernel received, judged against %.3e", a.tolerance);
+                    ImGui::Separator();
+                    ImGui::Text("%d elements checked", a.elements_checked);
+                    ImGui::EndTooltip();
                 }
             } else {
                 ImGui::TextColored(UITheme::TEXT_DIM, "--");
@@ -2316,7 +2480,7 @@ void Gui::benchmark_thread_func(
         if (pr.result.success) {
             char buf[256];
             bool matmul = (cat == "matmul");
-            snprintf(buf, sizeof(buf), "%s: wall=%.3f ms  kernel=%.3f ms  %.2f %s",
+            snprintf(buf, sizeof(buf), "%s: op=%.3f ms  gpu=%.3f ms  %.2f %s",
                 pr.result.kernel_name.c_str(),
                 pr.result.op_ms, pr.result.gpu_ms,
                 matmul ? pr.result.gflops : pr.result.bandwidth_gbps,
@@ -2397,7 +2561,7 @@ void Gui::sweep_thread_func(
             if (pr.result.success) {
                 char buf[256];
                 bool matmul = (cat == "matmul");
-                snprintf(buf, sizeof(buf), "%s [%s]: wall=%.3f ms  %.2f %s",
+                snprintf(buf, sizeof(buf), "%s [%s]: op=%.3f ms  %.2f %s",
                     pr.result.kernel_name.c_str(), size_str.c_str(),
                     pr.result.op_ms,
                     matmul ? pr.result.gflops : pr.result.bandwidth_gbps,

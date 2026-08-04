@@ -4,6 +4,13 @@
 #include <spdlog/spdlog.h>
 #include <vector>
 #include <cmath>
+#include <cstdint>
+
+// Kernel folder layout: kernels/<category>/<input dtype>/. The folder is named
+// for what a kernel reads, because that is what shapes the source: reading
+// __half* rather than float* changes the signature and the load path, while
+// the output type is a single store at the end. Variants sharing an input type
+// but differing in output live in the same file.
 
 namespace arena {
 
@@ -33,25 +40,53 @@ public:
         };
     }
     
+    int accumulation_length() const override { return n_; }
+
     void set_problem_size(const std::map<std::string, int>& params) override {
         n_ = params.count("n") ? params.at("n") : 1000000;
     }
     
     void allocate(Context& ctx) override {
         capture_device_props(ctx);
-        size_input_ = n_ * sizeof(float);
-        size_output_ = sizeof(float);
+        size_input_  = (size_t)n_ * dtype_size(input_dtype());
+        size_output_ = dtype_size(output_dtype());
         
         d_input_ = ctx.allocate(size_input_);
         d_output_ = ctx.allocate(size_output_);
     }
     
     void initialize(Context& ctx) override {
-        std::vector<float> h_input(n_, 1.0f);
-        ctx.copy_to_device(d_input_, h_input.data(), size_input_);
-        
-        float zero = 0.0f;
-        ctx.copy_to_device(d_output_, &zero, sizeof(float));
+        std::vector<float> h_input;
+        generate(h_input, n_, distribution_, input_seed_);
+
+        // Two references. The exact one comes from the generated fp32 data;
+        // the quantized one from the same data after rounding to the kernel's
+        // storage type. Comparing against both separates what the kernel got
+        // wrong from what its dtype cost it before it ever ran.
+        reference_exact_ = 0.0;
+        for (float v : h_input) reference_exact_ += v;
+
+        quantize_in_place(h_input, input_dtype());
+
+        reference_ = 0.0;
+        for (float v : h_input) reference_ += v;
+
+        if (input_dtype() == DType::FP32) {
+            ctx.copy_to_device(d_input_, h_input.data(), size_input_);
+        } else {
+            std::vector<uint16_t> packed(n_);
+            for (int i = 0; i < n_; i++) {
+                packed[i] = (input_dtype() == DType::FP16) ? float_to_half(h_input[i])
+                                                           : float_to_bf16(h_input[i]);
+            }
+            ctx.copy_to_device(d_input_, packed.data(), size_input_);
+        }
+
+        // Zero through the output type, not always as a float: the buffer is
+        // only dtype_size(output_dtype()) bytes, so writing a float into an
+        // fp16 output would run two bytes past the end of the allocation.
+        const uint64_t zero = 0;
+        ctx.copy_to_device(d_output_, &zero, size_output_);
     }
     
     void cleanup(Context& ctx) override {
@@ -72,18 +107,31 @@ public:
         return static_cast<double>(size_input_ + size_output_);
     }
     
-    bool verify(Context& ctx) override {
-        float result;
-        ctx.copy_to_host(&result, d_output_, sizeof(float));
+    VerifyResult verify(Context& ctx) override {
+        float result = 0.0f;
+        if (output_dtype() == DType::FP32) {
+            ctx.copy_to_host(&result, d_output_, sizeof(float));
+        } else {
+            uint16_t packed = 0;
+            ctx.copy_to_host(&packed, d_output_, sizeof(uint16_t));
+            result = (output_dtype() == DType::FP16) ? half_to_float(packed)
+                                                     : bf16_to_float(packed);
+        }
 
-        float expected = static_cast<float>(n_); //TODO: I don't like the idea of not doing a CPU check, what if we initialize RANDOM weights (This is how it should be anw)
-        spdlog::get("verify")->debug("reduce: got {}, expected {}", result, expected);
-        float rel_error = std::abs(result - expected) / expected;
-        return rel_error < 1e-5f;
+        ErrorAccumulator acc;
+        acc.add(result, reference_, reference_exact_);
+        auto r = acc.finish(tolerance());
+
+        spdlog::get("verify")->debug(
+            "reduce: got {}, reference {}, arithmetic err {:.3e}, total err {:.3e}",
+            result, reference_, r.max_rel_error, r.max_total_error);
+        return r;
     }
 
 protected:
     int n_ = 1000000;
+    double reference_ = 0.0;        // sum of the quantized inputs
+    double reference_exact_ = 0.0;  // sum of the original fp32 inputs
     CUdeviceptr d_input_ = 0, d_output_ = 0;
     size_t size_input_ = 0, size_output_ = 0;
 };

@@ -6,7 +6,7 @@ struct ReduceVectorized : ReduceDescriptorBase {
     std::string name() const override { return "reduce_vectorized"; }
     std::string module_path() const override { return compile_result_.module_path; }
     bool needs_compilation() const override { return true; }
-    std::string source_path() const override { return "reduce/vectorized.cu"; }
+    std::string source_path() const override { return "reduce/fp32/vectorized.cu"; }
     std::string function_name() const override { return "reduce_sum_vectorized"; }
     std::string description() const override {
         return "SOL5: vectorized 128-bit loads + grid-stride + warp shuffle";

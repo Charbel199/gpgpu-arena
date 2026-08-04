@@ -3,12 +3,17 @@
 #include "arena/device/context.hpp"
 #include "arena/device/kernel_loader.hpp"
 #include "arena/compilers/backend.hpp"
+#include "arena/dtype.hpp"
+#include "arena/distribution.hpp"
+#include "arena/measurement/accuracy.hpp"
 #include <string>
 #include <vector>
 #include <map>
 #include <memory>
 #include <set>
 #include <stdexcept>
+#include <cmath>
+#include <algorithm>
 
 namespace arena {
 
@@ -30,6 +35,12 @@ public:
     virtual void set_problem_size(const std::map<std::string, int>& params) = 0;
     virtual std::vector<std::map<std::string, int>> get_sweep_configs() const { return {}; }
     
+    // Input generation settings, pushed in by the runner before allocate().
+    void set_input_spec(Distribution d, uint64_t seed) {
+        distribution_ = d;
+        input_seed_ = seed;
+    }
+
     // memory management (through the context class)
     virtual void allocate(Context& ctx) = 0;
     virtual void initialize(Context& ctx) = 0;
@@ -43,8 +54,52 @@ public:
     virtual double calculate_flops() const = 0;
     virtual double calculate_bytes_accessed() const = 0;
     
-    // verify if the result of the kernel is correct
-    virtual bool verify(Context& ctx) { return true; }
+    // Element types of the input and output buffers. These are what the
+    // framework can actually observe: it allocates those buffers and reads
+    // them back. Anything a kernel does internally is its own business, which
+    // is why there is no accumulator type here. A kernel can easily have
+    // several at different precisions.
+    //
+    // The two default independently. Declaring narrow input must not quietly
+    // relax the accuracy check, which is derived from the output type.
+    virtual DType input_dtype() const { return DType::FP32; }
+    virtual DType output_dtype() const { return DType::FP32; }
+
+    virtual ComputeMode compute_mode() const { return ComputeMode::Default; }
+
+    // How many values get summed into one output. Reduction error grows with
+    // this, so it scales the tolerance: a sum over 4M elements is allowed
+    // more drift than a sum over 8.
+    virtual int accumulation_length() const { return 1; }
+
+    // How far off the answer may be before the kernel counts as broken.
+    //
+    // Based on the output type: a kernel cannot produce an answer more precise
+    // than the type it writes into, so that is the standard it is held to. A
+    // kernel whose internals are coarser than its output will miss this, and
+    // that is the intended result rather than a special case to excuse.
+    virtual double tolerance() const {
+        const double per_element = default_tolerance(output_dtype(), compute_mode());
+        const int n = accumulation_length() > 1 ? accumulation_length() : 1;
+        const double scaled = per_element * std::sqrt(static_cast<double>(n));
+
+        // Capped, because the sqrt(n) growth models a reduction carried out
+        // entirely in the output type. Kernels that accumulate in something
+        // wider and only narrow at the end, which is the sensible design, do
+        // far better than that, and for a narrow output the unbounded figure
+        // reaches 15.6 at n=4M. An answer more than 10% off is wrong whatever
+        // the type, so that is the ceiling.
+        return std::min(scaled, 0.10);
+    }
+
+    // Compare against a CPU reference and report how far off it was. Returning
+    // a number rather than a boolean means a kernel that is merely imprecise
+    // reads differently from one that is wrong.
+    virtual VerifyResult verify(Context& ctx) {
+        VerifyResult r;
+        r.passed = true;   // nothing to check
+        return r;
+    }
 
 
     // run cubin or cpp code
@@ -62,6 +117,9 @@ public:
     int sm_count() const { return sm_count_; }
 
 protected:
+    Distribution distribution_ = Distribution::Uniform;
+    uint64_t     input_seed_ = 42;
+
     CompileResult compile_result_;
     int sm_count_ = 0;
 

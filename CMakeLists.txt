@@ -110,10 +110,10 @@ endif()
 
 # --- arena executable ---
 
-file(GLOB_RECURSE KERNEL_DESCRIPTORS "${CMAKE_SOURCE_DIR}/kernels/*/*.cpp")
+file(GLOB_RECURSE KERNEL_DESCRIPTORS "${CMAKE_SOURCE_DIR}/kernels/*.cpp")
 
 # CUDA descriptors (use runtime API, e.g. CUB/Thrust) compiled by nvcc, linked into exe
-file(GLOB CUDA_DESCRIPTORS "${CMAKE_SOURCE_DIR}/kernels/*/cub_*.cu" "${CMAKE_SOURCE_DIR}/kernels/*/thrust_*.cu")
+file(GLOB_RECURSE CUDA_DESCRIPTORS "${CMAKE_SOURCE_DIR}/kernels/cub_*.cu" "${CMAKE_SOURCE_DIR}/kernels/thrust_*.cu")
 
 set(ARENA_SOURCES
     src/main.cpp
@@ -130,6 +130,9 @@ set(ARENA_SOURCES
     src/arena/measurement/measure.cpp
     src/arena/measurement/measure_policy.cpp
     src/arena/cli_args.cpp
+    src/arena/dtype.cpp
+    src/arena/distribution.cpp
+    src/arena/measurement/accuracy.cpp
     src/arena/result_io.cpp
     src/arena/runner.cpp
     src/frontend/cli.cpp

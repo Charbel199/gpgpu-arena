@@ -2,14 +2,14 @@
 
 namespace arena {
 
-struct ReduceBlockAtomic : ReduceDescriptorBase {
-    std::string name() const override { return "reduce_block_atomic"; }
+struct ReduceWarpShuffle : ReduceDescriptorBase {
+    std::string name() const override { return "reduce_warp_shuffle"; }
     std::string module_path() const override { return compile_result_.module_path; }
     bool needs_compilation() const override { return true; }
-    std::string source_path() const override { return "reduce/block_atomic.cu"; }
-    std::string function_name() const override { return "reduce_sum_block_atomic"; }
+    std::string source_path() const override { return "reduce/fp32/warp_shuffle.cu"; }
+    std::string function_name() const override { return "reduce_sum_warp_shuffle"; }
     std::string description() const override {
-        return "SOL1: block-level shared memory atomic";
+        return "SOL2: warp shuffle + block atomic";
     }
     
     KernelLoader::LaunchConfig get_launch_config() const override {
@@ -23,6 +23,6 @@ struct ReduceBlockAtomic : ReduceDescriptorBase {
     }
 };
 
-REGISTER_KERNEL(ReduceBlockAtomic);
+REGISTER_KERNEL(ReduceWarpShuffle);
 
 }

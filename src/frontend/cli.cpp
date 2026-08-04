@@ -1,6 +1,7 @@
 #include "frontend/cli.hpp"
 
 #include "arena/cli_args.hpp"
+#include "arena/distribution.hpp"
 #include "arena/result_io.hpp"
 #include "arena/logger.hpp"
 
@@ -74,6 +75,18 @@ CliOptions parse_args(int argc, char** argv) {
                 return o;
             }
             o.format = v;
+        } else if (arg_is(a, "--dist")) {
+            if (!take_value(argc, argv, i, "--dist", v, o)) return o;
+            bool ok = false;
+            o.config.input_distribution = arena::distribution_from_string(v, &ok);
+            if (!ok) {
+                o.ok = false;
+                o.error = "unknown --dist '" + v + "' (ones, uniform, normal, adversarial)";
+                return o;
+            }
+        } else if (arg_is(a, "--seed")) {
+            if (!take_value(argc, argv, i, "--seed", v, o)) return o;
+            o.config.input_seed = std::strtoull(v.c_str(), nullptr, 10);
         } else if (arg_is(a, "--profile")) {
             o.config.collect_metrics = true;
         } else if (arg_is(a, "--energy")) {
@@ -146,6 +159,8 @@ void print_cli_usage(const char* program) {
         "  --run <selector>          Kernel name, category name, or 'all'\n"
         "  --param k=v, -p k=v       Problem size, repeatable (e.g. -p n=1000000)\n"
         "  --runs <n>                Timed runs per kernel (default 10)\n"
+        "  --dist <name>             Input data: ones, uniform, normal, adversarial\n"
+        "  --seed <n>                Input seed, for reproducible runs (default 42)\n"
         "  --warmup <n>              Fixed warmup count (default: auto steady-state)\n"
         "  --profile                 Collect hardware counters (needs perf access)\n"
         "  --energy                  Collect NVML energy (adds a sustained pass)\n"

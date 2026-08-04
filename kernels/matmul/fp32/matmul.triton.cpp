@@ -10,7 +10,7 @@ public:
     std::string function_name() const override { return compile_result_.kernel_name; }
 
     bool needs_compilation() const override { return true; }
-    std::string source_path() const override { return "matmul/matmul.triton.py"; }
+    std::string source_path() const override { return "matmul/fp32/matmul.triton.py"; }
 
     KernelLoader::LaunchConfig get_launch_config() const override {
         int block_m = compile_result_.constants.at("BLOCK_M");
