@@ -24,6 +24,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     try {
         desc.set_problem_size(config.params);
         desc.set_input_spec(config.input_distribution, config.input_seed);
+        desc.set_block_size(config.block_size);
 
         // runtime compilation for DSL kernels
         if (desc.needs_compilation()) {

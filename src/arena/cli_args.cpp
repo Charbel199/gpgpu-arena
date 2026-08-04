@@ -27,4 +27,10 @@ bool apply_params(const std::string& spec, std::map<std::string, int>& out) {
     return true;
 }
 
+std::vector<int> block_sizes_for(bool sweep, int requested,
+                                 const std::vector<int>& tunable) {
+    if (sweep && !tunable.empty()) return tunable;
+    return {requested};
+}
+
 }

@@ -12,9 +12,16 @@ struct ScanNaive : ScanDescriptorBase {
         return "Naive scan (single block only)";
     }
     
+    // Capped at 1024 by the warp_sums[] arrays, which hold one entry per
+    // warp, and restricted to powers of two because the tree reductions
+    // halve the block each step.
+    std::vector<int> tunable_block_sizes() const override {
+        return {64, 128, 256, 512, 1024};
+    }
+
     KernelLoader::LaunchConfig get_launch_config() const override {
  
-        constexpr int blocksize = 256;
+        const int blocksize = block_size_or(256);
         return {
             .grid_x = 1, // 1 block
             .grid_y = 1, .grid_z = 1,

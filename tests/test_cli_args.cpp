@@ -3,6 +3,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 using namespace arena::cli;
 
@@ -67,5 +68,28 @@ TEST_CASE("apply_params") {
         CHECK_FALSE(apply_params("bogus", p));
         CHECK(p.size() == 1);
         CHECK(p["n"] == 42);
+    }
+}
+
+TEST_CASE("block_sizes_for") {
+    const std::vector<int> tunable{64, 128, 256, 512, 1024};
+
+    SUBCASE("no sweep gives one run at the descriptor default") {
+        CHECK(block_sizes_for(false, 0, tunable) == std::vector<int>{0});
+    }
+    SUBCASE("no sweep honours an explicit --block") {
+        CHECK(block_sizes_for(false, 256, tunable) == std::vector<int>{256});
+    }
+    SUBCASE("sweep expands to every tunable size") {
+        CHECK(block_sizes_for(true, 0, tunable) == tunable);
+    }
+    SUBCASE("sweep overrides an explicit --block") {
+        CHECK(block_sizes_for(true, 128, tunable) == tunable);
+    }
+    SUBCASE("a kernel with a pinned block size still runs once") {
+        // cuTile, Triton and Warp report nothing tunable. Returning an empty
+        // list here would silently drop them from a --sweep-block run.
+        CHECK(block_sizes_for(true, 0, {}) == std::vector<int>{0});
+        CHECK(block_sizes_for(false, 0, {}) == std::vector<int>{0});
     }
 }

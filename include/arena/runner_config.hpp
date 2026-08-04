@@ -30,6 +30,10 @@ struct RunConfig {
     bool  collect_energy   = false;
     float energy_window_ms = 500.0f;
 
+    // Block size to launch at, or 0 for each kernel's own default. Only
+    // meaningful for kernels that report tunable_block_sizes().
+    int block_size = 0;
+
     // Sweep range. Zero means "use the category's own default ladder", so
     // nothing changes until you actually set a range.
     int    sweep_min = 0;

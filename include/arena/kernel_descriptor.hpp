@@ -72,6 +72,21 @@ public:
     virtual void initialize(Context& ctx) = 0;
     virtual void cleanup(Context& ctx) = 0;
     
+    // Block sizes this kernel can be launched at. Empty means the block size
+    // is not a free parameter, which is the case whenever the cubin pins it:
+    // cuTile emits .reqntid, and Triton and Warp fix it at compile time from
+    // num_warps. Those need a recompile to change, not a different launch.
+    virtual std::vector<int> tunable_block_sizes() const { return {}; }
+
+    // Chosen block size, or 0 for the descriptor's own default. Set by the
+    // runner before get_launch_config().
+    void set_block_size(int n) { block_size_ = n; }
+
+    // Helper for descriptors: the block size to actually launch at.
+    int block_size_or(int fallback) const {
+        return block_size_ > 0 ? block_size_ : fallback;
+    }
+
     // kernel launch configuration
     virtual KernelLoader::LaunchConfig get_launch_config() const = 0;
     virtual std::vector<void*> get_kernel_args() = 0;
@@ -149,6 +164,8 @@ public:
     int sm_count() const { return sm_count_; }
 
 protected:
+    int block_size_ = 0;   // 0 = descriptor default
+
     Distribution distribution_ = Distribution::Uniform;
     uint64_t     input_seed_ = 42;
 

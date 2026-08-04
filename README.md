@@ -41,6 +41,34 @@ alongside the results, so a result file records what produced it. Run
 `-DBUILD_GUI=OFF` builds a headless-only binary with no GLFW/OpenGL
 dependency.
 
+## Tuning Axes
+
+Problem size is a range rather than a hard-coded ladder. `--sweep-min`,
+`--sweep-max` and `--sweep-factor` set it; leaving them at zero uses each
+category's own defaults, so a plain `--sweep` behaves as it always did.
+
+Block size is the second axis. `--block <n>` launches at one size and
+`--sweep-block` runs every size a kernel declares tunable, which for the
+hand-written CUDA kernels is 64 through 1024. It is not a free parameter
+everywhere: cuTile emits a `.reqntid` the launch has to match exactly, and
+Triton and Warp fix the block at compile time from `num_warps`. Those kernels
+declare nothing tunable and get a single run, since changing their block size
+means recompiling rather than launching differently.
+
+The axis matters more than the default suggests. Over `reduce` at n=4M, best
+against worst block size:
+
+| kernel | best | spread |
+| --- | --- | --- |
+| `reduce_block_atomic` | 64 | 5.0x |
+| `reduce_grid_stride` | 256 | 3.8x |
+| `reduce_warp_shuffle` | 512 | 3.5x |
+| `reduce_vectorized` | 128 | 2.6x |
+| `reduce_baseline` | 1024 | 1.1x |
+
+A fixed 256 would have understated four of these. `reduce_baseline` is flat
+because it is latency-bound on the atomic, not on occupancy.
+
 ## Measurement Model
 
 Timing is reported in three tiers, which are **not** comparable with each
@@ -141,12 +169,6 @@ in output live in the same file, which is why all three above are in
 `kernels/reduce/fp16/accum.cu`.
 
 ## Known Issues
-
-- **cuTile kernels fail to compile** against current `cuda-tile` releases:
-  `'ndarray' object has no attribute 'symbol'`. `cutile_base.py` passes cupy
-  ndarrays as dummy args to `compile_tile`, which newer versions no longer
-  accept. Reproduces identically on older commits, so it is an upstream API
-  change rather than a regression.
 
 - The compile cache is keyed on source mtime alone, not on target
   architecture, compiler version, or compile flags. A cubin can outlive the

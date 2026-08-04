@@ -155,6 +155,7 @@ json config_json(const RunConfig& cfg) {
     j["sweep_min"]        = cfg.sweep_min;
     j["sweep_max"]        = cfg.sweep_max;
     j["sweep_factor"]     = cfg.sweep_factor;
+    j["block_size"]       = cfg.block_size;
     j["input_distribution"] = distribution_name(cfg.input_distribution);
     j["input_seed"]         = cfg.input_seed;
     j["params"]           = cfg.params;
