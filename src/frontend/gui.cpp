@@ -339,25 +339,15 @@ const KernelState* Gui::selected_kernel() const {
     return nullptr;
 }
 
-// Compact type label for the narrow sidebar: "f16>f32", or "f32" when input
-// and output match.
-static std::string dtype_label_short(const arena::KernelDescriptor* d) {
-    auto shorten = [](const std::string& t) {
-        if (t == "fp32") return std::string("f32");
-        if (t == "fp16") return std::string("f16");
-        if (t == "bf16") return std::string("b16");
-        return t;
-    };
-    const std::string in  = shorten(arena::dtype_name(d->input_dtype()));
-    const std::string out = shorten(arena::dtype_name(d->output_dtype()));
-    return (in == out) ? in : in + ">" + out;
+// Always "input>output", even when they match. Collapsing fp32>fp32 to "fp32"
+// leaves the reader guessing whether it meant the input, the output, or both.
+static std::string dtype_label(const arena::KernelDescriptor* d) {
+    return std::string(arena::dtype_name(d->input_dtype())) + ">"
+         + arena::dtype_name(d->output_dtype());
 }
 
-// True for the plain fp32 case, which is most kernels and does not need
-// spelling out on every row.
-static bool is_plain_fp32(const arena::KernelDescriptor* d) {
-    return d->input_dtype() == arena::DType::FP32
-        && d->output_dtype() == arena::DType::FP32;
+static std::string dtype_label(const std::string& in, const std::string& out) {
+    return in + ">" + out;
 }
 
 static ImVec4 dtype_color(const std::string& dtype) {
@@ -744,15 +734,14 @@ void Gui::render_kernel_sidebar() {
     {
         std::vector<std::string> seen;
         for (const auto& k : *kernels) {
-            const std::string lbl = dtype_label_short(k.descriptor);
+            const std::string lbl = dtype_label(k.descriptor);
             if (std::find(seen.begin(), seen.end(), lbl) == seen.end()) seen.push_back(lbl);
         }
         for (size_t li = 0; li < seen.size(); li++) {
             if (li) ImGui::SameLine();
             const ImVec2 cp = ImGui::GetCursorScreenPos();
             const float  th = ImGui::GetTextLineHeight();
-            const std::string base = seen[li].substr(0, 3) == "f16" ? "fp16"
-                                   : seen[li].substr(0, 3) == "b16" ? "bf16" : "fp32";
+            const std::string base = seen[li].substr(0, seen[li].find('>'));
             ImGui::GetWindowDrawList()->AddRectFilled(
                 ImVec2(cp.x, cp.y + 2 * s), ImVec2(cp.x + 3 * s, cp.y + th),
                 ImGui::GetColorU32(dtype_color(base)), 1.5f * s);
@@ -1773,7 +1762,7 @@ void Gui::render_results_table() {
         ImGui::TableSetupColumn("mJ/op",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Energy);
         ImGui::TableSetupColumn("Type",
-            ImGuiTableColumnFlags_WidthFixed, 48 * s, Col_Dtype);
+            ImGuiTableColumnFlags_WidthFixed, 82 * s, Col_Dtype);
         ImGui::TableSetupColumn("Rel err",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_Error);
         ImGui::TableSetupColumn("Status",
@@ -1973,13 +1962,8 @@ void Gui::render_results_table() {
             }
 
             ImGui::TableNextColumn();
-            // "f16>f32" when they differ, just the type when they match.
-            if (k.result.input_dtype == k.result.output_dtype) {
-                ImGui::TextColored(UITheme::TEXT_DIM, "%s", k.result.input_dtype.c_str());
-            } else {
-                ImGui::TextColored(dtype_color(k.result.input_dtype), "%s>%s",
-                    k.result.input_dtype.c_str(), k.result.output_dtype.c_str());
-            }
+            ImGui::TextColored(dtype_color(k.result.input_dtype), "%s",
+                dtype_label(k.result.input_dtype, k.result.output_dtype).c_str());
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("in %s, out %s, compute %s\naccuracy is judged against the output type",
                     k.result.input_dtype.c_str(), k.result.output_dtype.c_str(),
