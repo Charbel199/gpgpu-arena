@@ -8,6 +8,7 @@
 #include <cuda.h>
 #include <stdexcept>
 #include <algorithm>
+#include <implot_internal.h>
 #include <cstdio>
 #include <cmath>
 #include <fstream>
@@ -1226,12 +1227,29 @@ void Gui::render_benchmark_panel() {
                 ImPlot::SetupAxisTicks(ImAxis_X1, tick_positions.data(),
                     (int)tick_positions.size(), tick_labels.data());
 
+                // Track which series the legend is currently showing, so the
+                // speedup labels can be suppressed alongside their bars.
+                std::vector<const char*> shown;
                 auto plot_dsl = [&](DSLType type, const char* name, ImVec4 color) {
                     auto it = groups.find(type);
                     if (it == groups.end()) return;
                     ImPlot::SetNextFillStyle(color);
                     ImPlot::PlotBars(name, it->second.positions.data(),
                         it->second.values.data(), (int)it->second.positions.size(), 0.6);
+                    const ImPlotItem* item = ImPlot::GetItem(name);
+                    if (!item || item->Show) shown.push_back(name);
+                };
+
+                auto dsl_shown = [&](DSLType type) {
+                    const char* n = nullptr;
+                    switch (type) {
+                        case DSLType::CUDA:   n = "CUDA";   break;
+                        case DSLType::Triton: n = "Triton"; break;
+                        case DSLType::CuTile: n = "cuTile"; break;
+                        case DSLType::Warp:   n = "Warp";   break;
+                        case DSLType::CUB:    n = "CUB";    break;
+                    }
+                    return std::find(shown.begin(), shown.end(), n) != shown.end();
                 };
 
                 plot_dsl(DSLType::CUDA,   "CUDA",   UITheme::CUDA_BADGE);
@@ -1240,8 +1258,11 @@ void Gui::render_benchmark_panel() {
                 plot_dsl(DSLType::Warp,   "Warp",   UITheme::WARP_BADGE);
                 plot_dsl(DSLType::CUB,    "CUB",    UITheme::CUB_BADGE);
 
-                // Speedup labels above bars
+                // Speedup labels above bars. PlotText is not a plot item, so it
+                // does not hide itself when its series is toggled off in the
+                // legend; the visibility check has to be explicit.
                 for (size_t i = 0; i < bars.size(); i++) {
+                    if (!dsl_shown(bars[i].dsl)) continue;
                     double speedup = slowest / bars[i].median_ms;
                     if (speedup > 1.01) {
                         char txt[32];
@@ -1260,12 +1281,12 @@ void Gui::render_benchmark_panel() {
     }
 
     // ================================================================
-    // Wall Time vs GPU Time Comparison
+    // Op Time vs GPU Time Comparison
     // ================================================================
     {
         struct TimeEntry {
             std::string name;
-            double wall_ms;
+            double bar_op_ms;
             double gpu_ms;
         };
         std::vector<TimeEntry> entries;
@@ -1277,60 +1298,60 @@ void Gui::render_benchmark_panel() {
         }
 
         if (!entries.empty()) {
-            if (ImGui::CollapsingHeader("Wall vs GPU Time", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::CollapsingHeader("Op vs GPU Time", ImGuiTreeNodeFlags_DefaultOpen)) {
                 static int time_sort = 0;
                 ImGui::SetNextItemWidth(150 * s);
-                const char* sort_opts[] = {"Sort: Wall Time", "Sort: GPU Time", "Sort: Overhead"};
+                const char* sort_opts[] = {"Sort: Op Time", "Sort: GPU Time", "Sort: Overhead"};
                 ImGui::Combo("##timesort", &time_sort, sort_opts, 3);
 
                 std::sort(entries.begin(), entries.end(),
                     [&](const TimeEntry& a, const TimeEntry& b) {
                         switch (time_sort) {
                             case 1:  return a.gpu_ms < b.gpu_ms;
-                            case 2:  return (a.wall_ms - a.gpu_ms) > (b.wall_ms - b.gpu_ms);
-                            default: return a.wall_ms < b.wall_ms;
+                            case 2:  return (a.bar_op_ms - a.gpu_ms) > (b.bar_op_ms - b.gpu_ms);
+                            default: return a.bar_op_ms < b.bar_op_ms;
                         }
                     });
 
                 int n = (int)entries.size();
                 std::vector<std::string> label_store(n);
                 std::vector<const char*> labels(n);
-                std::vector<double> positions(n), wall_vals(n), gpu_vals(n);
+                std::vector<double> positions(n), op_vals(n), gpu_vals(n);
                 for (int i = 0; i < n; i++) {
                     positions[i] = (double)i;
                     label_store[i] = entries[i].name;
                     labels[i] = label_store[i].c_str();
-                    wall_vals[i] = entries[i].wall_ms;
+                    op_vals[i] = entries[i].bar_op_ms;
                     gpu_vals[i] = entries[i].gpu_ms;
                 }
 
                 double bw = 0.3;
-                std::vector<double> pos_wall(n), pos_gpu(n);
+                std::vector<double> pos_op(n), pos_gpu(n);
                 for (int i = 0; i < n; i++) {
-                    pos_wall[i] = positions[i] - bw * 0.55;
+                    pos_op[i] = positions[i] - bw * 0.55;
                     pos_gpu[i]  = positions[i] + bw * 0.55;
                 }
 
                 float plot_h = 220 * s;
-                if (ImPlot::BeginPlot("##WallGPU", {-1, plot_h})) {
+                if (ImPlot::BeginPlot("##OpGPU", {-1, plot_h})) {
                     ImPlot::SetupAxes("", "Time (ms)",
                         ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
                     ImPlot::SetupAxisTicks(ImAxis_X1, positions.data(), n, labels.data());
 
                     ImPlot::SetNextFillStyle(UITheme::ACCENT);
-                    ImPlot::PlotBars("Wall Time", pos_wall.data(), wall_vals.data(), n, bw);
+                    ImPlot::PlotBars("Op Time", pos_op.data(), op_vals.data(), n, bw);
 
                     ImPlot::SetNextFillStyle({0.35f, 0.60f, 0.85f, 1.0f});
                     ImPlot::PlotBars("GPU Time", pos_gpu.data(), gpu_vals.data(), n, bw);
 
-                    // Overhead % annotation above wall bar
+                    // Overhead % annotation above the op bar
                     for (int i = 0; i < n; i++) {
-                        double overhead = wall_vals[i] > 0
-                            ? ((wall_vals[i] - gpu_vals[i]) / wall_vals[i]) * 100.0 : 0;
+                        double overhead = op_vals[i] > 0
+                            ? ((op_vals[i] - gpu_vals[i]) / op_vals[i]) * 100.0 : 0;
                         if (overhead > 1.0) {
                             char txt[32];
                             snprintf(txt, sizeof(txt), "+%.0f%%", overhead);
-                            ImPlot::PlotText(txt, positions[i], wall_vals[i], {0, -10});
+                            ImPlot::PlotText(txt, positions[i], op_vals[i], {0, -10});
                         }
                     }
 
@@ -1657,7 +1678,7 @@ void Gui::render_benchmark_panel() {
             if (has_multi) {
                 ImGui::TextColored(UITheme::HEADER_TEXT, "Scaling");
 
-                const char* metric_names[] = {"Performance", "Wall Time", "GPU Time"};
+                const char* metric_names[] = {"Performance", "Op Time", "GPU Time"};
                 int metric_idx = (int)scaling_metric_;
                 ImGui::SetNextItemWidth(160 * s);
                 if (ImGui::Combo("Metric##scaling", &metric_idx, metric_names, 3)) {
@@ -1670,8 +1691,8 @@ void Gui::render_benchmark_panel() {
                 switch (scaling_metric_) {
                     case ScalingMetric::Performance:
                         y_label = is_matmul() ? "GFLOPS" : "GB/s"; break;
-                    case ScalingMetric::WallTime:
-                        y_label = "Wall Time (ms)"; break;
+                    case ScalingMetric::OpTime:
+                        y_label = "Op Time (ms)"; break;
                     case ScalingMetric::GpuTime:
                         y_label = "GPU Time (ms)"; break;
                 }
@@ -1692,7 +1713,7 @@ void Gui::render_benchmark_panel() {
                                     ys.push_back(is_matmul() ? entry.result.gflops
                                                              : entry.result.bandwidth_gbps);
                                     break;
-                                case ScalingMetric::WallTime:
+                                case ScalingMetric::OpTime:
                                     ys.push_back((double)entry.result.op_ms);
                                     break;
                                 case ScalingMetric::GpuTime:
@@ -1727,7 +1748,7 @@ void Gui::render_results_table() {
         }
     }
 
-    enum ColumnID { Col_Kernel = 0, Col_Block, Col_Grid, Col_Wall, Col_GPU,
+    enum ColumnID { Col_Kernel = 0, Col_Block, Col_Grid, Col_Op, Col_GPU,
                     Col_Overhead, Col_Launches, Col_Perf, Col_PeakMem, Col_Energy,
                     Col_Dtype, Col_Error, Col_Status,
                     Col_Regs, Col_SHMem, Col_Occup, Col_IPC };
@@ -1743,22 +1764,25 @@ void Gui::render_results_table() {
             ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate,
             {0, table_h})) {
 
+        // Kernel is fixed rather than stretched. As the only stretch column it
+        // absorbed all the slack, leaving the numeric columns cramped enough to
+        // ellipsize their headers.
         ImGui::TableSetupColumn("Kernel",
-            ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort, 0, Col_Kernel);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort, 200 * s, Col_Kernel);
         ImGui::TableSetupColumn("Block",  ImGuiTableColumnFlags_WidthFixed, 70 * s, Col_Block);
         ImGui::TableSetupColumn("Grid",   ImGuiTableColumnFlags_WidthFixed, 80 * s, Col_Grid);
         ImGui::TableSetupColumn("Op (ms)",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Wall);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Op);
         ImGui::TableSetupColumn("GPU (ms)",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 60 * s, Col_GPU);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_GPU);
         ImGui::TableSetupColumn("Overhead",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 70 * s, Col_Overhead);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 76 * s, Col_Overhead);
         ImGui::TableSetupColumn("Lch",
             ImGuiTableColumnFlags_WidthFixed, 38 * s, Col_Launches);
         ImGui::TableSetupColumn(show_gflops ? "GFLOPS" : "GB/s",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 60 * s, Col_Perf);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 70 * s, Col_Perf);
         ImGui::TableSetupColumn("Peak Mem",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_PeakMem);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 80 * s, Col_PeakMem);
         ImGui::TableSetupColumn("mJ/op",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 65 * s, Col_Energy);
         ImGui::TableSetupColumn("Type",
@@ -1766,7 +1790,7 @@ void Gui::render_results_table() {
         ImGui::TableSetupColumn("Rel err",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72 * s, Col_Error);
         ImGui::TableSetupColumn("Status",
-            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 50 * s, Col_Status);
+            ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 58 * s, Col_Status);
 
         if (has_profiling) {
             ImGui::TableSetupColumn("Regs",   ImGuiTableColumnFlags_WidthFixed, 40 * s, Col_Regs);
@@ -1801,7 +1825,7 @@ void Gui::render_results_table() {
                             case Col_Kernel: cmp = ra.kernel_name.compare(rb.kernel_name); break;
                             case Col_Block:  cmp = (int)(ra.block_x * ra.block_y) - (int)(rb.block_x * rb.block_y); break;
                             case Col_Grid:   cmp = (int)(ra.grid_x * ra.grid_y) - (int)(rb.grid_x * rb.grid_y); break;
-                            case Col_Wall:   cmp = (ra.op_ms < rb.op_ms) ? -1 : (ra.op_ms > rb.op_ms) ? 1 : 0; break;
+                            case Col_Op:   cmp = (ra.op_ms < rb.op_ms) ? -1 : (ra.op_ms > rb.op_ms) ? 1 : 0; break;
                             case Col_GPU:    cmp = (ra.gpu_ms < rb.gpu_ms) ? -1 : (ra.gpu_ms > rb.gpu_ms) ? 1 : 0; break;
                             case Col_Perf: {
                                 double va = show_gflops ? ra.gflops : ra.bandwidth_gbps;
@@ -1900,7 +1924,7 @@ void Gui::render_results_table() {
             ImGui::TableNextColumn(); ImGui::Text("%ux%u", k.result.block_x, k.result.block_y);
             ImGui::TableNextColumn(); ImGui::Text("%ux%u", k.result.grid_x, k.result.grid_y);
 
-            // Wall time with min/max/stddev tooltip
+            // Op time with min/max/stddev tooltip
             ImGui::TableNextColumn(); ImGui::Text("%.3f", k.result.op_ms);
             if (ImGui::IsItemHovered() && !k.result.all_times_ms.empty()) {
                 const auto& t = k.result.all_times_ms;
@@ -1987,15 +2011,15 @@ void Gui::render_results_table() {
             // by how close it sits to the tolerance, so an imprecise kernel
             // reads differently from a wrong one.
             // Total error is shown because the table mixes dtypes and this is
-            // the number that is comparable across them. Colour comes from the
-            // arithmetic error, since that is what pass/fail is judged on: a
-            // narrow dtype should look imprecise, not broken.
+            // the number comparable across them. The colour tracks that same
+            // number, so a bigger figure never reads as safer than a smaller
+            // one. Pass/fail is already carried by the row tint and Status.
             ImGui::TableNextColumn();
             if (k.result.accuracy.checked) {
                 const auto& a = k.result.accuracy;
-                if (a.max_rel_error > a.tolerance)
+                if (a.max_total_error > a.tolerance)
                     ImGui::TextColored(UITheme::ERROR_RED, "%.2e", a.max_total_error);
-                else if (a.max_rel_error > a.tolerance * 0.1)
+                else if (a.max_total_error > a.tolerance * 0.1)
                     ImGui::TextColored(UITheme::WARN_YELLOW, "%.2e", a.max_total_error);
                 else
                     ImGui::Text("%.2e", a.max_total_error);
@@ -2456,7 +2480,7 @@ void Gui::benchmark_thread_func(
         if (pr.result.success) {
             char buf[256];
             bool matmul = (cat == "matmul");
-            snprintf(buf, sizeof(buf), "%s: wall=%.3f ms  kernel=%.3f ms  %.2f %s",
+            snprintf(buf, sizeof(buf), "%s: op=%.3f ms  gpu=%.3f ms  %.2f %s",
                 pr.result.kernel_name.c_str(),
                 pr.result.op_ms, pr.result.gpu_ms,
                 matmul ? pr.result.gflops : pr.result.bandwidth_gbps,
@@ -2537,7 +2561,7 @@ void Gui::sweep_thread_func(
             if (pr.result.success) {
                 char buf[256];
                 bool matmul = (cat == "matmul");
-                snprintf(buf, sizeof(buf), "%s [%s]: wall=%.3f ms  %.2f %s",
+                snprintf(buf, sizeof(buf), "%s [%s]: op=%.3f ms  %.2f %s",
                     pr.result.kernel_name.c_str(), size_str.c_str(),
                     pr.result.op_ms,
                     matmul ? pr.result.gflops : pr.result.bandwidth_gbps,
