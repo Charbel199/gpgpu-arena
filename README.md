@@ -113,12 +113,21 @@ precise than the type it writes into, so that is the standard it is held to.
 A kernel whose internals are coarser will miss it, which is the intended
 result: `reduce_fp16_accum_fp16` writes fp32 but sums in half, and fails.
 
-Dtype is part of a kernel's identity rather than a run-time switch, so
-`reduce_fp16_accum_fp16` and `reduce_fp16_accum_fp32` are separate entries in
-the same `reduce` table. Those two differ only in the accumulator type and sit
-about four orders of magnitude apart on error, which is the clearest argument
-for reporting the number at all. Kernel sources live under
-`kernels/<category>/<dtype>/`.
+Dtype is part of a kernel's identity rather than a run-time switch, so the
+fp16 variants are separate entries in the same `reduce` table. At n=4M:
+
+| kernel | in>out | error | |
+| --- | --- | --- | --- |
+| `reduce_fp16_accum_fp16` | fp16>fp32 | 7.8e-03 | accumulates in half, fails |
+| `reduce_fp16_accum_fp32` | fp16>fp32 | 1.5e-07 | accumulates in float |
+| `reduce_fp16_out_fp16` | fp16>fp16 | 5.8e-04 | clean arithmetic, half output |
+
+Sources live under `kernels/<category>/<input dtype>/`. The folder is named for
+what a kernel reads, since that is what shapes the source: reading `__half*`
+rather than `float*` changes the signature and the load path, while the output
+type is a single store at the end. Variants sharing an input type but differing
+in output live in the same file, which is why all three above are in
+`kernels/reduce/fp16/accum.cu`.
 
 ## Known Issues
 

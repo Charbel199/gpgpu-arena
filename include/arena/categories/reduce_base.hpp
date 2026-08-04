@@ -6,6 +6,12 @@
 #include <cmath>
 #include <cstdint>
 
+// Kernel folder layout: kernels/<category>/<input dtype>/. The folder is named
+// for what a kernel reads, because that is what shapes the source: reading
+// __half* rather than float* changes the signature and the load path, while
+// the output type is a single store at the end. Variants sharing an input type
+// but differing in output live in the same file.
+
 namespace arena {
 
 
@@ -76,8 +82,11 @@ public:
             ctx.copy_to_device(d_input_, packed.data(), size_input_);
         }
 
-        float zero = 0.0f;
-        ctx.copy_to_device(d_output_, &zero, sizeof(float));
+        // Zero through the output type, not always as a float: the buffer is
+        // only dtype_size(output_dtype()) bytes, so writing a float into an
+        // fp16 output would run two bytes past the end of the allocation.
+        const uint64_t zero = 0;
+        ctx.copy_to_device(d_output_, &zero, size_output_);
     }
     
     void cleanup(Context& ctx) override {

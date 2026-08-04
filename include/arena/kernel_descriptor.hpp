@@ -13,6 +13,7 @@
 #include <set>
 #include <stdexcept>
 #include <cmath>
+#include <algorithm>
 
 namespace arena {
 
@@ -80,7 +81,15 @@ public:
     virtual double tolerance() const {
         const double per_element = default_tolerance(output_dtype(), compute_mode());
         const int n = accumulation_length() > 1 ? accumulation_length() : 1;
-        return per_element * std::sqrt(static_cast<double>(n));
+        const double scaled = per_element * std::sqrt(static_cast<double>(n));
+
+        // Capped, because the sqrt(n) growth models a reduction carried out
+        // entirely in the output type. Kernels that accumulate in something
+        // wider and only narrow at the end, which is the sensible design, do
+        // far better than that, and for a narrow output the unbounded figure
+        // reaches 15.6 at n=4M. An answer more than 10% off is wrong whatever
+        // the type, so that is the ceiling.
+        return std::min(scaled, 0.10);
     }
 
     // Compare against a CPU reference and report how far off it was. Returning

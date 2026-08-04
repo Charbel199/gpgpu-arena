@@ -69,3 +69,33 @@ extern "C" __global__ void reduce_sum_fp32_accum(
         }
     }
 }
+
+// Same clean float accumulation as reduce_sum_fp32_accum, but the result has
+// to land in a half. That is not just a narrower store: with one output slot
+// and many blocks, the cross-block combine becomes a half atomic, so the
+// global accumulation inherits half's precision no matter how carefully each
+// block summed its own chunk.
+extern "C" __global__ void reduce_sum_fp16_out(
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
+    int n
+) {
+    __shared__ float warp_sums[33];
+
+    float acc = 0.0f;
+    const int stride = blockDim.x * gridDim.x;
+    for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < n; i += stride) {
+        acc += __half2float(input[i]);
+    }
+
+    float sum = warp_reduce_sum(acc);
+    const int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+    if (lane == 0) warp_sums[warp] = sum;
+    __syncthreads();
+
+    if (warp == 0) {
+        sum = (threadIdx.x < (blockDim.x / 32)) ? warp_sums[lane] : 0.0f;
+        sum = warp_reduce_sum(sum);
+        if (lane == 0) atomicAdd(output, __float2half(sum));
+    }
+}

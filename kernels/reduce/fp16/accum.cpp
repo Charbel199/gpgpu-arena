@@ -42,7 +42,20 @@ struct ReduceFp16AccumFp32 : Fp16AccumBase {
     }
 };
 
+struct ReduceFp16OutFp16 : Fp16AccumBase {
+    std::string name() const override { return "reduce_fp16_out_fp16"; }
+    std::string function_name() const override { return "reduce_sum_fp16_out"; }
+    std::string description() const override {
+        return "fp16 input and output, float accumulator per block";
+    }
+
+    // The only kernel here that writes half, so it is the only one held to a
+    // half tolerance rather than an fp32 one.
+    DType output_dtype() const override { return DType::FP16; }
+};
+
 REGISTER_KERNEL(ReduceFp16AccumFp16);
+REGISTER_KERNEL(ReduceFp16OutFp16);
 REGISTER_KERNEL(ReduceFp16AccumFp32);
 
 }
