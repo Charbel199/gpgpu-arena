@@ -36,6 +36,13 @@ services:
   # GUI. Run `xhost +local:docker` on the host first.
   gui:
     <<: *arena
+    # Repeats the anchor's volumes on purpose: a YAML merge key replaces the
+    # whole `volumes` list rather than appending to it, so the X11 socket
+    # cannot simply be added here.
+    volumes:
+      - .:/workspace/gpgpu-arena
+      - kernel-cache:/workspace/gpgpu-arena/build/kernels
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
     environment:
       - DISPLAY=${DISPLAY}
       - NVIDIA_DRIVER_CAPABILITIES=all
