@@ -1,14 +1,15 @@
-#include "arena/compilers/cuda_compiler.hpp"
+#include "arena/compilers/cuda_backend.hpp"
 #include "arena/compilers/compiler_utils.hpp"
+#include <chrono>
 #include <fstream>
 #include <regex>
 
 namespace arena {
 
-CudaCompiler::CudaCompiler(const std::string& kernel_dir)
+CudaBackend::CudaBackend(const std::string& kernel_dir)
     : kernel_dir_(kernel_dir) {}
 
-CompileResult CudaCompiler::compile(const std::string& source_path,
+CompileResult CudaBackend::compile(const std::string& source_path,
                                      const std::string& output_name,
                                      const std::string& cache_dir) {
     auto full_source = kernel_dir_ + "/" + source_path;
@@ -19,7 +20,10 @@ CompileResult CudaCompiler::compile(const std::string& source_path,
         " -o " + cubin_path + " " + full_source +
         " 2>&1";
 
+    auto nvcc_t0 = std::chrono::steady_clock::now();
     run_command(cmd, "nvcc for " + source_path);
+    const float nvcc_ms = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - nvcc_t0).count();
 
     // parse kernel name from source: find 'extern "C" __global__ void <name>('
     std::string kernel_name;
@@ -51,6 +55,8 @@ CompileResult CudaCompiler::compile(const std::string& source_path,
     result.module_path = cubin_path;
     result.kernel_name = kernel_name;
     result.num_params = num_params;
+    result.compile_ms = nvcc_ms;   // for nvcc the subprocess is the compiler
+    result.import_ms = 0.0f;
     return result;
 }
 

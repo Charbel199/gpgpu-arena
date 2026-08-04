@@ -1,6 +1,6 @@
 #pragma once
 
-#include "arena/compilers/compiler.hpp"
+#include "arena/compilers/backend.hpp"
 #include <nlohmann/json.hpp>
 #include <string>
 

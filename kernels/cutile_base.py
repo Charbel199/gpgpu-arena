@@ -2,11 +2,14 @@ import argparse
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
+_import_t0 = time.perf_counter()
 import cupy as cp
 import cuda.tile as ct
 from cuda.tile._compile import compile_tile, CompilerOptions, default_tile_context
+_IMPORT_MS = (time.perf_counter() - _import_t0) * 1000.0
 
 
 def compile_kernel(kernel_fn, dummy_args):
@@ -39,7 +42,9 @@ def main(kernel_fn, dummy_args, constants=None):
 
     try:
         print(f"[cutile] Compiling {args.output_name} ...", file=sys.stderr)
+        _compile_t0 = time.perf_counter()
         kernel_name, cubin_path, block_dim = compile_kernel(kernel_fn, dummy_args)
+        compile_ms = (time.perf_counter() - _compile_t0) * 1000.0
     except Exception as e:
         print(f"[cutile] Compilation failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -65,4 +70,6 @@ def main(kernel_fn, dummy_args, constants=None):
         "num_params": num_params,
         "block_dim": block_dim,
         "constants": constants or {},
+        "import_ms": _IMPORT_MS,
+        "compile_ms": compile_ms,
     }))

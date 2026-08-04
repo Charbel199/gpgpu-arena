@@ -42,6 +42,21 @@ FetchContent_Declare(json
 FetchContent_MakeAvailable(json)
 message(STATUS "[deps]   nlohmann/json v3.11.3")
 
+# --- doctest (unit tests) ---
+
+option(BUILD_TESTS "Build unit tests" ON)
+
+if(BUILD_TESTS)
+    # v2.5.3 or newer required: earlier tags declare
+    # cmake_minimum_required(VERSION 3.0), which CMake 4.x rejects.
+    FetchContent_Declare(doctest
+        GIT_REPOSITORY https://github.com/doctest/doctest.git
+        GIT_TAG v2.5.3)
+    FetchContent_MakeAvailable(doctest)
+    message(STATUS "[deps]   doctest v2.5.3")
+    enable_testing()
+endif()
+
 # --- GUI (ImGui + ImPlot) ---
 
 option(BUILD_GUI "Build with Dear ImGui GUI" ON)
@@ -102,18 +117,22 @@ file(GLOB CUDA_DESCRIPTORS "${CMAKE_SOURCE_DIR}/kernels/*/cub_*.cu" "${CMAKE_SOU
 
 set(ARENA_SOURCES
     src/main.cpp
-    src/arena/context.cpp
-    src/arena/kernel_loader.cpp
+    src/arena/device/context.cpp
+    src/arena/device/kernel_loader.cpp
     src/arena/compilers/compiler_utils.cpp
-    src/arena/compilers/cuda_compiler.cpp
-    src/arena/compilers/triton_compiler.cpp
-    src/arena/compilers/cutile_compiler.cpp
-    src/arena/compilers/warp_compiler.cpp
+    src/arena/compilers/cuda_backend.cpp
+    src/arena/compilers/triton_backend.cpp
+    src/arena/compilers/cutile_backend.cpp
+    src/arena/compilers/warp_backend.cpp
     src/arena/compilers/kernel_compiler.cpp
-    src/arena/profiler.cpp
-    src/arena/benchmark.cpp
+    src/arena/measurement/profiler.cpp
+    src/arena/measurement/power.cpp
+    src/arena/measurement/measure.cpp
+    src/arena/measurement/measure_policy.cpp
+    src/arena/cli_args.cpp
+    src/arena/result_io.cpp
     src/arena/runner.cpp
-    src/frontend/tui.cpp
+    src/frontend/cli.cpp
     ${KERNEL_DESCRIPTORS}
     ${CUDA_DESCRIPTORS}
 )
@@ -133,7 +152,7 @@ else()
 endif()
 
 target_include_directories(arena PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::nvtx3 spdlog::spdlog nlohmann_json::nlohmann_json)
+target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::nvml CUDA::nvtx3 spdlog::spdlog nlohmann_json::nlohmann_json)
 target_compile_definitions(arena PRIVATE
     ARENA_KERNEL_DIR="${CMAKE_SOURCE_DIR}/kernels"
     ARENA_PYTHON="${Python3_EXECUTABLE}"
@@ -176,5 +195,10 @@ message(STATUS "  Build type:    ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ compiler:  ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  CUDA compiler: ${CMAKE_CUDA_COMPILER_ID} ${CMAKE_CUDA_COMPILER_VERSION}")
 message(STATUS "  GUI:           ${BUILD_GUI}")
+message(STATUS "  Tests:         ${BUILD_TESTS}")
 message(STATUS "  Kernel dir:    ${CMAKE_SOURCE_DIR}/kernels")
 message(STATUS "")
+
+if(BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

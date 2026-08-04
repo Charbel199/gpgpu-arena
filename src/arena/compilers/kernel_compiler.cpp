@@ -15,7 +15,7 @@ KernelCompiler::KernelCompiler(const std::string& cache_dir)
     : cache_dir_(cache_dir) {}
 
 void KernelCompiler::register_compiler(const std::string& extension,
-                                        std::unique_ptr<Compiler> compiler) {
+                                        std::unique_ptr<CompilerBackend> compiler) {
     compilers_[extension] = std::move(compiler);
 }
 
@@ -26,7 +26,9 @@ CompileResult KernelCompiler::compile(const std::string& source_path) {
         spdlog::get("compiler")->debug("{}: in-memory cache hit", source_path);
         auto hit = mem_it->second;
         hit.cache_hit = true;
-        hit.compile_time_ms = 0.0f;
+        hit.compile_ms = 0.0f;
+        hit.import_ms  = 0.0f;
+        hit.invoke_ms  = 0.0f;
         return hit;
     }
 
@@ -46,7 +48,9 @@ CompileResult KernelCompiler::compile(const std::string& source_path) {
         log->info("{}: using cached {} (kernel={})",
             source_path, result.module_path, result.kernel_name);
         result.cache_hit = true;
-        result.compile_time_ms = 0.0f;
+        result.compile_ms = 0.0f;
+        result.import_ms  = 0.0f;
+        result.invoke_ms  = 0.0f;
         cache_[source_path] = result;
         return result;
     }
@@ -57,7 +61,7 @@ CompileResult KernelCompiler::compile(const std::string& source_path) {
     result = comp_it->second->compile(source_path, output_name, cache_dir_);
     auto t1 = std::chrono::high_resolution_clock::now();
     result.cache_hit = false;
-    result.compile_time_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
+    result.invoke_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
 
     log->info("{}: compiled -> {} (kernel={})",
         source_path, result.module_path, result.kernel_name);
@@ -126,6 +130,8 @@ void KernelCompiler::save_disk_cache(const std::string& source_path,
     j["num_params"]    = result.num_params;
     j["block_dim"]     = result.block_dim;
     j["constants"]     = result.constants;
+    j["compile_ms"]    = result.compile_ms;
+    j["import_ms"]     = result.import_ms;
 
     if (fs::exists(source_full)) {
         j["source_full_path"] = source_full;

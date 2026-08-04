@@ -13,14 +13,18 @@ struct CompileResult {
     int num_params = 3;
     int block_dim = 0;          // cuTile: threads per block (0 = not set)
     std::map<std::string, int> constants;
-    bool cache_hit = false;
-    float compile_time_ms = 0.0f;
+    bool  cache_hit  = false;
+    float compile_ms = 0.0f;   // the compiler's own time, self-reported
+    float import_ms  = 0.0f;   // Python import cost (DSL compilers only)
+    float invoke_ms  = 0.0f;   // full subprocess wall time as seen from C++
 };
 
-// base class each DSL implements its own compilation logic
-class Compiler {
+// One backend per DSL. KernelCompiler owns the set of these and picks one by
+// file extension; a backend only has to turn a source file into a cubin plus
+// metadata. Caching, output naming and timing all live in KernelCompiler.
+class CompilerBackend {
 public:
-    virtual ~Compiler() = default;
+    virtual ~CompilerBackend() = default;
     virtual CompileResult compile(const std::string& source_path,
                                   const std::string& output_name,
                                   const std::string& cache_dir) = 0;

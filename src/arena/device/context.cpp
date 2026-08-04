@@ -1,5 +1,5 @@
-#include "arena/context.hpp"
-#include "arena/utils.hpp"
+#include "arena/device/context.hpp"
+#include "arena/device/utils.hpp"
 #include <spdlog/spdlog.h>
 #include <cuda.h>
 
@@ -89,6 +89,11 @@ void Context::reset() {
     // clear device-level error state
     cuDevicePrimaryCtxReset(device_);
 
+    // every device allocation died with the context
+    allocation_sizes_.clear();
+    current_bytes_ = 0;
+    peak_bytes_ = 0;
+
     CUresult result;
 #if CUDA_VERSION >= 13000
     CUctxCreateParams params = {};
@@ -102,19 +107,44 @@ void Context::reset() {
         cuGetErrorString(result, &err_str);
         log->error("Context reset failed: {} - subsequent kernels will fail", err_str ? err_str : "unknown");
         context_ = nullptr;
+        return;
+    }
+
+    // The caller (the benchmark worker thread) pushed the OLD context before
+    // its work loop. That context is now destroyed, so without rebinding here
+    // every subsequent kernel in the batch would run against a dead context.
+    CUresult bind = cuCtxSetCurrent(context_);
+    if (bind != CUDA_SUCCESS) {
+        const char* err_str;
+        cuGetErrorString(bind, &err_str);
+        log->error("Failed to bind new context to calling thread: {}",
+            err_str ? err_str : "unknown");
+    } else {
+        log->info("Context reset complete, rebound to calling thread");
     }
 }
 
 CUdeviceptr Context::allocate(size_t bytes) {
     CUdeviceptr ptr;
     check_cuda(cuMemAlloc(&ptr, bytes), "cuMemAlloc");
+
+    allocation_sizes_[ptr] = bytes;
+    current_bytes_ += bytes;
+    if (current_bytes_ > peak_bytes_) peak_bytes_ = current_bytes_;
+
     return ptr;
 }
 
 void Context::free(CUdeviceptr ptr) {
-    if (ptr) {
-        check_cuda(cuMemFree(ptr), "cuMemFree");
+    if (!ptr) return;
+
+    auto it = allocation_sizes_.find(ptr);
+    if (it != allocation_sizes_.end()) {
+        current_bytes_ -= it->second;
+        allocation_sizes_.erase(it);
     }
+
+    check_cuda(cuMemFree(ptr), "cuMemFree");
 }
 
 void Context::copy_to_device(CUdeviceptr dst, const void* src, size_t bytes) {

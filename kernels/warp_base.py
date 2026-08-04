@@ -7,11 +7,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import time
+
+_import_t0 = time.perf_counter()
 import warp as wp
 
 # init warp BEFORE any @wp.kernel decorators run (avoids recursion)
 wp.config.cuda_output = "cubin"
 wp.init()
+_IMPORT_MS = (time.perf_counter() - _import_t0) * 1000.0
 
 
 def count_cubin_params(cubin_path):
@@ -47,7 +51,9 @@ def main(kernel_fn, constants=None):
 
     try:
         print(f"[warp] Compiling {args.output_name} ...", file=sys.stderr)
+        _compile_t0 = time.perf_counter()
         cubin_src, kernel_name = compile_kernel(kernel_fn)
+        compile_ms = (time.perf_counter() - _compile_t0) * 1000.0
     except Exception as e:
         print(f"[warp] Compilation failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -71,4 +77,6 @@ def main(kernel_fn, constants=None):
         "shared_memory": 0,
         "num_params": num_params,
         "constants": constants or {},
+        "import_ms": _IMPORT_MS,
+        "compile_ms": compile_ms,
     }))

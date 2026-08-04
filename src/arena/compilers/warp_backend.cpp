@@ -1,12 +1,12 @@
-#include "arena/compilers/warp_compiler.hpp"
+#include "arena/compilers/warp_backend.hpp"
 #include "arena/compilers/compiler_utils.hpp"
 
 namespace arena {
 
-WarpCompiler::WarpCompiler(const std::string& kernel_dir)
+WarpBackend::WarpBackend(const std::string& kernel_dir)
     : kernel_dir_(kernel_dir) {}
 
-CompileResult WarpCompiler::compile(const std::string& source_path,
+CompileResult WarpBackend::compile(const std::string& source_path,
                                      const std::string& output_name,
                                      const std::string& cache_dir) {
     std::string cmd =

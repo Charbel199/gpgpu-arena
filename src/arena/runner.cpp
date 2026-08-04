@@ -1,15 +1,16 @@
 #include "arena/runner.hpp"
-#include "arena/utils.hpp"
+#include "arena/device/utils.hpp"
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <chrono>
 #include <nvtx3/nvToolsExt.h>
 
 namespace arena {
 
 Runner::Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
-               Benchmark& benchmark, Profiler& profiler)
+               Profiler& profiler, PowerMonitor& power)
     : ctx_(ctx), loader_(loader), compiler_(compiler),
-      benchmark_(benchmark), profiler_(profiler) {}
+      profiler_(profiler), power_(power) {}
 
 RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     RunResult result;
@@ -26,19 +27,29 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         // runtime compilation for DSL kernels
         if (desc.needs_compilation()) {
             auto cr = compiler_.compile(desc.source_path());
-            result.cache_hit = cr.cache_hit;
-            result.compile_time_ms = cr.compile_time_ms;
+            result.cache_hit  = cr.cache_hit;
+            result.compile_ms = cr.compile_ms;
+            result.import_ms  = cr.import_ms;
+            result.invoke_ms  = cr.invoke_ms;
             desc.set_compile_result(cr);
         }
 
+        // --- Tier 2: module load ---
         CUmodule module = nullptr;
         CUfunction func = nullptr;
         if (desc.uses_module()) {
+            auto load_t0 = std::chrono::steady_clock::now();
             module = loader_.load_module(desc.module_path());
             func = loader_.get_function(module, desc.function_name());
+            result.module_load_ms = std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - load_t0).count();
         }
+
+        // --- allocation, with memory accounting ---
+        ctx_.reset_peak();
         desc.allocate(ctx_);
         desc.initialize(ctx_);
+        result.peak_device_bytes = ctx_.peak_bytes();
 
         auto launch_config = desc.get_launch_config();
         log->debug("{} launch config: grid({},{},{}) block({},{},{}) shmem={}B",
@@ -64,79 +75,134 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             }
         };
 
-        log->info("  warmup: {} runs ...", config.warmup_runs);
-        for (int i = 0; i < config.warmup_runs; i++) {
-            launch_kernel();
-        }
-        check_cuda(cuCtxSynchronize(), "warmup sync");
-        desc.cleanup(ctx_);
-        desc.allocate(ctx_);
-        desc.initialize(ctx_);
+        auto reset_fn = [&]() { desc.initialize(ctx_); };
 
+        result.sm_clock_start_mhz = power_.sm_clock_mhz();
+
+        // --- Tier 2: warmup / cold start ---
+        auto warm = measure::warmup(launch_kernel, reset_fn, config);
+        result.warmup_iterations = warm.iterations;
+        result.warmup_converged  = warm.converged;
+        result.first_launch_ms   = warm.first_launch_ms;
+        log->info("  warmup: {} iterations, {}", warm.iterations,
+            warm.converged ? "converged" : "DID NOT CONVERGE");
+
+        // --- Tier 1: operation timing ---
         log->info("  benchmark: {} runs ...", config.number_of_runs);
-
         nvtxRangePushA(("BENCHMARK: " + result.kernel_name).c_str());
-        auto bench_result = benchmark_.run(launch_kernel, config.number_of_runs,
-            [&]() { desc.initialize(ctx_); }); // TODO: too complicated, why not simply pass in the DESCRIPTOR + LOADER maybe and internally clean up
+        auto bench_result = measure::time_operation(launch_kernel, reset_fn,
+                                                    config.number_of_runs);
         nvtxRangePop();
 
-        result.elapsed_ms = bench_result.median_ms;
+        result.op_ms = bench_result.median_ms;
         result.all_times_ms = bench_result.all_times_ms;
 
-        // GPU-only kernel time via Activity API (single run, sums all sub-kernels)
-        desc.initialize(ctx_);
+        // --- Tier 1: SASS breakdown ---
+        reset_fn();
         auto activity = profiler_.collect_activity(launch_kernel);
-        result.kernel_ms = activity.kernel_time_ms;
+        result.gpu_ms = activity.kernel_time_ms;
         result.sub_kernels = activity.sub_kernels;
+        result.launch_count = static_cast<int>(activity.sub_kernels.size());
+        result.overhead_ms = std::max(0.0f, result.op_ms - result.gpu_ms);
+        result.counters.regs_per_thread = activity.registers_per_thread;
+        result.counters.shared_mem_bytes = activity.shared_memory_per_block;
         result.uses_module = desc.uses_module();
 
-        double flops = desc.calculate_flops();
-        double bytes = desc.calculate_bytes_accessed();
-        result.gflops = (flops / (result.elapsed_ms / 1000.0)) / 1e9;
-        result.bandwidth_gbps = (bytes / (result.elapsed_ms / 1000.0)) / 1e9;
+        // --- throughput: op_ms denominator ---
+        result.gflops = measure::rate_per_sec(
+            desc.calculate_flops(), result.op_ms) / 1e9;
+        result.bandwidth_gbps = measure::rate_per_sec(
+            desc.calculate_bytes_accessed(), result.op_ms) / 1e9;
 
-        log->info("  result: wall={:.3f} ms  kernel={:.3f} ms  {:.2f} GFLOPS  {:.2f} GB/s",
-            result.elapsed_ms, result.kernel_ms, result.gflops, result.bandwidth_gbps);
+        log->info("  result: op={:.3f} ms  gpu={:.3f} ms  overhead={:.3f} ms  "
+                  "{:.2f} GFLOPS  {:.2f} GB/s",
+            result.op_ms, result.gpu_ms, result.overhead_ms,
+            result.gflops, result.bandwidth_gbps);
 
         // profile
         if (config.collect_metrics) {
             log->info("  profiling: collecting hardware counters ...");
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
-            desc.initialize(ctx_);
+            auto mv = profiler_.collect_counters(launch_kernel, reset_fn);
+            nvtxRangePop();
 
-            auto profile_result = profiler_.profile(launch_kernel,
-                [&]() { desc.initialize(ctx_); });
-
-            result.registers_per_thread = profile_result.registers_per_thread;
-            result.shared_memory_bytes = profile_result.shared_memory_per_block;
-
-            auto& mv = profile_result.metric_values;
+            // Counters are collected for a single launch replay, so the
+            // matching interval is single-launch SASS time, not the whole
+            // operation. Dividing by op_ms would mix a single-launch
+            // numerator with a multi-launch denominator.
             if (mv.count(metric::OCCUPANCY)) {
-                result.achieved_occupancy = mv.at(metric::OCCUPANCY) / 100.0;
+                result.counters.occupancy = mv.at(metric::OCCUPANCY) / 100.0;
             }
             if (mv.count(metric::DRAM_READ)) {
-                result.dram_read_gbps = (mv.at(metric::DRAM_READ) / (result.elapsed_ms / 1000.0)) / 1e9;
+                result.counters.dram_read_gbps = measure::rate_per_sec(
+                    mv.at(metric::DRAM_READ), result.gpu_ms) / 1e9;
             }
             if (mv.count(metric::DRAM_WRITE)) {
-                result.dram_write_gbps = (mv.at(metric::DRAM_WRITE) / (result.elapsed_ms / 1000.0)) / 1e9;
+                result.counters.dram_write_gbps = measure::rate_per_sec(
+                    mv.at(metric::DRAM_WRITE), result.gpu_ms) / 1e9;
             }
             if (mv.count(metric::IPC)) {
-                result.ipc = mv.at(metric::IPC);
+                result.counters.ipc = mv.at(metric::IPC);
             }
+            result.counters.available = true;
 
             log->info("  profiling: regs={} shmem={}B occupancy={:.1f}% DRAM(R={:.2f} W={:.2f} GB/s) IPC={:.2f}",
-                result.registers_per_thread, result.shared_memory_bytes,
-                result.achieved_occupancy * 100.0,
-                result.dram_read_gbps, result.dram_write_gbps, result.ipc);
-            nvtxRangePop();
+                result.counters.regs_per_thread, result.counters.shared_mem_bytes,
+                result.counters.occupancy * 100.0,
+                result.counters.dram_read_gbps, result.counters.dram_write_gbps, result.counters.ipc);
         }
 
+        // --- verification gets its own clean run ---
+        // Independent of which profiling passes ran, so a multi-pass
+        // UserReplay counter collection cannot cause a spurious failure.
+        reset_fn();
+        launch_kernel();
+        check_cuda(cuCtxSynchronize(), "verify sync");
         result.verified = desc.verify(ctx_);
         if (result.verified) {
             log->info("  verify: passed");
         } else {
             log->warn("  verify: FAILED");
         }
+
+        // --- energy: LAST, because it dirties the output buffer ---
+        if (config.collect_energy && power_.available()) {
+            log->info("  energy: sustained load for {:.0f} ms ...",
+                config.energy_window_ms);
+            auto e = measure::measure_energy(launch_kernel, power_,
+                                             config.energy_window_ms);
+            result.energy.available  = e.available;
+            result.energy.mj_per_op  = e.mj_per_op;
+            result.energy.avg_watts  = e.avg_watts;
+            result.energy.iterations = e.iterations;
+
+            if (e.available) {
+                // Rough device-busy estimate: isolated gpu_ms times the
+                // iteration count, over the actual window. It is only an
+                // estimate -- gpu_ms comes from a single cold activity run, so
+                // values above 100% mean sustained throughput beat that
+                // sample. Values well below 100% are the actionable case: the
+                // host could not issue launches fast enough, so the GPU idled
+                // and mj_per_op is charged that idle draw.
+                const double busy_pct = (e.total_ms > 0.0f)
+                    ? (result.gpu_ms * e.iterations) / e.total_ms * 100.0 : 0.0;
+                log->info("  energy: {:.4f} mJ/op  {:.1f} W  ({} iterations, "
+                          "~{:.0f}% device-busy)",
+                    e.mj_per_op, e.avg_watts, e.iterations, busy_pct);
+                if (busy_pct < 80.0) {
+                    log->warn("  energy: launch-bound (~{:.0f}% device-busy) - "
+                              "mj_per_op includes idle draw, treat as an upper bound",
+                              busy_pct);
+                }
+            } else {
+                log->warn("  energy: counter did not advance, try a longer window");
+            }
+        }
+
+        result.sm_clock_end_mhz = power_.sm_clock_mhz();
+        log->debug("  clocks: {} -> {} MHz",
+            result.sm_clock_start_mhz, result.sm_clock_end_mhz);
+
         desc.cleanup(ctx_);
         result.success = true;
 

@@ -1,4 +1,4 @@
-#include "arena/kernels/scan_base.hpp"
+#include "arena/categories/scan_base.hpp"
 
 namespace arena {
 

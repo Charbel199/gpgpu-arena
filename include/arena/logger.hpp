@@ -6,7 +6,7 @@
 
 namespace arena {
 
-// shared handle to the stdout sink so the TUI can mute it while running.
+// shared handle to the stdout sink so a full-screen frontend can mute it.
 inline std::shared_ptr<spdlog::sinks::stdout_color_sink_mt>& console_sink() {
     static std::shared_ptr<spdlog::sinks::stdout_color_sink_mt> s;
     return s;
@@ -18,9 +18,13 @@ inline void set_console_logging(bool enabled) {
     }
 }
 
-inline void init_logging() {
+// console_logging=false mutes stdout from the very first line. Headless mode
+// needs this: init_logging() logs on its own way out, so muting afterwards is
+// already too late to keep stdout clean for a machine reader.
+inline void init_logging(bool console_logging = true) {
     auto stdout_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     stdout_sink->set_pattern("[%H:%M:%S] [%^%l%$] [%n] %v");
+    if (!console_logging) stdout_sink->set_level(spdlog::level::off);
     console_sink() = stdout_sink;
 
     auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("arena.log", true);
@@ -39,6 +43,7 @@ inline void init_logging() {
     make_logger("loader");
     make_logger("compiler");
     make_logger("profiler");
+    make_logger("power");
     make_logger("benchmark");
     make_logger("runner");
     make_logger("verify");

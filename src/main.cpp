@@ -1,18 +1,18 @@
 #include <iostream>
 #include <cstring>
 
-#include "arena/context.hpp"
-#include "arena/kernel_loader.hpp"
+#include "arena/device/context.hpp"
+#include "arena/device/kernel_loader.hpp"
 #include "arena/compilers/kernel_compiler.hpp"
-#include "arena/compilers/cuda_compiler.hpp"
-#include "arena/compilers/triton_compiler.hpp"
-#include "arena/compilers/cutile_compiler.hpp"
-#include "arena/compilers/warp_compiler.hpp"
-#include "arena/benchmark.hpp"
-#include "arena/profiler.hpp"
+#include "arena/compilers/cuda_backend.hpp"
+#include "arena/compilers/triton_backend.hpp"
+#include "arena/compilers/cutile_backend.hpp"
+#include "arena/compilers/warp_backend.hpp"
+#include "arena/measurement/profiler.hpp"
+#include "arena/measurement/power.hpp"
 #include "arena/runner.hpp"
 #include "arena/logger.hpp"
-#include "frontend/tui.hpp"
+#include "frontend/cli.hpp"
 
 #ifdef ARENA_GUI_ENABLED
 #include "frontend/gui.hpp"
@@ -20,43 +20,38 @@
 
 void print_usage(const char* program) {
     std::cout << "Usage: " << program << " [OPTIONS]\n\n"
-              << "Options:\n"
-              << "  --tui       Run the terminal UI (alias: --cli)\n"
 #ifdef ARENA_GUI_ENABLED
-              << "  --gui       Run with graphical interface (default)\n"
+              << "  (no options)              Launch the graphical interface\n"
+              << "  --gui                     Launch the graphical interface\n"
 #endif
-              << "  --help      Show this help message\n";
+              << "  --help, -h                Show this help message\n\n";
+    frontend::print_cli_usage(program);
 }
 
 int main(int argc, char** argv) {
-    bool use_gui = false;
-    bool use_tui = false;
-
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
-        } else if (strcmp(argv[i], "--cli") == 0 || strcmp(argv[i], "--tui") == 0) {
-            use_tui = true;
-        } else if (strcmp(argv[i], "--gui") == 0) {
-            use_gui = true;
         }
     }
 
-#ifdef ARENA_GUI_ENABLED
-    if (!use_tui && !use_gui) {
-        use_gui = true;
+    const bool cli_mode = frontend::wants_cli(argc, argv);
+
+#ifndef ARENA_GUI_ENABLED
+    if (!cli_mode) {
+        std::cerr << "Error: this binary was built with BUILD_GUI=OFF.\n"
+                  << "Use headless mode (--list / --run), or rebuild with "
+                     "-DBUILD_GUI=ON for the GUI.\n\n";
+        frontend::print_cli_usage(argv[0]);
+        return 3;
     }
-#else
-    use_tui = true;
 #endif
 
-    if (use_gui && use_tui) {
-        std::cerr << "Error: Cannot use both --tui and --gui\n";
-        return 1;
-    }
-
-    arena::init_logging();
+    // When the payload goes to stdout, stdout must carry the payload alone.
+    // The file sink keeps the full log either way.
+    const bool quiet = frontend::cli_writes_to_stdout(argc, argv);
+    arena::init_logging(!quiet);
 
     try {
         spdlog::info("Initializing CUDA context ...");
@@ -66,17 +61,17 @@ int main(int argc, char** argv) {
         arena::KernelLoader loader;
         arena::KernelCompiler compiler("kernels");
         compiler.register_compiler(".cu",
-            std::make_unique<arena::CudaCompiler>(ARENA_KERNEL_DIR));
+            std::make_unique<arena::CudaBackend>(ARENA_KERNEL_DIR));
         compiler.register_compiler(".triton.py",
-            std::make_unique<arena::TritonCompiler>(ARENA_KERNEL_DIR));
+            std::make_unique<arena::TritonBackend>(ARENA_KERNEL_DIR));
         compiler.register_compiler(".cutile.py",
-            std::make_unique<arena::CuTileCompiler>(ARENA_KERNEL_DIR));
+            std::make_unique<arena::CuTileBackend>(ARENA_KERNEL_DIR));
         compiler.register_compiler(".warp.py",
-            std::make_unique<arena::WarpCompiler>(ARENA_KERNEL_DIR));
+            std::make_unique<arena::WarpBackend>(ARENA_KERNEL_DIR));
 
-        arena::Benchmark benchmark;
         arena::Profiler profiler;
-        arena::Runner runner(ctx, loader, compiler, benchmark, profiler);
+        arena::PowerMonitor power(0);
+        arena::Runner runner(ctx, loader, compiler, profiler, power);
 
         auto categories = runner.get_categories();
         auto all_kernels = runner.get_all_kernels();
@@ -87,17 +82,19 @@ int main(int argc, char** argv) {
             spdlog::info("  {} - {} kernels", cat, kernels.size());
         }
 
-        spdlog::info("Starting {} mode", use_gui ? "GUI" : "TUI");
+        if (cli_mode) {
+            return frontend::run_cli(runner, argc, argv);
+        }
 
 #ifdef ARENA_GUI_ENABLED
-        if (use_gui) {
-            return frontend::run_gui(runner);
-        }
+        spdlog::info("Starting GUI mode");
+        return frontend::run_gui(runner);
+#else
+        return 3;
 #endif
-        return frontend::run_tui(runner);
 
     } catch (const std::exception& e) {
         spdlog::error("Fatal: {}", e.what());
-        return 1;
+        return 2;
     }
 }

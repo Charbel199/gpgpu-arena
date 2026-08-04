@@ -1,5 +1,5 @@
-#include "arena/profiler.hpp"
-#include "arena/utils.hpp"
+#include "arena/measurement/profiler.hpp"
+#include "arena/device/utils.hpp"
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <unordered_map>
@@ -357,22 +357,5 @@ std::map<std::string, double> Profiler::collect_counters(
     return result;
 }
 
-
-Profiler::ProfileResult Profiler::profile(
-    KernelLaunchFn launch_fn, KernelLaunchFn reset_fn)
-{
-    auto log = spdlog::get("profiler");
-
-    // Step 1: Activity API (registers + shared memory)
-    log->debug("Step 1/2: Collecting kernel metadata via Activity API ...");
-    if (reset_fn) reset_fn();
-    auto result = collect_activity(launch_fn);
-
-    // Step 2: Range Profiler (hardware counters)
-    log->debug("Step 2/2: Collecting hardware counters via Range Profiler ...");
-    result.metric_values = collect_counters(launch_fn, reset_fn);
-
-    return result;
-}
 
 }

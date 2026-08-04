@@ -1,12 +1,12 @@
-#include "arena/compilers/cutile_compiler.hpp"
+#include "arena/compilers/cutile_backend.hpp"
 #include "arena/compilers/compiler_utils.hpp"
 
 namespace arena {
 
-CuTileCompiler::CuTileCompiler(const std::string& kernel_dir)
+CuTileBackend::CuTileBackend(const std::string& kernel_dir)
     : kernel_dir_(kernel_dir) {}
 
-CompileResult CuTileCompiler::compile(const std::string& source_path,
+CompileResult CuTileBackend::compile(const std::string& source_path,
                                        const std::string& output_name,
                                        const std::string& cache_dir) {
     std::string cmd =

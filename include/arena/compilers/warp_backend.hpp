@@ -1,14 +1,14 @@
 #pragma once
 
-#include "arena/compilers/compiler.hpp"
+#include "arena/compilers/backend.hpp"
 #include <string>
 
 namespace arena {
 
-// CUDA C++ compiler - nvcc -cubin, parses kernel name from source
-class CudaCompiler : public Compiler {
+// NVIDIA Warp compiler produces cubin via wp.Module
+class WarpBackend : public CompilerBackend {
 public:
-    explicit CudaCompiler(const std::string& kernel_dir);
+    explicit WarpBackend(const std::string& kernel_dir);
     CompileResult compile(const std::string& source_path,
                           const std::string& output_name,
                           const std::string& cache_dir) override;

@@ -1,4 +1,4 @@
-#include "arena/kernels/matmul_base.hpp"
+#include "arena/categories/matmul_base.hpp"
 
 namespace arena {
 

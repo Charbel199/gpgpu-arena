@@ -9,41 +9,75 @@ A CUDA kernel benchmarking platform. Write GPU kernels in CUDA C++, Triton, cuTi
 Requires Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
 
 ```bash
-# GUI mode (OpenGL window)
 xhost +local:docker
 docker compose up gui
-
-# TUI mode (full-screen terminal UI, no X required)
-docker compose up arena
 ```
 
-## Terminal UI
+## Headless Mode
 
-The TUI (`./arena --tui` or `--cli`) is a full-screen terminal interface with
-near-parity to the GUI: sortable results table, kernel list with checkboxes,
-KPI cards, wall-vs-GPU bars, profiling comparison, roofline, sub-kernel
-timeline, and a per-kernel detail panel. It uses pure ANSI escape codes (no
-ncurses dependency) and works over SSH. Best at 120x40 or larger; minimum 80x20.
+For scripting, CI, and agentic workflows. Writes JSON to stdout by default,
+with console logging suppressed so the payload is machine-readable:
 
-Keybindings (press `?` inside the TUI for the full list):
+```bash
+./arena --list                                    # kernels + categories as JSON
+./arena --run reduce -p n=4000000 --runs 20       # run a category
+./arena --run cub_reduce -p n=1000000 --profile   # one kernel, with counters
+./arena --run all --energy -o results.csv --format csv
+```
 
-| Keys | Action |
+Exit codes are load-bearing, so callers can branch without parsing output:
+
+| Code | Meaning |
 | --- | --- |
-| `j`/`k` or `↑`/`↓` | navigate kernel list (`g`/`G` for top/bottom) |
-| `Tab` / `1`-`9` | switch category |
-| `Space` | toggle kernel selection (checkbox) |
-| `Enter` | focus kernel for the detail panel |
-| `a` / `A` | select all / none |
-| `r` / `s` | run selected / sweep across preset sizes |
-| `c` | cancel a running benchmark |
-| `p` | toggle hardware profiling (occupancy/IPC/DRAM) |
-| `v` or `←`/`→` | cycle visualization panel |
-| `o` / `O` | cycle sort column / reverse direction |
-| `[` `]` `{` `}` | decrease / increase problem size (1.25x / 2x) |
-| `-` `+` `,` `.` | warmup ± / runs ± |
-| `e` / `R` / `C` | export CSV / reset results / clear compile cache |
-| `l` | toggle log panel |
-| `q` | quit |
+| 0 | All kernels ran and verified |
+| 1 | Ran, but at least one kernel failed verification |
+| 2 | At least one kernel errored (compile, launch, or device failure) |
+| 3 | Usage error |
+
+JSON output carries environment provenance (device, driver, toolkit, clocks)
+alongside the results, so a result file records what produced it. Run
+`./arena --help` for the full flag list.
+
+`-DBUILD_GUI=OFF` builds a headless-only binary with no GLFW/OpenGL
+dependency.
+
+## Measurement Model
+
+Timing is reported in three tiers, which are **not** comparable with each
+other and are never summed:
+
+| Tier | Fields | Meaning |
+| --- | --- | --- |
+| Per-invocation | `op_ms`, `gpu_ms`, `overhead_ms`, `launch_count` | Whole operation vs. summed SASS. The gap is launch latency and inter-kernel sync. |
+| Per-process | `module_load_ms`, `first_launch_ms` | Cold-start cost, paid once per process. |
+| Build | `compile_ms`, `import_ms`, `invoke_ms` | One-time, cached to disk. `compile_ms` is the DSL compiler's own time, separate from Python interpreter startup. |
+
+Throughput (GFLOPS, GB/s) divides by `op_ms`. Hardware counters divide by
+`gpu_ms`, because the range profiler samples a single launch replay.
+
+Warmup runs until timings stabilise rather than a fixed count, using median
+drift between consecutive windows — a sliding-variance test reports a
+steadily boosting clock as stable. Results record `warmup_converged` so you
+can tell when a number was measured on an unsettled clock.
+
+Energy uses NVML over a sustained back-to-back window, since NVML updates far
+more slowly than a single kernel runs. It reports whole-board energy, so
+`mj_per_op` is an upper bound on a kernel's marginal cost; the runner logs a
+device-busy estimate and warns when the loop is launch-bound.
+
+## Known Issues
+
+- **cuTile kernels fail to compile** against current `cuda-tile` releases:
+  `'ndarray' object has no attribute 'symbol'`. `cutile_base.py` passes cupy
+  ndarrays as dummy args to `compile_tile`, which newer versions no longer
+  accept. Reproduces identically on older commits, so it is an upstream API
+  change rather than a regression.
+
+- **The compile cache is keyed on source mtime only** — not on target
+  architecture, compiler version, or compile flags. A cubin can outlive the
+  toolchain that produced it and be reused silently. This has been observed
+  producing wrong results that verification caught. Clear it with
+  `rm build/kernels/*.cubin build/kernels/*.json` after a toolchain change.
 
 ## How It Works
 
@@ -90,10 +124,10 @@ The descriptor declares `needs_compilation() = true` and `source_path()`. The ar
 
 ## Architecture
 
-- **Runtime Compilers** (`src/arena/compilers/`) - one per DSL. `CudaCompiler` runs nvcc, `TritonCompiler` and `CuTileCompiler` run Python scripts. Disk-cached with mtime invalidation.
-- **Kernel Loader** - loads `.cubin` via `cuModuleLoad`, launches via `cuLaunchKernel`.
-- **Benchmark** - CUDA events, median over N runs.
-- **Profiler** - CUPTI Activity API (kernel time, registers, shared memory) + Range Profiler (occupancy, IPC, DRAM throughput).
+- **Compiler backends** (`src/arena/compilers/`) - one per DSL. `CudaBackend` runs nvcc; `TritonBackend`, `CuTileBackend` and `WarpBackend` run Python scripts that emit a cubin plus JSON metadata.
+- **KernelCompiler** - picks a backend by file extension and owns the two-level cache (in-memory, then disk with mtime invalidation), the output naming, and the compile timing.
+- **Kernel Loader** (`src/arena/device/`) - loads `.cubin` via `cuModuleLoad`, launches via `cuLaunchKernel`.
+- **Measurement** (`src/arena/measurement/`) - warmup, timing, CUPTI profiling, NVML energy.
 - **Runner** - orchestrates: compile -> warmup -> benchmark -> profile -> verify.
 
 ## Profiling

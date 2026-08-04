@@ -1,4 +1,4 @@
-#include "arena/kernels/softmax_base.hpp"
+#include "arena/categories/softmax_base.hpp"
 
 namespace arena {
 

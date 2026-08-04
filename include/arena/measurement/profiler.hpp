@@ -46,8 +46,11 @@ public:
     // kernel-only time + registers + shmem (Activity API, one kernel launch)
     ProfileResult collect_activity(KernelLaunchFn launch_fn);
 
-    // full profiling: Activity API + Range Profiler hardware counters
-    ProfileResult profile(KernelLaunchFn launch_fn, KernelLaunchFn reset_fn = nullptr);
+    // Hardware counters via the Range Profiler (occupancy, IPC, DRAM bytes).
+    // Runner sequences this separately from collect_activity because activity
+    // runs unconditionally while counters are opt-in.
+    std::map<std::string, double> collect_counters(
+        KernelLaunchFn launch_fn, KernelLaunchFn reset_fn = nullptr);
 
 private:
     void init_activity();
@@ -58,8 +61,6 @@ private:
     void cleanup_range_profiler();
     CUpti_Profiler_Host_Object* create_host_object();
     void destroy_host_object();
-    std::map<std::string, double> collect_counters(
-        KernelLaunchFn launch_fn, KernelLaunchFn reset_fn = nullptr);
 
     // CUPTI metric names for the current chip
     struct ChipMetrics {

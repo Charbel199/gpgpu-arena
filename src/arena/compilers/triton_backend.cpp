@@ -1,12 +1,12 @@
-#include "arena/compilers/triton_compiler.hpp"
+#include "arena/compilers/triton_backend.hpp"
 #include "arena/compilers/compiler_utils.hpp"
 
 namespace arena {
 
-TritonCompiler::TritonCompiler(const std::string& kernel_dir)
+TritonBackend::TritonBackend(const std::string& kernel_dir)
     : kernel_dir_(kernel_dir) {}
 
-CompileResult TritonCompiler::compile(const std::string& source_path,
+CompileResult TritonBackend::compile(const std::string& source_path,
                                        const std::string& output_name,
                                        const std::string& cache_dir) {
     std::string cmd =

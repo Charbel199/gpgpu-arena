@@ -1,4 +1,4 @@
-#include "arena/kernels/reduce_base.hpp"
+#include "arena/categories/reduce_base.hpp"
 #include <cuda.h>
 #include <string>
 
@@ -78,20 +78,36 @@ public:
         ctx.free(d_output_);
         ctx.free(d_block_results_);
         d_input_ = d_output_ = d_block_results_ = 0;
+
+        // Drop the cached module. After a context reset these handles are
+        // dangling, and the `if (!module_)` guard in allocate() would
+        // otherwise never reload them.
+        //
+        // unload_all() is safe because loader_ is private to this descriptor
+        // and every launch has completed by now. Without it, the reload on
+        // the next allocate() would leak one module per run.
+        loader_.unload_all();
+        module_ = nullptr;
+        func_stage1_ = nullptr;
+        func_stage2_ = nullptr;
     }
 
     void execute(Context& ctx) override {
-        // Stage 1: Block-level reduction (configs/args prepared in allocate())
+        // Both launches go to the null stream (LaunchConfig::stream defaults to
+        // nullptr and neither config overrides it), so stream ordering already
+        // guarantees stage 1 completes before stage 2 begins. No host-side
+        // synchronization is needed between them.
+        //
+        // There used to be a cuStreamSynchronize(0) here and another after
+        // stage 2. They cost 7.32 ms of a 7.50 ms operation at n=64M -- 97.6%
+        // overhead against 0.18 ms of actual kernel time -- while cub_reduce
+        // ran the same two-launch algorithm with 0.001 ms of overhead.
+        //
+        // Nothing needs the trailing sync either: every caller synchronizes
+        // itself (the event timer via cuEventSynchronize, the activity and
+        // verification passes via cuCtxSynchronize).
         loader_.launch(func_stage1_, config1_, args1_);
-
-        // CRITICAL: Stage 1 must complete before stage 2 (bug that I didn't notice for 1 hour)
-        cuStreamSynchronize(0);
-
-        // Stage 2: Final reduction (configs/args prepared in allocate())
         loader_.launch(func_stage2_, config2_, args2_);
-
-        // ensure Stage 2 completes before returning
-        cuStreamSynchronize(0);
     }
 
 private:
