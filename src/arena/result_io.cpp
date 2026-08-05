@@ -70,6 +70,8 @@ json to_json(const RunResult& r) {
         {"regs_per_thread", r.counters.regs_per_thread},
         {"shared_mem_bytes", r.counters.shared_mem_bytes},
         {"occupancy",       r.counters.occupancy},
+        {"dram_read_bytes", r.counters.dram_read_bytes},
+        {"dram_write_bytes", r.counters.dram_write_bytes},
         {"dram_read_gbps",  r.counters.dram_read_gbps},
         {"dram_write_gbps", r.counters.dram_write_gbps},
         {"ipc",             r.counters.ipc},

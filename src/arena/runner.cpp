@@ -150,20 +150,22 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             auto mv = profiler_.collect_counters(launch_kernel, reset_fn);
             nvtxRangePop();
 
-            // Counters are collected for a single launch replay, so the
-            // matching interval is single-launch SASS time, not the whole
-            // operation. Dividing by op_ms would mix a single-launch
-            // numerator with a multi-launch denominator.
+            // The counter pass runs a warm back-to-back sequence and reports
+            // its last launch, so these bytes describe the same cache state
+            // the timed loop runs in and gpu_ms is the matching denominator.
+            const float counter_ms = result.gpu_ms;
             if (mv.count(metric::OCCUPANCY)) {
                 result.counters.occupancy = mv.at(metric::OCCUPANCY) / 100.0;
             }
             if (mv.count(metric::DRAM_READ)) {
+                result.counters.dram_read_bytes = mv.at(metric::DRAM_READ);
                 result.counters.dram_read_gbps = measure::rate_per_sec(
-                    mv.at(metric::DRAM_READ), result.gpu_ms) / 1e9;
+                    mv.at(metric::DRAM_READ), counter_ms) / 1e9;
             }
             if (mv.count(metric::DRAM_WRITE)) {
+                result.counters.dram_write_bytes = mv.at(metric::DRAM_WRITE);
                 result.counters.dram_write_gbps = measure::rate_per_sec(
-                    mv.at(metric::DRAM_WRITE), result.gpu_ms) / 1e9;
+                    mv.at(metric::DRAM_WRITE), counter_ms) / 1e9;
             }
             if (mv.count(metric::IPC)) {
                 result.counters.ipc = mv.at(metric::IPC);

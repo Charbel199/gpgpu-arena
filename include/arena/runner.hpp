@@ -58,6 +58,13 @@ struct RunResult {
         int    regs_per_thread = 0;
         int    shared_mem_bytes = 0;
         double occupancy = 0.0;        // fraction, 0..1
+        // Bytes are the number the hardware actually reports and they match
+        // Nsight Compute exactly. The GB/s below divides them by the duration
+        // of the same profiled launch, which is instrumented and therefore
+        // slower than the unprofiled kernel, so treat the rate as a profiled
+        // figure rather than the steady-state one.
+        double dram_read_bytes = 0.0;
+        double dram_write_bytes = 0.0;
         double dram_read_gbps = 0.0;
         double dram_write_gbps = 0.0;
         double ipc = 0.0;
