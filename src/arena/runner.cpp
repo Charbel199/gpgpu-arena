@@ -88,7 +88,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             }
         };
 
-        auto reset_fn = [&]() { desc.initialize(ctx_); };
+        auto reset_fn = [&]() { desc.reset(ctx_); };
 
         result.sm_clock_start_mhz = power_.sm_clock_mhz();
 
@@ -97,8 +97,8 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         result.warmup_iterations = warm.iterations;
         result.warmup_converged  = warm.converged;
         result.first_launch_ms   = warm.first_launch_ms;
-        log->info("  warmup: {} iterations, {}", warm.iterations,
-            warm.converged ? "converged" : "DID NOT CONVERGE");
+        result.warmup_stop = measure::warmup_stop_name(warm.stop);
+        log->info("  warmup: {} iterations, {}", warm.iterations, result.warmup_stop);
 
         // --- Tier 1: operation timing ---
         log->info("  benchmark: {} runs ...", config.number_of_runs);

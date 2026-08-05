@@ -155,5 +155,9 @@ void Context::copy_to_host(void* dst, CUdeviceptr src, size_t bytes) {
     check_cuda(cuMemcpyDtoH(dst, src, bytes), "cuMemcpyDtoH");
 }
 
+void Context::zero_device(CUdeviceptr dst, size_t bytes) {
+    check_cuda(cuMemsetD8(dst, 0, bytes), "cuMemsetD8");
+}
+
 }
 

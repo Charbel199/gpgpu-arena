@@ -71,6 +71,14 @@ public:
         const uint64_t zero = 0;
         ctx.copy_to_device(d_output_, &zero, size_output_);
     }
+
+    // The kernels here accumulate into the output, so it has to start at zero
+    // every iteration. The input does not: it is read-only and identical each
+    // time, so regenerating it was costing a full generate, two summations, a
+    // quantize pass and a host-to-device copy per launch.
+    void reset(Context& ctx) override {
+        ctx.zero_device(d_output_, size_output_);
+    }
     
     void cleanup(Context& ctx) override {
         ctx.free(d_input_);

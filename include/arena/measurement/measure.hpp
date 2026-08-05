@@ -13,10 +13,20 @@ namespace arena::measure {
 using LaunchFn = std::function<void()>;
 
 struct WarmupResult {
+    // Why warmup stopped. Not converging is not automatically a bad kernel:
+    // TooFewSamples means the drift check never got to run at all, which is a
+    // budget problem rather than an unsteady GPU, and the two used to be
+    // reported identically.
+    enum class Stop { Converged, Drifting, TooFewSamples, IterationCap, Fixed };
+
     int   iterations      = 0;
     bool  converged       = false;
     float first_launch_ms = 0.0f;   // iteration 0, measured separately
+    float last_drift      = 0.0f;   // relative change at the final check
+    Stop  stop            = Stop::TooFewSamples;
 };
+
+const char* warmup_stop_name(WarmupResult::Stop s);
 
 // Runs launch_fn until timings stabilise (Auto) or a fixed count (Fixed).
 // reset_fn, if provided, runs before each iteration and is never timed.

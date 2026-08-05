@@ -89,6 +89,7 @@ struct RunResult {
     // --- diagnostics ---
     int  warmup_iterations = 0;
     bool warmup_converged  = false;
+    std::string warmup_stop;   // why it stopped, for when it did not converge
     unsigned sm_clock_start_mhz = 0;
     unsigned sm_clock_end_mhz = 0;
 

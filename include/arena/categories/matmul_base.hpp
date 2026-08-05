@@ -47,6 +47,10 @@ public:
         ctx.copy_to_device(d_b_, h_b_.data(), size_b_);
     }
 
+    // A and B are read-only and C is written outright rather than accumulated
+    // into, which is why initialize() never zeroed it. Nothing to restore.
+    void reset(Context&) override {}
+
     void cleanup(Context& ctx) override {
         ctx.free(d_a_);
         ctx.free(d_b_);

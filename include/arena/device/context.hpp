@@ -32,6 +32,9 @@ public:
     void copy_to_device(CUdeviceptr dst, const void* src, size_t bytes);
     void copy_to_host(void* dst, CUdeviceptr src, size_t bytes);
 
+    // Zeroes device memory without staging a host buffer of zeros.
+    void zero_device(CUdeviceptr dst, size_t bytes);
+
     // Get device properties
     std::string device_name() const { return device_name_; }
     int compute_capability_major() const { return cc_major_; }

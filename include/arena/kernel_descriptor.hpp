@@ -71,6 +71,16 @@ public:
     virtual void allocate(Context& ctx) = 0;
     virtual void initialize(Context& ctx) = 0;
     virtual void cleanup(Context& ctx) = 0;
+
+    // Per-iteration reset, called before every warmup and timed launch.
+    //
+    // Separate from initialize() because initialize() rebuilds the inputs,
+    // and the inputs do not change between iterations: they are deterministic
+    // in the seed, so regenerating and re-uploading them produces the same
+    // bytes at real cost. Only state the kernel writes has to be restored,
+    // which for most kernels is just the output buffer. Defaults to a full
+    // initialize so a descriptor that has not opted in keeps working.
+    virtual void reset(Context& ctx) { initialize(ctx); }
     
     // Block sizes this kernel can be launched at. Empty means the block size
     // is not a free parameter, which is the case whenever the cubin pins it:

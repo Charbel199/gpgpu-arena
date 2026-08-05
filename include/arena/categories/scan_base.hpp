@@ -41,6 +41,10 @@ public:
         std::vector<float> h_output(n_, 0.0f);
         ctx.copy_to_device(d_output_, h_output.data(), size_data_);
     }
+
+    void reset(Context& ctx) override {
+        ctx.zero_device(d_output_, size_data_);
+    }
     
     void cleanup(Context& ctx) override {
         ctx.free(d_input_);

@@ -100,6 +100,7 @@ json to_json(const RunResult& r) {
     j["quality"] = {
         {"warmup_iterations",  r.warmup_iterations},
         {"warmup_converged",   r.warmup_converged},
+        {"warmup_stop",        r.warmup_stop},
         {"sm_clock_start_mhz", r.sm_clock_start_mhz},
         {"sm_clock_end_mhz",   r.sm_clock_end_mhz},
     };
