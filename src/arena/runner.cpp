@@ -19,6 +19,17 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     result.description = desc.description();
 
     auto log = spdlog::get("runner");
+
+    // Once a sticky error has landed, every later kernel fails with
+    // "invalid device context" and those messages bury the one kernel that
+    // actually caused it. Say so once and stop.
+    if (ctx_.device_lost()) {
+        result.success = false;
+        result.error = "CUDA context lost earlier (" + ctx_.lost_reason() +
+                       "); restart required";
+        return result;
+    }
+
     log->info("-------- {} --------", result.kernel_name);
 
     try {
@@ -239,16 +250,25 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         result.error = e.what();
         try { desc.cleanup(ctx_); } catch (...) {}
 
-        // reset context in case of error
+        // A sticky error is terminal. Recreating the context, and resetting
+        // the primary context, were both measured returning the original
+        // error rather than clearing it, so recovery here is not possible and
+        // pretending otherwise turns one real failure into a run of noise.
         try {
             CUresult ctx_status = cuCtxSynchronize();
             if (ctx_status != CUDA_SUCCESS) {
-                log->warn("{}: CUDA context is in error state, resetting ...", result.kernel_name);
-                loader_.unload_all();
-                ctx_.reset();
+                const char* msg = nullptr;
+                cuGetErrorString(ctx_status, &msg);
+                const std::string reason = msg ? msg : "unknown CUDA error";
+                ctx_.mark_device_lost(result.kernel_name + ": " + reason);
+                log->critical(
+                    "{} left the CUDA context unrecoverable ({}). "
+                    "This cannot be cleared without restarting; every later "
+                    "kernel would fail for this reason, not its own.",
+                    result.kernel_name, reason);
             }
         } catch (...) {
-            log->error("{}: failed to recover CUDA context, subsequent kernels may fail", result.kernel_name);
+            ctx_.mark_device_lost(result.kernel_name + ": unknown");
         }
     }
 

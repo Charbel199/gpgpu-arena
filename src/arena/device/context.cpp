@@ -48,6 +48,10 @@ Context::Context(int device_id) {
         cuDeviceGetAttribute(&memory_bus_width_, CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH, device_),
         "cuDeviceGetAttribute (bus_width)");
 
+    check_cuda(
+        cuDeviceGetAttribute(&l2_cache_bytes_, CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE, device_),
+        "cuDeviceGetAttribute (l2_cache_size)");
+
     check_cuda(cuDeviceTotalMem(&total_mem_, device_), "cuDeviceTotalMem");
 
     auto log = spdlog::get("context");

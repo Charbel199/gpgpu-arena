@@ -134,6 +134,7 @@ json environment_json(const Context& ctx, const PowerMonitor& power) {
     j["sm_clock_khz"]        = ctx.clock_rate_khz();
     j["memory_clock_khz"]    = ctx.memory_clock_khz();
     j["memory_bus_width"]    = ctx.memory_bus_width();
+    j["l2_cache_bytes"]      = ctx.l2_cache_bytes();
     j["driver_version"]      = driver_version;
     j["cuda_toolkit_version"] = CUDA_VERSION;
     j["nvml_available"]      = power.available();
