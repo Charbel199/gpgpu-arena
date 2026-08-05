@@ -19,19 +19,33 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     result.description = desc.description();
 
     auto log = spdlog::get("runner");
+
+    // Once a sticky error has landed, every later kernel fails with
+    // "invalid device context" and those messages bury the one kernel that
+    // actually caused it. Say so once and stop.
+    if (ctx_.device_lost()) {
+        result.success = false;
+        result.error = "CUDA context lost earlier (" + ctx_.lost_reason() +
+                       "); restart required";
+        return result;
+    }
+
     log->info("-------- {} --------", result.kernel_name);
 
     try {
         desc.set_problem_size(config.params);
         desc.set_input_spec(config.input_distribution, config.input_seed);
+        desc.set_block_size(config.block_size);
+        desc.set_compile_options(config.compile_options);
 
         // runtime compilation for DSL kernels
         if (desc.needs_compilation()) {
-            auto cr = compiler_.compile(desc.source_path());
+            auto cr = compiler_.compile(desc.source_path(), desc.compile_options());
             result.cache_hit  = cr.cache_hit;
             result.compile_ms = cr.compile_ms;
             result.import_ms  = cr.import_ms;
             result.invoke_ms  = cr.invoke_ms;
+            result.compile_options = desc.compile_options();
             desc.set_compile_result(cr);
         }
 
@@ -85,7 +99,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             }
         };
 
-        auto reset_fn = [&]() { desc.initialize(ctx_); };
+        auto reset_fn = [&]() { desc.reset(ctx_); };
 
         result.sm_clock_start_mhz = power_.sm_clock_mhz();
 
@@ -94,8 +108,8 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         result.warmup_iterations = warm.iterations;
         result.warmup_converged  = warm.converged;
         result.first_launch_ms   = warm.first_launch_ms;
-        log->info("  warmup: {} iterations, {}", warm.iterations,
-            warm.converged ? "converged" : "DID NOT CONVERGE");
+        result.warmup_stop = measure::warmup_stop_name(warm.stop);
+        log->info("  warmup: {} iterations, {}", warm.iterations, result.warmup_stop);
 
         // --- Tier 1: operation timing ---
         log->info("  benchmark: {} runs ...", config.number_of_runs);
@@ -236,16 +250,25 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         result.error = e.what();
         try { desc.cleanup(ctx_); } catch (...) {}
 
-        // reset context in case of error
+        // A sticky error is terminal. Recreating the context, and resetting
+        // the primary context, were both measured returning the original
+        // error rather than clearing it, so recovery here is not possible and
+        // pretending otherwise turns one real failure into a run of noise.
         try {
             CUresult ctx_status = cuCtxSynchronize();
             if (ctx_status != CUDA_SUCCESS) {
-                log->warn("{}: CUDA context is in error state, resetting ...", result.kernel_name);
-                loader_.unload_all();
-                ctx_.reset();
+                const char* msg = nullptr;
+                cuGetErrorString(ctx_status, &msg);
+                const std::string reason = msg ? msg : "unknown CUDA error";
+                ctx_.mark_device_lost(result.kernel_name + ": " + reason);
+                log->critical(
+                    "{} left the CUDA context unrecoverable ({}). "
+                    "This cannot be cleared without restarting; every later "
+                    "kernel would fail for this reason, not its own.",
+                    result.kernel_name, reason);
             }
         } catch (...) {
-            log->error("{}: failed to recover CUDA context, subsequent kernels may fail", result.kernel_name);
+            ctx_.mark_device_lost(result.kernel_name + ": unknown");
         }
     }
 

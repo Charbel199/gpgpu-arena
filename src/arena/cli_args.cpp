@@ -27,4 +27,26 @@ bool apply_params(const std::string& spec, std::map<std::string, int>& out) {
     return true;
 }
 
+std::vector<TuningVariant> tuning_variants_for(
+    bool sweep,
+    int requested_block,
+    const std::map<std::string, int>& requested_defines,
+    const std::vector<int>& tunable_blocks,
+    const std::vector<std::map<std::string, int>>& tunable_defines) {
+
+    if (sweep && !tunable_blocks.empty()) {
+        std::vector<TuningVariant> out;
+        out.reserve(tunable_blocks.size());
+        for (int b : tunable_blocks) out.push_back({b, requested_defines});
+        return out;
+    }
+    if (sweep && !tunable_defines.empty()) {
+        std::vector<TuningVariant> out;
+        out.reserve(tunable_defines.size());
+        for (const auto& d : tunable_defines) out.push_back({requested_block, d});
+        return out;
+    }
+    return {{requested_block, requested_defines}};
+}
+
 }

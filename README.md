@@ -41,6 +41,42 @@ alongside the results, so a result file records what produced it. Run
 `-DBUILD_GUI=OFF` builds a headless-only binary with no GLFW/OpenGL
 dependency.
 
+## Tuning Axes
+
+Problem size is a range rather than a hard-coded ladder. `--sweep-min`,
+`--sweep-max` and `--sweep-factor` set it; leaving them at zero uses each
+category's own defaults, so a plain `--sweep` behaves as it always did.
+
+Block size is the second axis, and it works differently on the two sides.
+A hand-written CUDA kernel is relaunched at a different size; a DSL kernel
+cannot be, because the size is baked into the cubin. cuTile emits a `.reqntid`
+that the launch has to match exactly, and Triton derives the thread block from
+`num_warps` at compile time. Tuning those means recompiling, which is to say
+that for a DSL, sweeping the block size is autotuning.
+
+`--sweep-block` covers both. It runs each CUDA kernel at every block size it
+declares, and each DSL kernel at every compile-time config it declares,
+caching one cubin per config. `--block <n>` and `--define KEY=n` pin a single
+point on either axis.
+
+Over `reduce` at n=4M, best against worst config:
+
+| kernel | best config | spread |
+| --- | --- | --- |
+| `reduce_block_atomic` | block=64 | 5.1x |
+| `reduce_grid_stride` | block=128 | 3.9x |
+| `reduce_warp_shuffle` | block=512 | 3.6x |
+| `reduce_warp_shmem` | block=256 | 3.0x |
+| `triton_reduce` | BLOCK_SIZE=1024, num_warps=8 | 2.2x |
+| `cutile_reduce` | TILE_SIZE=1024 | 1.6x |
+| `triton_reduce_grid_stride` | BLOCK_SIZE=4096, num_warps=2 | 1.6x |
+
+The last row is the reason the axis is worth having. Tuned, that kernel runs
+in 0.0084 ms, which beats `cub_reduce` at 0.0133 and every hand-written CUDA
+kernel here. At the value its source file happens to declare it runs in
+0.0131, so a comparison without this axis measures how well each kernel was
+guessed at rather than what the language can do.
+
 ## Measurement Model
 
 Timing is reported in three tiers, which are **not** comparable with each
@@ -142,17 +178,12 @@ in output live in the same file, which is why all three above are in
 
 ## Known Issues
 
-- **cuTile kernels fail to compile** against current `cuda-tile` releases:
-  `'ndarray' object has no attribute 'symbol'`. `cutile_base.py` passes cupy
-  ndarrays as dummy args to `compile_tile`, which newer versions no longer
-  accept. Reproduces identically on older commits, so it is an upstream API
-  change rather than a regression.
-
-- The compile cache is keyed on source mtime alone, not on target
-  architecture, compiler version, or compile flags. A cubin can outlive the
-  toolchain that produced it and be reused silently. This has been observed
-  producing wrong results that verification caught. Clear it with
-  `rm build/kernels/*.cubin build/kernels/*.json` after a toolchain change.
+- The compile cache is keyed on source mtime and the defines a cubin was
+  built with, but not on target architecture, compiler version, or the rest
+  of the compile flags. A cubin can outlive the toolchain that produced it
+  and be reused silently. This has been observed producing wrong results that
+  verification caught. Clear it with `rm build/kernels/*.cubin
+  build/kernels/*.json` after a toolchain change.
 
 ## How It Works
 

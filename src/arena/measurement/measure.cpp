@@ -39,6 +39,17 @@ private:
 
 }
 
+const char* warmup_stop_name(WarmupResult::Stop s) {
+    switch (s) {
+        case WarmupResult::Stop::Converged:     return "converged";
+        case WarmupResult::Stop::Drifting:      return "still drifting";
+        case WarmupResult::Stop::TooFewSamples: return "too few samples to judge";
+        case WarmupResult::Stop::IterationCap:  return "hit iteration cap";
+        case WarmupResult::Stop::Fixed:         return "fixed count";
+    }
+    return "unknown";
+}
+
 WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
                     const RunConfig& config) {
     WarmupResult out;
@@ -55,6 +66,7 @@ WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
             out.iterations++;
         }
         out.converged = true;   // fixed mode makes no claim; treat as satisfied
+        out.stop = WarmupResult::Stop::Fixed;
         nvtxRangePop();
         return out;
     }
@@ -73,8 +85,15 @@ WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
         if (out.iterations < config.warmup_min) continue;
 
         auto drift = check_drift(history, config.drift_window, config.drift_threshold);
+        const bool checked =
+            history.size() >= static_cast<size_t>(2 * config.drift_window);
+        if (checked) {
+            out.last_drift = drift.rel_change;
+            out.stop = WarmupResult::Stop::Drifting;
+        }
         if (drift.converged) {
             out.converged = true;
+            out.stop = WarmupResult::Stop::Converged;
             log->debug("warmup converged after {} iterations (drift {:.3f}%)",
                 out.iterations, drift.rel_change * 100.0f);
             break;
@@ -83,6 +102,7 @@ WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
         const float wall_ms = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - wall_start).count();
         if (wall_ms >= config.warmup_max_ms) {
+            if (!checked) out.stop = WarmupResult::Stop::TooFewSamples;
             log->debug("warmup hit wall-clock cap ({:.0f} ms) after {} iterations "
                        "without converging", config.warmup_max_ms, out.iterations);
             break;
@@ -90,6 +110,7 @@ WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
     }
 
     if (!out.converged && out.iterations >= config.warmup_max) {
+        out.stop = WarmupResult::Stop::IterationCap;
         log->debug("warmup hit iteration cap ({}) without converging", config.warmup_max);
     }
 

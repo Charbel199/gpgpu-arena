@@ -12,6 +12,13 @@ public:
     bool needs_compilation() const override { return true; }
     std::string source_path() const override { return "reduce/fp32/reduce.cutile.py"; }
 
+    // TILE_SIZE is a ct.Constant, baked into the cubin, so each value here is
+    // a separate compile. The thread block itself stays where cuTile puts it:
+    // occupancy=2 in the source is what decides that, not the tile.
+    std::vector<CompileDefines> tunable_compile_options() const override {
+        return {{{"TILE_SIZE", 256}}, {{"TILE_SIZE", 1024}}, {{"TILE_SIZE", 4096}}};
+    }
+
     KernelLoader::LaunchConfig get_launch_config() const override {
         int tile_size = compile_result_.constants.at("TILE_SIZE");
         return {

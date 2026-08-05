@@ -62,4 +62,13 @@ CompileResult result_from_json(const nlohmann::json& j, const std::string& modul
     return result;
 }
 
+
+std::string defines_args(const CompileDefines& defines) {
+    std::string out;
+    for (const auto& [key, val] : defines) {
+        out += " --define " + key + "=" + std::to_string(val);
+    }
+    return out;
+}
+
 }

@@ -17,21 +17,8 @@ public:
         return {"n"};
     }
 
-    std::vector<std::map<std::string, int>> get_sweep_configs() const override {
-        return {
-            {{"n", 256}},
-            {{"n", 1024}},
-            {{"n", 4096}},
-            {{"n", 16384}},
-            {{"n", 65536}},
-            {{"n", 262144}},
-            {{"n", 1000000}},
-            {{"n", 4000000}},
-            {{"n", 16000000}},
-            {{"n", 64000000}},
-            {{"n", 256000000}},
-        };
-    }
+    int sweep_default_min() const override { return 256; }
+    int sweep_default_max() const override { return 64000000; }
     
     int accumulation_length() const override { return n_; }
 
@@ -53,6 +40,10 @@ public:
 
         std::vector<float> h_output(n_, 0.0f);
         ctx.copy_to_device(d_output_, h_output.data(), size_data_);
+    }
+
+    void reset(Context& ctx) override {
+        ctx.zero_device(d_output_, size_data_);
     }
     
     void cleanup(Context& ctx) override {

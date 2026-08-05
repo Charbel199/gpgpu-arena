@@ -32,6 +32,14 @@ public:
     void copy_to_device(CUdeviceptr dst, const void* src, size_t bytes);
     void copy_to_host(void* dst, CUdeviceptr src, size_t bytes);
 
+    // Zeroes device memory without staging a host buffer of zeros.
+    void zero_device(CUdeviceptr dst, size_t bytes);
+
+    // L2 size, which is what decides whether a working set is served from
+    // cache rather than DRAM. A roofline drawn against DRAM cannot bound a
+    // kernel whose data never leaves L2.
+    size_t l2_cache_bytes() const { return (size_t)l2_cache_bytes_; }
+
     // Get device properties
     std::string device_name() const { return device_name_; }
     int compute_capability_major() const { return cc_major_; }
@@ -45,6 +53,17 @@ public:
     // destroy and recreate the CUDA context (recovers from sticky errors like illegal memory access)
     void reset();
 
+    // A sticky CUDA error (illegal memory access, ECC failure) cannot be
+    // cleared inside the process. Destroying and recreating the context,
+    // and resetting the primary context, were all measured returning the
+    // original error on this driver. Once this is set, nothing will run
+    // again until the process restarts.
+    bool device_lost() const { return device_lost_; }
+    const std::string& lost_reason() const { return lost_reason_; }
+    void mark_device_lost(const std::string& reason) {
+        if (!device_lost_) { device_lost_ = true; lost_reason_ = reason; }
+    }
+
     // Access the raw CUDA context (for advanced usage)
     CUcontext handle() const { return context_; }
 
@@ -57,6 +76,9 @@ private:
     int clock_rate_khz_;
     int memory_clock_khz_;
     int memory_bus_width_;
+    int l2_cache_bytes_ = 0;
+    bool device_lost_ = false;
+    std::string lost_reason_;
     size_t total_mem_;
 
     size_t current_bytes_ = 0;

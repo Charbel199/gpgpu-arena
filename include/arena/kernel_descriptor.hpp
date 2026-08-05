@@ -5,6 +5,7 @@
 #include "arena/compilers/backend.hpp"
 #include "arena/dtype.hpp"
 #include "arena/distribution.hpp"
+#include "arena/runner_config.hpp"
 #include "arena/measurement/accuracy.hpp"
 #include <string>
 #include <vector>
@@ -33,7 +34,32 @@ public:
     // problem configuration
     virtual std::vector<std::string> get_parameter_names() const = 0;
     virtual void set_problem_size(const std::map<std::string, int>& params) = 0;
-    virtual std::vector<std::map<std::string, int>> get_sweep_configs() const { return {}; }
+    // Sizes to sweep over. A category supplies its own sensible range and the
+    // generator below turns it into a ladder, so the range is one pair of
+    // numbers rather than a hand-written list per category.
+    virtual int sweep_default_min() const { return 0; }
+    virtual int sweep_default_max() const { return 0; }
+
+    virtual std::vector<std::map<std::string, int>> get_sweep_configs(
+        const RunConfig& cfg) const {
+        const int lo = cfg.sweep_min > 0 ? cfg.sweep_min : sweep_default_min();
+        const int hi = cfg.sweep_max > 0 ? cfg.sweep_max : sweep_default_max();
+        const double factor = cfg.sweep_factor > 1.0 ? cfg.sweep_factor : 4.0;
+        if (lo <= 0 || hi < lo) return {};
+
+        // Every parameter takes the same value at each step. Both multi-param
+        // categories here are square (M=K=N, rows=cols), and a per-parameter
+        // range would be a lot of UI for a case nothing needs yet.
+        std::vector<std::map<std::string, int>> out;
+        const auto names = get_parameter_names();
+        for (double v = lo; v <= (double)hi * 1.0001; v *= factor) {
+            std::map<std::string, int> params;
+            for (const auto& n : names) params[n] = (int)(v + 0.5);
+            out.push_back(std::move(params));
+            if (factor <= 1.0) break;
+        }
+        return out;
+    }
     
     // Input generation settings, pushed in by the runner before allocate().
     void set_input_spec(Distribution d, uint64_t seed) {
@@ -45,7 +71,43 @@ public:
     virtual void allocate(Context& ctx) = 0;
     virtual void initialize(Context& ctx) = 0;
     virtual void cleanup(Context& ctx) = 0;
+
+    // Per-iteration reset, called before every warmup and timed launch.
+    //
+    // Separate from initialize() because initialize() rebuilds the inputs,
+    // and the inputs do not change between iterations: they are deterministic
+    // in the seed, so regenerating and re-uploading them produces the same
+    // bytes at real cost. Only state the kernel writes has to be restored,
+    // which for most kernels is just the output buffer. Defaults to a full
+    // initialize so a descriptor that has not opted in keeps working.
+    virtual void reset(Context& ctx) { initialize(ctx); }
     
+    // Block sizes this kernel can be launched at. Empty means the block size
+    // is not a free parameter, which is the case whenever the cubin pins it:
+    // cuTile emits .reqntid, and Triton and Warp fix it at compile time from
+    // num_warps. Those need a recompile to change, not a different launch.
+    virtual std::vector<int> tunable_block_sizes() const { return {}; }
+
+    // Chosen block size, or 0 for the descriptor's own default. Set by the
+    // runner before get_launch_config().
+    void set_block_size(int n) { block_size_ = n; }
+
+    // Helper for descriptors: the block size to actually launch at.
+    int block_size_or(int fallback) const {
+        return block_size_ > 0 ? block_size_ : fallback;
+    }
+
+    // The DSL half of the same axis. A Triton or cuTile kernel cannot be
+    // relaunched at a different block size, so its tuning knob is a set of
+    // compile-time defines and each entry here costs a recompile. Empty means
+    // the kernel has nothing to tune.
+    virtual std::vector<CompileDefines> tunable_compile_options() const { return {}; }
+
+    // Chosen defines, empty for the source's own defaults. Set by the runner
+    // before compilation.
+    void set_compile_options(const CompileDefines& d) { compile_options_ = d; }
+    const CompileDefines& compile_options() const { return compile_options_; }
+
     // kernel launch configuration
     virtual KernelLoader::LaunchConfig get_launch_config() const = 0;
     virtual std::vector<void*> get_kernel_args() = 0;
@@ -123,6 +185,9 @@ public:
     int sm_count() const { return sm_count_; }
 
 protected:
+    int block_size_ = 0;   // 0 = descriptor default
+    CompileDefines compile_options_;   // empty = source defaults
+
     Distribution distribution_ = Distribution::Uniform;
     uint64_t     input_seed_ = 42;
 

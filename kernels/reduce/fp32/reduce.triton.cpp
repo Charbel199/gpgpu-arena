@@ -12,6 +12,18 @@ public:
     bool needs_compilation() const override { return true; }
     std::string source_path() const override { return "reduce/fp32/reduce.triton.py"; }
 
+    // A Triton kernel cannot be relaunched at a different block size, so the
+    // tuning axis is a recompile. BLOCK_SIZE is the tile each program handles
+    // and num_warps is what Triton turns into the thread block, so both have
+    // to move to cover the space.
+    std::vector<CompileDefines> tunable_compile_options() const override {
+        std::vector<CompileDefines> out;
+        for (int block : {256, 1024, 4096})
+            for (int warps : {2, 4, 8})
+                out.push_back({{"BLOCK_SIZE", block}, {"num_warps", warps}});
+        return out;
+    }
+
     KernelLoader::LaunchConfig get_launch_config() const override {
         int block_size = compile_result_.constants.at("BLOCK_SIZE");
         return {

@@ -14,7 +14,11 @@ public:
 
     void register_compiler(const std::string& extension, std::unique_ptr<CompilerBackend> compiler);
 
-    CompileResult compile(const std::string& source_path);
+    // Compiles with the source's own defaults unless defines overrides them.
+    // Each distinct set of defines is cached separately, on disk and in
+    // memory, since it produces a different cubin.
+    CompileResult compile(const std::string& source_path,
+                          const CompileDefines& defines = {});
 
     // clear all cached cubins and metadata (forces recompilation)
     void clear_cache();

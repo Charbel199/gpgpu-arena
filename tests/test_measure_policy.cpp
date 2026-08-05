@@ -102,3 +102,43 @@ TEST_CASE("rate_per_sec") {
         CHECK(rate_per_sec(0.0, 5.0f) == doctest::Approx(0.0));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Sweep ladder generation. Pure arithmetic on RunConfig, so it is testable
+// without a GPU; the generator itself lives on KernelDescriptor.
+// ---------------------------------------------------------------------------
+#include "arena/runner_config.hpp"
+
+namespace {
+// Mirrors KernelDescriptor::get_sweep_configs for a single parameter.
+std::vector<int> ladder(int lo, int hi, double factor) {
+    std::vector<int> out;
+    if (lo <= 0 || hi < lo || factor <= 1.0) return out;
+    for (double v = lo; v <= (double)hi * 1.0001; v *= factor)
+        out.push_back((int)(v + 0.5));
+    return out;
+}
+}
+
+TEST_CASE("sweep ladder") {
+    SUBCASE("powers of four between the bounds") {
+        CHECK(ladder(256, 16384, 4.0) == std::vector<int>{256, 1024, 4096, 16384});
+    }
+    SUBCASE("includes the upper bound when it lands exactly") {
+        auto v = ladder(64, 8192, 2.0);
+        CHECK(v.front() == 64);
+        CHECK(v.back() == 8192);
+    }
+    SUBCASE("stops below the bound when the step overshoots") {
+        CHECK(ladder(100, 999, 10.0) == std::vector<int>{100});
+    }
+    SUBCASE("single point when min equals max") {
+        CHECK(ladder(1024, 1024, 4.0) == std::vector<int>{1024});
+    }
+    SUBCASE("degenerate inputs give nothing rather than looping forever") {
+        CHECK(ladder(0, 100, 4.0).empty());
+        CHECK(ladder(100, 10, 4.0).empty());
+        CHECK(ladder(1, 100, 1.0).empty());     // factor of 1 would never advance
+        CHECK(ladder(1, 100, 0.5).empty());
+    }
+}

@@ -57,6 +57,7 @@ json to_json(const RunResult& r) {
         {"compile_ms", r.compile_ms},
         {"import_ms",  r.import_ms},
         {"invoke_ms",  r.invoke_ms},
+        {"options",    r.compile_options},
     };
 
     j["throughput"] = {
@@ -99,6 +100,7 @@ json to_json(const RunResult& r) {
     j["quality"] = {
         {"warmup_iterations",  r.warmup_iterations},
         {"warmup_converged",   r.warmup_converged},
+        {"warmup_stop",        r.warmup_stop},
         {"sm_clock_start_mhz", r.sm_clock_start_mhz},
         {"sm_clock_end_mhz",   r.sm_clock_end_mhz},
     };
@@ -132,6 +134,7 @@ json environment_json(const Context& ctx, const PowerMonitor& power) {
     j["sm_clock_khz"]        = ctx.clock_rate_khz();
     j["memory_clock_khz"]    = ctx.memory_clock_khz();
     j["memory_bus_width"]    = ctx.memory_bus_width();
+    j["l2_cache_bytes"]      = ctx.l2_cache_bytes();
     j["driver_version"]      = driver_version;
     j["cuda_toolkit_version"] = CUDA_VERSION;
     j["nvml_available"]      = power.available();
@@ -152,6 +155,10 @@ json config_json(const RunConfig& cfg) {
     j["collect_metrics"]  = cfg.collect_metrics;
     j["collect_energy"]   = cfg.collect_energy;
     j["energy_window_ms"] = cfg.energy_window_ms;
+    j["sweep_min"]        = cfg.sweep_min;
+    j["sweep_max"]        = cfg.sweep_max;
+    j["sweep_factor"]     = cfg.sweep_factor;
+    j["block_size"]       = cfg.block_size;
     j["input_distribution"] = distribution_name(cfg.input_distribution);
     j["input_seed"]         = cfg.input_seed;
     j["params"]           = cfg.params;

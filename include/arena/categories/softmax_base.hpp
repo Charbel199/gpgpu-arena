@@ -18,18 +18,8 @@ public:
         return {"rows", "cols"};
     }
 
-    std::vector<std::map<std::string, int>> get_sweep_configs() const override {
-        return {
-            {{"rows", 64},   {"cols", 64}},
-            {{"rows", 128},  {"cols", 128}},
-            {{"rows", 256},  {"cols", 256}},
-            {{"rows", 512},  {"cols", 512}},
-            {{"rows", 1024}, {"cols", 1024}},
-            {{"rows", 2048}, {"cols", 2048}},
-            {{"rows", 4096}, {"cols", 4096}},
-            {{"rows", 8192}, {"cols", 8192}},
-        };
-    }
+    int sweep_default_min() const override { return 64; }
+    int sweep_default_max() const override { return 8192; }
 
     int accumulation_length() const override { return cols_; }
 
@@ -59,6 +49,10 @@ public:
 
         std::vector<float> h_zeros(rows_ * cols_, 0.0f);
         ctx.copy_to_device(d_output_, h_zeros.data(), size_data_);
+    }
+
+    void reset(Context& ctx) override {
+        ctx.zero_device(d_output_, size_data_);
     }
 
     void cleanup(Context& ctx) override {

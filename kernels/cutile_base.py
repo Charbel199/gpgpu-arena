@@ -69,10 +69,39 @@ def _constraint(arg, is_constant):
     return c, 1 + 2 * arg.ndim
 
 
-def compile_kernel(kernel_fn, example_args):
+def parse_defines(pairs):
+    """--define KEY=int, repeated. Compile-time knobs from the C++ side."""
+    out = {}
+    for p in pairs or []:
+        key, _, val = p.partition("=")
+        if not key or not val:
+            raise ValueError(f"malformed --define {p!r}, expected KEY=int")
+        out[key] = int(val)
+    return out
+
+
+def apply_defines(example_args, params, defines):
+    """Substitutes overridden values into the example args by parameter name.
+
+    A cuTile tile size is a ct.Constant, so it is baked into the cubin and
+    changing it means recompiling. Overriding the example value is enough,
+    since the constraint is derived from it.
+    """
+    if not defines:
+        return example_args
+    out = list(example_args)
+    for i, p in enumerate(params[:len(out)]):
+        if p.name in defines:
+            out[i] = defines[p.name]
+    return out
+
+
+def compile_kernel(kernel_fn, example_args, defines=None):
     fn = getattr(kernel_fn, "_pyfunc", kernel_fn)
 
     params = list(inspect.signature(fn).parameters.values())
+    example_args = apply_defines(example_args, params, defines)
+
     constraints, slots = [], 0
     for a, p in zip(example_args, params):
         is_const = "Constant" in str(p.annotation)
@@ -116,12 +145,23 @@ def main(kernel_fn, dummy_args, constants=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default=".")
     parser.add_argument("--output-name", type=str, required=True)
+    parser.add_argument("--define", action="append", default=[])
     args = parser.parse_args()
+
+    try:
+        defines = parse_defines(args.define)
+    except ValueError as e:
+        print(f"[cutile] {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Reported back so the result records what the cubin was actually built
+    # with, not what the source file happens to say.
+    constants = {**(constants or {}), **defines}
 
     try:
         print(f"[cutile] Compiling {args.output_name} ...", file=sys.stderr)
         t0 = time.perf_counter()
-        kernel_name, cubin, num_params = compile_kernel(kernel_fn, dummy_args)
+        kernel_name, cubin, num_params = compile_kernel(kernel_fn, dummy_args, defines)
         compile_ms = (time.perf_counter() - t0) * 1000.0
     except Exception as e:
         print(f"[cutile] Compilation failed: {e}", file=sys.stderr)
@@ -144,7 +184,7 @@ def main(kernel_fn, dummy_args, constants=None):
         "shared_memory": 0,
         "num_params": num_params,
         "block_dim": block_dim,
-        "constants": constants or {},
+        "constants": constants,
         "import_ms": _IMPORT_MS,
         "compile_ms": compile_ms,
     }))

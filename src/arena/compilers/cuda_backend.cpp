@@ -11,12 +11,18 @@ CudaBackend::CudaBackend(const std::string& kernel_dir)
 
 CompileResult CudaBackend::compile(const std::string& source_path,
                                      const std::string& output_name,
-                                     const std::string& cache_dir) {
+                                     const std::string& cache_dir,
+                                     const CompileDefines& defines) {
     auto full_source = kernel_dir_ + "/" + source_path;
     auto cubin_path = cache_dir + "/" + output_name + ".cubin";
 
+    std::string nvcc_defines;
+    for (const auto& [key, val] : defines) {
+        nvcc_defines += " -D" + key + "=" + std::to_string(val);
+    }
+
     std::string cmd =
-        std::string(ARENA_NVCC) + " -cubin -arch=native"
+        std::string(ARENA_NVCC) + " -cubin -arch=native" + nvcc_defines +
         " -o " + cubin_path + " " + full_source +
         " 2>&1";
 

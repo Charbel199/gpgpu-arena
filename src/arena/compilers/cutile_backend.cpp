@@ -8,12 +8,14 @@ CuTileBackend::CuTileBackend(const std::string& kernel_dir)
 
 CompileResult CuTileBackend::compile(const std::string& source_path,
                                        const std::string& output_name,
-                                       const std::string& cache_dir) {
+                                       const std::string& cache_dir,
+                                       const CompileDefines& defines) {
     std::string cmd =
         "PYTHONPATH=" + kernel_dir_ +
         " " ARENA_PYTHON " " + kernel_dir_ + "/" + source_path +
         " --output-dir " + cache_dir +
         " --output-name " + output_name +
+        defines_args(defines) +
         " 2>&1";
 
     auto output = run_command(cmd, "cuTile compiler for " + source_path);

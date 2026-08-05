@@ -24,6 +24,7 @@ struct CliOptions {
     std::string output = "-";         // "-" = stdout
     std::string format = "json";      // json | csv
     arena::RunConfig config;
+    bool sweep_block = false;
     bool ok = true;
     std::string error;
 };
@@ -87,6 +88,27 @@ CliOptions parse_args(int argc, char** argv) {
         } else if (arg_is(a, "--seed")) {
             if (!take_value(argc, argv, i, "--seed", v, o)) return o;
             o.config.input_seed = std::strtoull(v.c_str(), nullptr, 10);
+        } else if (arg_is(a, "--block")) {
+            if (!take_value(argc, argv, i, "--block", v, o)) return o;
+            o.config.block_size = std::atoi(v.c_str());
+        } else if (arg_is(a, "--define")) {
+            if (!take_value(argc, argv, i, "--define", v, o)) return o;
+            if (!arena::cli::apply_params(v, o.config.compile_options)) {
+                o.ok = false;
+                o.error = "malformed --define '" + v + "' (expected key=integer)";
+                return o;
+            }
+        } else if (arg_is(a, "--sweep-block")) {
+            o.sweep_block = true;
+        } else if (arg_is(a, "--sweep-min")) {
+            if (!take_value(argc, argv, i, "--sweep-min", v, o)) return o;
+            o.config.sweep_min = std::atoi(v.c_str());
+        } else if (arg_is(a, "--sweep-max")) {
+            if (!take_value(argc, argv, i, "--sweep-max", v, o)) return o;
+            o.config.sweep_max = std::atoi(v.c_str());
+        } else if (arg_is(a, "--sweep-factor")) {
+            if (!take_value(argc, argv, i, "--sweep-factor", v, o)) return o;
+            o.config.sweep_factor = std::atof(v.c_str());
         } else if (arg_is(a, "--profile")) {
             o.config.collect_metrics = true;
         } else if (arg_is(a, "--energy")) {
@@ -161,6 +183,12 @@ void print_cli_usage(const char* program) {
         "  --runs <n>                Timed runs per kernel (default 10)\n"
         "  --dist <name>             Input data: ones, uniform, normal, adversarial\n"
         "  --seed <n>                Input seed, for reproducible runs (default 42)\n"
+        "  --sweep-min/-max <n>      Sweep range; 0 uses the category default\n"
+        "  --sweep-factor <x>        Step multiplier between sweep sizes (default 4)\n"
+        "  --block <n>               Launch at this block size where the kernel allows it\n"
+        "  --sweep-block             Sweep the tuning axis: block size for CUDA kernels,\n"
+        "                            compile-time config for DSL kernels\n"
+        "  --define <KEY=n>          Compile-time knob for DSL kernels (e.g. BLOCK_SIZE=512)\n"
         "  --warmup <n>              Fixed warmup count (default: auto steady-state)\n"
         "  --profile                 Collect hardware counters (needs perf access)\n"
         "  --energy                  Collect NVML energy (adds a sustained pass)\n"
@@ -229,14 +257,24 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
     }
 
     std::vector<arena::RunResult> results;
-    results.reserve(kernels.size());
+    std::vector<arena::KernelDescriptor*> ran;   // parallel to results, for the dsl column
     int errored = 0, unverified = 0;
 
     for (auto* k : kernels) {
-        auto r = runner.run(*k, o.config);
-        if (!r.success)      errored++;
-        else if (!r.verified) unverified++;
-        results.push_back(std::move(r));
+        const auto variants = arena::cli::tuning_variants_for(
+            o.sweep_block, o.config.block_size, o.config.compile_options,
+            k->tunable_block_sizes(), k->tunable_compile_options());
+
+        for (const auto& v : variants) {
+            auto cfg = o.config;
+            cfg.block_size      = v.block_size;
+            cfg.compile_options = v.defines;
+            auto r = runner.run(*k, cfg);
+            if (!r.success)      errored++;
+            else if (!r.verified) unverified++;
+            results.push_back(std::move(r));
+            ran.push_back(k);
+        }
     }
 
     // Emit
@@ -254,7 +292,7 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
     if (o.format == "csv") {
         *out << arena::result_io::csv_header() << "\n";
         for (size_t i = 0; i < results.size(); i++) {
-            *out << arena::result_io::csv_row(results[i], arena::result_io::detect_dsl(kernels[i])) << "\n";
+            *out << arena::result_io::csv_row(results[i], arena::result_io::detect_dsl(ran[i])) << "\n";
         }
     } else {
         json j;
@@ -264,7 +302,7 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
         j["results"] = json::array();
         for (size_t i = 0; i < results.size(); i++) {
             auto rj = arena::result_io::to_json(results[i]);
-            rj["dsl"] = arena::result_io::detect_dsl(kernels[i]);
+            rj["dsl"] = arena::result_io::detect_dsl(ran[i]);
             j["results"].push_back(std::move(rj));
         }
         j["summary"] = {
