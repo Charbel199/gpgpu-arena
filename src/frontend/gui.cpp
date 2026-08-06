@@ -28,6 +28,18 @@ std::vector<arena::cli::TuningVariant> tuning_variants(
         true, 0, {}, d.tunable_block_sizes(), d.tunable_compile_options());
 }
 
+// "default" says which config was used but not what it was, and the number is
+// the thing you want when comparing rows. The launched block size is recorded
+// on the result, so it can be filled in after the fact. Kernels that do not
+// launch a cubin of their own report a placeholder block of 1, and there is
+// nothing meaningful to show for those.
+std::string config_label_with_default(const std::string& label,
+                                      const arena::RunResult& r) {
+    if (label != "default") return label;
+    if (r.block_x <= 1) return "default";
+    return "block=" + std::to_string(r.block_x) + " (default)";
+}
+
 // What the table shows for one config. A CUDA kernel varies one number, so
 // "block=256" says everything; a DSL kernel varies named knobs. A kernel with
 // no axis at all reads "default": a block size of 0 means the descriptor
@@ -918,7 +930,8 @@ void Gui::render_kernel_sidebar() {
                 arena::dtype_name(k.descriptor->output_dtype()));
             ImGui::Separator();
             ImGui::TextDisabled("config: %s%s",
-                k.has_pinned ? tuning_label_for(k.pinned).c_str() : "default",
+                k.has_pinned ? tuning_label_for(k.pinned).c_str()
+                             : config_label_with_default("default", k.result).c_str(),
                 k.has_pinned ? " (pinned)" : "");
             if (const auto* snap = compare_snapshot()) {
                 auto it = snap->results.find(k.descriptor->name());
@@ -2020,7 +2033,8 @@ void Gui::render_tuning_section() {
                 ImGuiTreeNodeFlags_SpanAvailWidth);
 
             ImGui::TableSetColumnIndex(1);
-            ImGui::TextColored(UITheme::ACCENT, "%s", best->label.c_str());
+            ImGui::TextColored(UITheme::ACCENT, "%s",
+                config_label_with_default(best->label, best->result).c_str());
             bool pinned_here = false;
             if (auto* ks = current_kernels()) {
                 for (const auto& k : *ks) {
@@ -2056,7 +2070,7 @@ void Gui::render_tuning_section() {
                     ImGui::TableSetColumnIndex(1);
                     ImGui::TextColored(&e == &sorted.front() ? UITheme::ACCENT
                                                              : UITheme::TEXT_DIM,
-                        "%s", e.label.c_str());
+                        "%s", config_label_with_default(e.label, e.result).c_str());
                     if (!e.result.verified) {
                         ImGui::SameLine(0, 6);
                         ImGui::TextColored(UITheme::ERROR_RED, "unverified");
@@ -2333,7 +2347,7 @@ void Gui::render_results_table(const std::vector<TableRow>& rows,
         ImGui::TableSetupColumn("Kernel",
             ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort, 200 * s, Col_Kernel);
         ImGui::TableSetupColumn("Config",
-            ImGuiTableColumnFlags_WidthFixed, 150 * s, Col_Config);
+            ImGuiTableColumnFlags_WidthFixed, 185 * s, Col_Config);
         // The name goes in the header so a stack of tables says what each is
         // measured against without hovering. The ### keeps the column's own id
         // stable, or changing the label would reset its width and sort.
@@ -2546,15 +2560,17 @@ void Gui::render_results_table(const std::vector<TableRow>& rows,
             ImGui::TableNextColumn();
             {
                 bool pinned = k.has_pinned;
+                const std::string shown =
+                    config_label_with_default(k.result_config, k.result);
                 ImGui::TextColored(pinned ? UITheme::ACCENT : UITheme::TEXT_DIM,
-                    "%s", k.result_config.c_str());
+                    "%s", shown.c_str());
                 if (pinned) {
                     ImGui::SameLine(0, 4);
                     ImGui::TextColored(UITheme::CUDA_BADGE, "*");
                 }
                 if (ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
-                    ImGui::Text("Measured at: %s", k.result_config.c_str());
+                    ImGui::Text("Measured at: %s", shown.c_str());
                     if (pinned)
                         ImGui::Text("Pinned by tuning; * marks a non-default config.");
                     else
