@@ -60,6 +60,7 @@ int main(int argc, char** argv) {
         spdlog::info("Setting up kernel compiler (kernel dir: {}) ...", ARENA_KERNEL_DIR);
         arena::KernelLoader loader;
         arena::KernelCompiler compiler("kernels");
+        compiler.set_target_arch(ctx.arch());
         compiler.register_compiler(".cu",
             std::make_unique<arena::CudaBackend>(ARENA_KERNEL_DIR));
         compiler.register_compiler(".triton.py",

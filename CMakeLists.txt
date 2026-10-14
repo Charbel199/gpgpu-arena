@@ -121,9 +121,8 @@ set(ARENA_SOURCES
     src/arena/device/kernel_loader.cpp
     src/arena/compilers/compiler_utils.cpp
     src/arena/compilers/cuda_backend.cpp
-    src/arena/compilers/triton_backend.cpp
-    src/arena/compilers/cutile_backend.cpp
-    src/arena/compilers/warp_backend.cpp
+    src/arena/compilers/python_backend.cpp
+    src/arena/compilers/cache_key.cpp
     src/arena/compilers/kernel_compiler.cpp
     src/arena/measurement/profiler.cpp
     src/arena/measurement/power.cpp

@@ -1,20 +1,14 @@
 #pragma once
 
-#include "arena/compilers/backend.hpp"
-#include <string>
+#include "arena/compilers/python_backend.hpp"
 
 namespace arena {
 
-// triton DSL compiler produces cubin via Triton's built-in compilation
-class TritonBackend : public CompilerBackend {
+// Triton DSL compiler, produces a cubin via Triton's built-in compilation
+class TritonBackend : public PythonBackend {
 public:
-    explicit TritonBackend(const std::string& kernel_dir);
-    CompileResult compile(const std::string& source_path,
-                          const std::string& output_name,
-                          const std::string& cache_dir,
-                          const CompileDefines& defines) override;
-private:
-    std::string kernel_dir_;
+    explicit TritonBackend(const std::string& kernel_dir)
+        : PythonBackend(kernel_dir, "Triton", "triton", "triton_base.py") {}
 };
 
 }

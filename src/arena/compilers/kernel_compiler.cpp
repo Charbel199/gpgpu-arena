@@ -1,5 +1,6 @@
 #include "arena/compilers/kernel_compiler.hpp"
 #include "arena/compilers/compiler_utils.hpp"
+#include "arena/compilers/cache_key.hpp"
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -29,16 +30,45 @@ void KernelCompiler::register_compiler(const std::string& extension,
     compilers_[extension] = std::move(compiler);
 }
 
+CompilerBackend& KernelCompiler::backend_for(const std::string& source_path) {
+    auto ext = get_extension(source_path);
+    auto it = compilers_.find(ext);
+    if (it == compilers_.end()) {
+        throw std::runtime_error("No compiler registered for extension: " + ext);
+    }
+    return *it->second;
+}
+
+std::string KernelCompiler::fingerprint(const std::string& source_path,
+                                        const CompileDefines& defines) {
+    auto& backend = backend_for(source_path);
+    BuildInputs in;
+    in.source_text = read_file(resolve_source(ARENA_KERNEL_DIR, source_path));
+    if (in.source_text.empty()) {
+        throw std::runtime_error("Cannot read kernel source: " +
+                                 resolve_source(ARENA_KERNEL_DIR, source_path));
+    }
+    for (const auto& dep : backend.dependencies()) {
+        in.dependency_texts.push_back(read_file(dep));
+    }
+    in.toolchain = backend.toolchain_id();
+    in.arch = arch_;
+    in.defines = defines;
+    return build_fingerprint(in);
+}
+
 CompileResult KernelCompiler::compile(const std::string& source_path,
                                       const CompileDefines& defines) {
-    // Defines are part of the identity of a build, not a detail of it: the
-    // same source at BLOCK_SIZE 256 and 1024 is two different cubins.
-    const std::string key = source_path + defines_suffix(defines);
+    auto log = spdlog::get("compiler");
 
-    // check in-memory cache
+    // The fingerprint covers the source text, so an edited file never hits a
+    // stale in-memory entry either. Hashing a kernel source costs microseconds.
+    const std::string fp = fingerprint(source_path, defines);
+    const std::string key = source_path + defines_suffix(defines) + "#" + fp;
+
     auto mem_it = cache_.find(key);
     if (mem_it != cache_.end()) {
-        spdlog::get("compiler")->debug("{}: in-memory cache hit", source_path);
+        log->debug("{}: in-memory cache hit", source_path);
         auto hit = mem_it->second;
         hit.cache_hit = true;
         hit.compile_ms = 0.0f;
@@ -47,19 +77,12 @@ CompileResult KernelCompiler::compile(const std::string& source_path,
         return hit;
     }
 
-    auto log = spdlog::get("compiler");
-    auto ext = get_extension(source_path);
-    auto comp_it = compilers_.find(ext);
-    if (comp_it == compilers_.end()) {
-        throw std::runtime_error("No compiler registered for extension: " + ext);
-    }
-
+    auto& backend = backend_for(source_path);
     fs::create_directories(cache_dir_);
     auto output_name = derive_output_name(source_path) + defines_suffix(defines);
 
-    // fall back disk cache
     CompileResult result;
-    if (try_disk_cache(source_path, output_name, result)) {
+    if (try_disk_cache(output_name, fp, result)) {
         log->info("{}: using cached {} (kernel={})",
             source_path, result.module_path, result.kernel_name);
         result.cache_hit = true;
@@ -70,10 +93,14 @@ CompileResult KernelCompiler::compile(const std::string& source_path,
         return result;
     }
 
-    // if nothing in cache -> compile
-    log->info("{}: compiling ({} compiler) ...", source_path, ext);
+    // A PTX sidecar from an earlier build would otherwise survive next to a
+    // fresh cubin and describe a different program.
+    std::error_code ec;
+    fs::remove(cache_dir_ + "/" + output_name + ".ptx", ec);
+
+    log->info("{}: compiling ({} compiler) ...", source_path, get_extension(source_path));
     auto t0 = std::chrono::high_resolution_clock::now();
-    result = comp_it->second->compile(source_path, output_name, cache_dir_, defines);
+    result = backend.compile(source_path, output_name, cache_dir_, defines);
     auto t1 = std::chrono::high_resolution_clock::now();
     result.cache_hit = false;
     result.invoke_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
@@ -81,10 +108,16 @@ CompileResult KernelCompiler::compile(const std::string& source_path,
     log->info("{}: compiled -> {} (kernel={})",
         source_path, result.module_path, result.kernel_name);
 
-    // save to both caches
-    save_disk_cache(source_path, output_name, result);
+    save_disk_cache(source_path, output_name, fp, result);
     cache_[key] = result;
     return result;
+}
+
+std::string KernelCompiler::emit_ptx(const std::string& source_path,
+                                     const CompileDefines& defines) {
+    compile(source_path, defines);
+    auto output_name = derive_output_name(source_path) + defines_suffix(defines);
+    return backend_for(source_path).emit_ptx(source_path, output_name, cache_dir_, defines);
 }
 
 void KernelCompiler::clear_cache() {
@@ -95,7 +128,7 @@ void KernelCompiler::clear_cache() {
         int removed = 0;
         for (auto& entry : fs::directory_iterator(cache_dir_)) {
             auto ext = entry.path().extension().string();
-            if (ext == ".cubin" || ext == ".json") {
+            if (ext == ".cubin" || ext == ".json" || ext == ".ptx") {
                 fs::remove(entry.path());
                 removed++;
             }
@@ -106,8 +139,8 @@ void KernelCompiler::clear_cache() {
     }
 }
 
-bool KernelCompiler::try_disk_cache(const std::string& source_path,
-                                     const std::string& output_name,
+bool KernelCompiler::try_disk_cache(const std::string& output_name,
+                                     const std::string& fingerprint,
                                      CompileResult& result) {
     auto meta_path = cache_dir_ + "/" + output_name + ".json";
     auto cubin_path = cache_dir_ + "/" + output_name + ".cubin";
@@ -120,13 +153,8 @@ bool KernelCompiler::try_disk_cache(const std::string& source_path,
     nlohmann::json j;
     try { meta_file >> j; } catch (...) { return false; }
 
-    // Check source mtime against cached mtime
-    auto source_full = j.value("source_full_path", "");
-    auto cached_mtime = j.value("source_mtime", 0L);
-    if (source_full.empty() || !fs::exists(source_full)) return false;
-
-    auto current_mtime = fs::last_write_time(source_full).time_since_epoch().count();
-    if (current_mtime != cached_mtime) return false;
+    // Entries written before fingerprints existed carry none and rebuild once.
+    if (j.value("fingerprint", "") != fingerprint) return false;
 
     result = result_from_json(j, cubin_path);
     return true;
@@ -134,9 +162,8 @@ bool KernelCompiler::try_disk_cache(const std::string& source_path,
 
 void KernelCompiler::save_disk_cache(const std::string& source_path,
                                       const std::string& output_name,
+                                      const std::string& fingerprint,
                                       const CompileResult& result) {
-    auto source_full = std::string(ARENA_KERNEL_DIR) + "/" + source_path;
-
     auto meta_path = cache_dir_ + "/" + output_name + ".json";
     nlohmann::json j;
     j["kernel_name"]   = result.kernel_name;
@@ -147,11 +174,10 @@ void KernelCompiler::save_disk_cache(const std::string& source_path,
     j["constants"]     = result.constants;
     j["compile_ms"]    = result.compile_ms;
     j["import_ms"]     = result.import_ms;
-
-    if (fs::exists(source_full)) {
-        j["source_full_path"] = source_full;
-        j["source_mtime"] = fs::last_write_time(source_full).time_since_epoch().count();
-    }
+    j["fingerprint"]   = fingerprint;
+    j["arch"]          = arch_;
+    j["toolchain"]     = backend_for(source_path).toolchain_id();
+    j["source_full_path"] = resolve_source(ARENA_KERNEL_DIR, source_path);
 
     std::ofstream meta_file(meta_path);
     meta_file << j.dump(2) << std::endl;
@@ -160,17 +186,23 @@ void KernelCompiler::save_disk_cache(const std::string& source_path,
 std::string KernelCompiler::derive_output_name(const std::string& source_path) {
     // "reduce/fp32/baseline.cu"        -> "reduce_fp32_baseline"
     // "reduce/fp32/reduce.triton.py"   -> "reduce_fp32_triton_reduce"
+    // "/abs/path/cand_3.cu"            -> "ext_<hash of path>_cand_3"
     //
     // Every directory component is folded into the name, not just the parent,
     // so the dtype folder keeps fp32 and fp16 builds of the same kernel from
-    // overwriting each other's cubin.
+    // overwriting each other's cubin. A source outside the kernel dir would
+    // make that an unreadable path, so it gets a short hash of the path.
     fs::path p(source_path);
 
     std::string prefix;
-    for (const auto& part : p.parent_path()) {
-        if (part.empty()) continue;
-        if (!prefix.empty()) prefix += "_";
-        prefix += part.string();
+    if (p.is_absolute()) {
+        prefix = "ext_" + hex64(fnv1a64(p.parent_path().string())).substr(0, 8);
+    } else {
+        for (const auto& part : p.parent_path()) {
+            if (part.empty()) continue;
+            if (!prefix.empty()) prefix += "_";
+            prefix += part.string();
+        }
     }
 
     std::string filename = p.filename().string();

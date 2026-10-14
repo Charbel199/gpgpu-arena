@@ -18,4 +18,13 @@ CompileResult result_from_json(const nlohmann::json& j, const std::string& modul
 // " --define BLOCK_SIZE=512 --define num_warps=8", for the Python compilers.
 std::string defines_args(const CompileDefines& defines);
 
+// Absolute paths pass through; anything else is relative to the kernel dir.
+std::string resolve_source(const std::string& kernel_dir, const std::string& source_path);
+
+// Whole file as a string, or "" if it cannot be read.
+std::string read_file(const std::string& path);
+
+// Single-quoted for /bin/sh, so paths with spaces survive popen().
+std::string shell_quote(const std::string& s);
+
 }

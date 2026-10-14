@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <array>
+#include <fstream>
 #include <sys/wait.h>
 
 namespace arena {
@@ -69,6 +70,28 @@ std::string defines_args(const CompileDefines& defines) {
         out += " --define " + key + "=" + std::to_string(val);
     }
     return out;
+}
+
+std::string resolve_source(const std::string& kernel_dir, const std::string& source_path) {
+    if (!source_path.empty() && source_path[0] == '/') return source_path;
+    return kernel_dir + "/" + source_path;
+}
+
+std::string read_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return "";
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+std::string shell_quote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    return out + "'";
 }
 
 }

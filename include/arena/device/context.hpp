@@ -50,6 +50,11 @@ public:
     int memory_clock_khz() const { return memory_clock_khz_; }
     int memory_bus_width() const { return memory_bus_width_; }
 
+    // "sm_120". Cubins are built for this and the compile cache is keyed on it.
+    std::string arch() const {
+        return "sm_" + std::to_string(cc_major_) + std::to_string(cc_minor_);
+    }
+
     // destroy and recreate the CUDA context (recovers from sticky errors like illegal memory access)
     void reset();
 
