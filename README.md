@@ -137,6 +137,14 @@ Kernels report measured error, not just pass or fail. Every category checks
 against a CPU reference summed in `double` and reports max and mean relative
 error next to the tolerance it was judged against.
 
+Verification covers the whole output, so a kernel cannot pass by computing
+only the parts that get checked. Reduce and softmax check every value, scan
+every element, and matmul one element in every output tile plus the full
+last row and column, at positions that change with the seed. Scan and matmul
+measure each error against the sum of the magnitudes that went into it, the
+scale summation error grows with, because a mixed-sign prefix or dot product
+can land near zero where a plain relative error fails a correct kernel.
+
 There are two errors because they answer different questions.
 
 Arithmetic error is measured against the inputs the kernel actually received,
@@ -271,6 +279,12 @@ kernels/reduce/my_kernel.cutile.cpp   # descriptor plus param buffer
 
 The descriptor sets `needs_compilation() = true` and `source_path()`. Compiling,
 loading, benchmarking and verifying happen automatically.
+
+A CUDA source can also choose its own launch shape with a comment such as
+`// arena: BLOCK_M=128 BLOCK_N=128 THREADS=256`. Upper-case keys land in the
+compile result's constants, the same place a Triton kernel's constexprs go,
+and descriptors like `matmul_tiled` and `scan_multiblock` build their grid
+from them.
 
 ## Layout
 
