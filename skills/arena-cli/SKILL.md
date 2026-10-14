@@ -46,6 +46,7 @@ Measurement options:
 | `--define K=v` | Compile-time knob for a DSL kernel (Triton `BLOCK_SIZE`, `num_warps`; cuTile `TILE_SIZE`). |
 | `--sweep-block` | Run every block size (CUDA) or compile config (DSL) the kernel declares. |
 | `--source-override <file>` | Run another source in this kernel's slot. See the arena-inspect skill. |
+| `--manifest <file.json>` | Run a kernel described by a JSON manifest, in any DSL, with no C++ descriptor. Replaces the kernel name. See the arena-optimize skill's manifests.md. |
 | `-o file --format csv` | Write CSV instead of JSON to stdout. |
 
 ## Exit codes
@@ -60,7 +61,7 @@ Each result:
 
 ```text
 kernel, category, dsl, source        what ran (source is the file actually compiled)
-input        {params, distribution, seed, cold_l2}
+input        {params, distribution, seed, verify_seed, cold_l2}
 launch       {grid, block, shared_mem_bytes}
 timing       op_ms, gpu_ms, overhead_ms, launch_count, all_times_ms
 cold_start   module_load_ms, first_launch_ms
@@ -81,6 +82,7 @@ Rules that keep comparisons honest:
 - Throughput divides by `op_ms`; counters describe the kernel, so pair them with `gpu_ms`.
 - Percentage of speed of light for a memory-bound kernel is `bandwidth_gbps / environment.peak_dram_gbps`. For compute-bound, `gflops / peak_fp32_gflops`. The ridge point is `peak_fp32_gflops / peak_dram_gbps` FLOP/byte.
 - `max_total_error` is comparable across dtypes. Pass and fail use `max_rel_error` against `tolerance`.
+- `verified` is judged on a separate launch with inputs regenerated from `verify_seed`, after timing, and covers the whole output.
 - If `quality.warmup_converged` is false, the clock was still moving. Rerun or use more runs before drawing conclusions.
 - Compare kernels only at the same `input` and `cold_l2` setting.
 

@@ -71,13 +71,16 @@ $ARENA --inspect reduce_my_kernel
 
 All combinations must verify (exit code 0) before it is worth timing.
 
+## Trying a kernel before adding it
+
+A kernel does not need a descriptor to be run, timed or inspected: a JSON manifest next to the source is enough (`$ARENA --manifest k.json`, see the arena-optimize skill's [manifests.md](../arena-optimize/manifests.md)). Add a descriptor once the kernel should be permanent: listed by `--list`, part of category runs and shown in the GUI.
+
 ## Promoting a PGAIO candidate
 
-A candidate from `pgaio/runs/<run>/candidates/` already fits an existing slot's ABI, so promotion is a copy plus a descriptor:
+`python3 tools/pgaio.py best <run>` gives the best candidate's folder: a source and, in a problem run, the manifest that launches it.
 
-1. `python3 tools/pgaio.py best <run>` gives the candidate, the slot source and the slot descriptor.
-2. Copy the candidate to `kernels/<category>/<dtype>/<new name>.<ext>` and rename its entry point to something unique (CUDA) or keep it (DSLs, whose descriptor reads it from the compile result).
-3. Copy the slot's descriptor to `<new name>.cpp`, change `name()`, `description()`, `source_path()` and, for CUDA, `function_name()`.
-4. Rebuild, then run the checks above. The new kernel now shows up in the GUI and in category runs next to the original.
+1. Copy the source to `kernels/<category>/<dtype>/<new name>.<ext>`. For CUDA, give the entry point a unique name.
+2. Write `<new name>.cpp` from the manifest: `grid`, `block` and `shared_mem` become `get_launch_config()`, `args` become `get_kernel_args()`, scratch buffers are allocated in `allocate()` and zeroed in `reset()`. Start from the closest descriptor in the table above; `kernels/scan/fp32/multiblock.cpp` shows scratch, `kernels/reduce/fp32/reduce.warp.cpp` the Warp structs (`include/arena/warp_abi.hpp`), `kernels/matmul/fp32/matmul.cutile.cpp` the cuTile expansion. In a single-slot run, copy the slot's descriptor instead and change `name()`, `description()`, `source_path()` and, for CUDA, `function_name()`.
+3. Rebuild, then run the checks above. The new kernel now shows up in the GUI and in category runs next to the original.
 
 Do this after a PGAIO run has finished, never during one: `kernels/` is protected while a run is active, and changing it rejects the iteration.

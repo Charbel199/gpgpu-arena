@@ -1,104 +1,94 @@
 ---
 name: arena-optimize
-description: Profile and benchmark guided AI optimization (PGAIO) of one GPGPU Arena kernel. Runs a measured loop of hypothesis, candidate, evaluation and diagnosis against speed of light, with correctness gates and an iteration budget, in CUDA, Triton, cuTile or Warp. Use when asked to optimize, speed up or tune an arena kernel, run a PGAIO iteration, or measure iterations-to-SOL for a DSL.
+description: Profile and benchmark guided AI optimization (PGAIO) of a GPGPU Arena problem such as softmax, scan, reduce or matmul. Write as many candidate kernels as needed in CUDA, Triton, cuTile or Warp, compare their SASS for free, measure the promising ones against speed of light with correctness gates and a per-DSL budget, and borrow ideas across DSLs. Use when asked to optimize or speed up an arena kernel or category, run PGAIO, or measure iterations-to-SOL.
 ---
 
-# PGAIO: optimizing an arena kernel
+# PGAIO: optimizing an arena problem
 
-You are the optimizer. `tools/pgaio.py` is the environment: it compiles and measures each candidate the same way, gates correctness on held-out inputs, scores against the roofline, diffs SASS, and logs every iteration. Read the arena-cli and arena-inspect skills for how the measurements work.
+You are the optimizer. `tools/pgaio.py` is the environment: it compiles and measures every candidate the same way, gates correctness on held-out inputs, scores against the roofline, diffs SASS, logs every iteration, and draws the progression. Read the arena-cli and arena-inspect skills for how the measurements work, and [manifests.md](manifests.md) for the candidate format.
 
 Run everything from the repo root. By default `pgaio.py` drives arena through Docker (`docker compose run --rm -T cli`), which has all four DSLs. For a native build pass `--arena build/arena` (any build dir) to `init` or set `ARENA_CMD`.
 
 ## 1. Start a run
 
-Pick a slot: an existing kernel whose descriptor fixes the ABI. The run starts from the slot's own source, or from any file of the same type passed with `--start <file>`. Slots that work well, with their starting SOL on an RTX PRO 6000 at the PGAIO sizes:
-
-| Category | DSL | Slot | Start | Launch shape |
-| --- | --- | --- | --- | --- |
-| reduce | CUDA | `reduce_grid_stride` | ~75% | `32 * SMs` blocks; `// arena: block=N` picks 64 to 1024 |
-| reduce | Triton | `triton_reduce_grid_stride` | ~76% | grid from the source's `NUM_BLOCKS`, tile `BLOCK_SIZE`, threads `num_warps` |
-| reduce | cuTile | `cutile_reduce` | | one tile per block, grid `n / TILE_SIZE` |
-| reduce | Warp | `warp_reduce` | | one thread per element, block 256; tight, note it in the report |
-| scan | CUDA | `scan_multiblock` | ~0.2% | `// arena: THREADS=256 GRID_PER_SM=4 SHMEM=0`; a 4th argument is a zeroed workspace of at least 64 + 16 * ceil(n / 32) bytes |
-| softmax | CUDA | `softmax_naive` | ~72% | one block per row; `// arena: block=N` picks 64 to 1024; dynamic shared memory is block * 4 bytes |
-| matmul | CUDA | `matmul_tiled` | ~6.5% of FP32 peak | `// arena: BLOCK_M=16 BLOCK_N=16 THREADS=256 SHMEM=0`; grid covers C in BLOCK_M x BLOCK_N tiles |
-| matmul | Triton | `triton_matmul` | | grid and tiles from the source's constants |
-| matmul | cuTile | `cutile_matmul` | | tiles from `BLOCK_M`/`BLOCK_N`/`BLOCK_K`; computes in fp16 |
-
-Avoid `scan_naive` (one block, capped at a fraction of a percent) and `matmul_naive` (fixed 16x16 thread blocks). Upper-case `// arena: KEY=N` lines in a CUDA source are read into the slot's launch constants, so for slots that use them the candidate chooses its own launch shape. Matmul SOL is measured against the FP32 CUDA-core peak, so a tensor-core kernel can read above 100%.
-
-The slots start at different SOL levels, and the report shows each run's baseline next to its curve, so compare runs from the same starting point.
+A run targets a problem: a category, its sizes, and its correctness checks. Candidates can be in any allowed DSL, in any order.
 
 ```bash
-python3 tools/pgaio.py init --kernel reduce_grid_stride \
-    --budget 20 --target 0.9 --mode isolated --docs off --model <your model id>
+python3 tools/pgaio.py init --category softmax --budget-per-dsl 10 --target 0.9 \
+    --mode isolated --docs off --model <your model id>
 ```
 
-`init` measures the starting source as iteration 0, prints its observation and any learnings from earlier runs, and creates `pgaio/runs/<run>/` with `work/` for your drafts. Checks the starting source itself fails are dropped from the gate and listed.
+`init` measures the category's plainest kernel as iteration 0 (softmax: `softmax_naive`; reduce: `reduce_baseline`; scan: `scan_multiblock`; matmul: `matmul_naive`; override with `--baseline`), prints its observation and any learnings from earlier runs, and creates `pgaio/runs/<run>/` with `work/` for your drafts. Checks the baseline itself fails are dropped from the gate and listed. `--dsls cuda,triton` restricts the languages; `--budget` caps the total.
 
-Modes:
+Options worth knowing:
 
-- `isolated`: study only this slot. Do not read, inspect or time other kernels in the repo, and do not use what you know of them.
-- `cross-dsl`: you may run `--inspect`, `--sass` and timings on any other kernel, in any DSL, and use what they show. Say which kernel inspired an idea in its hypothesis.
+- `--mode isolated`: do not read, inspect or time the existing kernels in `kernels/`, and do not use what you know of them. Your own candidates, in every DSL, are fair game.
+- `--mode cross-dsl`: you may also inspect and time any existing kernel and say which one inspired an idea.
+- `--docs on|off`: whether a CUDA documentation tool is available (section 5). Record it truthfully.
 
-Keep the mode honest, since the report compares them.
+## 2. The loop
 
-### CUDA documentation tools
+For each idea:
 
-Before `init`, check whether a CUDA documentation tool is connected: an MCP tool whose name mentions Nsight Copilot, CUDA docs or similar. Then:
-
-- If one is connected, pass `--docs on` and use it during the run to check API signatures (cuTile and Warp change between versions), architecture limits for the GPU in `environment.arch`, and unfamiliar PTX or SASS instructions. Looking up a fact before submitting is cheaper than a failed compile, which costs an iteration.
-- If none is connected, tell the user once that a CUDA documentation MCP server would help (NVIDIA's Nsight Copilot CUDA server, for those with access) and that adding one takes effect in a new session. Do not add it yourself. Then continue with `--docs off`.
-
-Pass `--docs` truthfully: the report compares runs with and without documentation access.
-
-## 2. Learn the slot before changing it
-
-1. Read `descriptor_file` (printed by `init`): launch config, arguments, block size rules.
-2. Read the starting source and `pgaio/runs/<run>/obs/000.sass`.
-3. Note the entry point and parameter list. A candidate must keep both.
-
-## 3. Iterate
-
-For each iteration:
-
-1. Pick one hypothesis from the last observation: its diagnosis lines, counters and SASS. Prefer the change with the largest expected effect. State it as cause and effect: "scalar 4 B loads and one atomic per thread; a block-level shuffle reduction with float4 loads should cut atomics by 256x and load instructions by 4x".
-2. Write the candidate under `pgaio/runs/<run>/work/` as a complete file of the slot's type.
-3. Evaluate it:
+1. **Write a candidate** in `pgaio/runs/<run>/work/`: a kernel source plus a manifest saying how to launch it. The baseline's source is copied to `candidates/000_baseline/` to start from. Copy the matching example from [manifests.md](manifests.md) for a new DSL rather than guessing its argument format.
+2. **Look at it for free**:
 
    ```bash
-   python3 tools/pgaio.py eval <run> pgaio/runs/<run>/work/cand.cu --hypothesis "<the hypothesis>"
+   python3 tools/pgaio.py sass <run> pgaio/runs/<run>/work/v3.json
    ```
 
-4. Read the observation. It has the verdict, correctness, time against baseline and best, SOL, counters, resources, SASS counts and their change against the best so far, and a heuristic diagnosis. The full JSON is in `obs/NNN.json`, the SASS in `obs/NNN.sass`.
-5. Decide what the result tells you about the hypothesis before choosing the next one. A slower or equal result is information: say what it rules out.
+   This compiles the draft and prints registers, spills and the SASS instruction mix, the difference against the best so far, and a `diff` command for the two SASS listings. It never runs or times the kernel, so it costs nothing. Use it as often as you like: to check that a change compiled the way you meant (128-bit loads, warp shuffles instead of shared memory, no spills), and to compare how the same idea compiles in different DSLs.
+3. **Measure it** when you expect it to help:
 
-Verdicts: `ok`, `incorrect` (a gated check failed: size, distribution, seed and error are listed), `compile_error`, `runtime_error`, `rejected_guard`. Every eval spends one iteration, whatever the verdict, so compile-check your reasoning before submitting. `pgaio.py status <run>` shows the history.
+   ```bash
+   python3 tools/pgaio.py eval <run> pgaio/runs/<run>/work/v3.json --hypothesis "<cause and effect>"
+   ```
 
-Stop when the target is reached, the budget is spent, or three iterations in a row fail to improve while the diagnosis says the kernel is within 15% of the roof.
+   This snapshots the manifest and source, checks correctness on held-out shapes, distributions and seeds, times it at a size larger than L2 with a cold cache, and prints the verdict, SOL, counters, SASS and a heuristic diagnosis. Every eval spends one iteration of that DSL's budget, whatever the verdict.
+4. **Compare** any two measured iterations, free: `python3 tools/pgaio.py compare <run> 2 7`.
+5. **Decide** what the result says about the hypothesis before the next one. A slower result rules something out; say what.
 
-## 4. Rules
+State hypotheses as cause and effect, citing the evidence: "Triton's SASS uses 4 shuffles and no shared memory per reduction where my CUDA kernel uses 10 shared ops and 9 syncs; a warp-shuffle reduction in CUDA should cut the syncs and gain a few percent."
 
-These keep the score meaningful. Breaking one invalidates the run.
+Moving ideas between DSLs is the point. When one DSL produces better SASS for the same algorithm, look at what it emitted and write the same thing in the other. When a DSL's abstraction blocks an idea, say so and move on.
+
+Verdicts: `ok`, `incorrect` (a gated check failed; size, distribution, seed and error are listed), `compile_error`, `runtime_error` (includes a manifest whose arguments do not match the kernel; the message says which), `rejected_guard`. `pgaio.py status <run>` shows the history and the budget left per DSL.
+
+Stop when the target is reached, the budget is spent, or several iterations in a row fail to improve while the diagnosis says you are within 15% of the roof.
+
+## 3. Rules
+
+These keep the score meaningful, and the harness enforces most of them.
 
 - Do not modify anything under `src/`, `include/`, `kernels/`, `tests/`, `tools/`, `CMakeLists.txt` or the Docker files during a run. `eval` hashes them and rejects the iteration if anything changed.
-- Compute the result from the inputs, every launch. No special cases for particular sizes, seeds, distributions or values, no caching across launches, no reading the expected answer.
-- Keep accuracy within the gate on every distribution, including `adversarial`. Changing the accumulation order is fine; dropping elements or precision to win time is not.
-- Use the slot's ABI as it is. If an idea needs a different launch shape or arguments, record it in the final summary as a follow-up kernel (see arena-add-kernel) instead of working around the descriptor.
-- One candidate file per iteration, evaluated through `pgaio.py eval`. Do not time candidates with arena directly to pick the best before submitting: every measured attempt counts.
+- Candidates are kernels plus manifests. A manifest cannot run code, so verification, input data and the byte counts SOL is computed from are out of reach by design.
+- Compute the full result from the inputs on every launch. Verification runs on inputs regenerated with a seed the kernel never saw, after timing, and checks the whole output, so caching, precomputing or skipping work fails.
+- Keep accuracy within the gate on every distribution, including `adversarial`.
+- No libraries that do the work for you: no cuDNN, CUB, Thrust, CUTLASS, cuBLAS or PyTorch ops. Language primitives (warp shuffles, `tl.max`, `ct.sum`) are fine.
+- Measure through `pgaio.py eval` only. Do not time candidates with arena directly to choose what to submit; `sass` is the free tool, and it shows no timing.
 
-Float atomics make the summation order nondeterministic, so an atomic-heavy kernel can land just inside or just outside tolerance on a given check from one run to the next. If a check fails by a hair on a change that did not touch arithmetic, say so in the next hypothesis.
+Timing noise between runs is a few percent. Do not read a 2% change as a win or a loss without a SASS or counter difference to explain it. Float atomics make summation order nondeterministic, so an atomic-heavy kernel can land on either side of a tolerance by a hair.
 
-## 5. Finish
+## 4. Finish
 
 1. `python3 tools/pgaio.py status <run>` and `python3 tools/pgaio.py best <run>`.
-2. Record one to three insights that would help a future run, with their evidence:
+2. Record one to three insights for future runs, with evidence:
 
    ```bash
-   python3 tools/pgaio.py learn <run> --insight "Triton reduce: NUM_BLOCKS near 4x SMs with BLOCK_SIZE 4096 beat larger grids" \
-       --evidence "iter 6: 81% -> 88% SOL"
+   python3 tools/pgaio.py learn <run> --insight "cuTile softmax: TILE 4096 with one row per block beat 1024 by 6%" \
+       --evidence "iter 9 vs 6"
    ```
 
-   Insights are about the hardware, the DSL or the problem, not about this run's bookkeeping.
-3. `python3 tools/pgaio.py report` prints iterations-to-50/70/80/90% SOL per run and per DSL and mode; `--csv curves.csv` writes the best-so-far curves.
-4. Summarize for the user: start and final SOL, the iterations that moved it and why, what did not work, and whether the best candidate should be promoted into a permanent kernel (arena-add-kernel). Promotion changes `kernels/`, so ask first.
+3. `python3 tools/pgaio.py report --html pgaio/runs/<run>/progress.html` draws the progression: every iteration coloured by DSL, the best-so-far line, hypotheses and SASS changes. The markdown tables give iterations-to-50/70/80/90% SOL overall and per DSL.
+4. Summarize for the user: start and final SOL, which iterations moved it and why, which DSL ideas transferred, what did not work, and whether the best candidate should be promoted to `kernels/` (arena-add-kernel). Promotion changes `kernels/`, so ask first.
+
+## 5. CUDA documentation tools
+
+Before `init`, check whether a CUDA documentation tool is connected: an MCP tool whose name mentions Nsight Copilot, CUDA docs or similar.
+
+- If one is connected, pass `--docs on` and use it to check API signatures (cuTile and Warp change between versions), architecture limits for the GPU in `environment.arch`, and unfamiliar PTX or SASS instructions. A lookup is cheaper than a failed compile.
+- If none is connected, tell the user once that a CUDA documentation MCP server would help (NVIDIA's Nsight Copilot CUDA server, for those with access) and that adding one takes effect in a new session. Do not add it yourself. Then continue with `--docs off`.
+
+## Single-slot runs
+
+`init --kernel <name>` instead optimizes one existing kernel's source in place: candidates are plain source files of that kernel's type, run with `--source-override` against its compiled descriptor, and `sass`/`eval` take the source path. Use it to tune a kernel without changing its launch shape. Everything else above applies.
