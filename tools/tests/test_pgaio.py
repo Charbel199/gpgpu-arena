@@ -259,3 +259,102 @@ class TestSmallHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProblemRuns(unittest.TestCase):
+    def cfg(self, **over):
+        c = {"kind": "problem", "name": "r", "category": "softmax", "dsls": ["cuda", "triton"],
+             "budget": 4, "budget_per_dsl": 2, "target": 0.9, "mode": "isolated"}
+        c.update(over)
+        return c
+
+    def att(self, it, dsl, score=None, verdict=None):
+        return {"iteration": it, "dsl": dsl, "score": score,
+                "verdict": verdict or ("ok" if score is not None else "incorrect"),
+                "hypothesis": f"h{it}"}
+
+    def test_dsl_of(self):
+        self.assertEqual(pgaio.dsl_of("a/b.cu"), "cuda")
+        self.assertEqual(pgaio.dsl_of("x.triton.py"), "triton")
+        self.assertEqual(pgaio.dsl_of("x.cutile.py"), "cutile")
+        self.assertEqual(pgaio.dsl_of("x.warp.py"), "warp")
+        self.assertIsNone(pgaio.dsl_of("x.py"))
+        self.assertIsNone(pgaio.dsl_of("x.json"))
+
+    def test_budget(self):
+        cfg = self.cfg()
+        base = [self.att(0, "cuda", 0.7)]
+        self.assertIsNone(pgaio.budget_error(cfg, base, "triton"))
+        self.assertIn("not allowed", pgaio.budget_error(cfg, base, "warp"))
+        two_triton = base + [self.att(1, "triton", 0.5), self.att(2, "triton")]
+        self.assertIn("triton budget", pgaio.budget_error(cfg, two_triton, "triton"))
+        self.assertIsNone(pgaio.budget_error(cfg, two_triton, "cuda"))
+        full = two_triton + [self.att(3, "cuda"), self.att(4, "cuda")]
+        self.assertIn("run's budget", pgaio.budget_error(cfg, full, "cuda"))
+
+    def test_budget_baseline_is_free(self):
+        cfg = self.cfg(budget=1, budget_per_dsl=1)
+        self.assertIsNone(pgaio.budget_error(cfg, [self.att(0, "cuda", 0.7)], "cuda"))
+
+    def test_per_dsl_curves_exclude_the_baseline(self):
+        atts = [self.att(0, "cuda", 0.7), self.att(1, "triton", 0.5), self.att(2, "cuda"),
+                self.att(3, "triton", 0.8), self.att(4, "cuda", 0.75)]
+        curves = pgaio.per_dsl_curves(atts)
+        self.assertEqual(curves["triton"], [0.5, 0.8])
+        self.assertEqual(curves["cuda"], [0.0, 0.75])
+
+    def test_best_per_dsl_skips_dsls_with_no_pass(self):
+        atts = [self.att(0, "cuda", 0.7), self.att(1, "triton", 0.6), self.att(2, "cuda"),
+                self.att(3, "triton", 0.8)]
+        self.assertEqual(pgaio.best_per_dsl(atts), {"triton": 0.8})
+
+    def test_summarize_dsls(self):
+        atts = [self.att(0, "cuda", 0.7), self.att(1, "triton", 0.85), self.att(2, "cuda", 0.6)]
+        rows = pgaio.summarize_dsls(self.cfg(), atts)
+        by = {r["dsl"]: r for r in rows}
+        self.assertEqual(by["triton"]["iters_to_80"], 1)   # first attempt, counted from 1
+        self.assertEqual(by["cuda"]["iters_to_50"], 1)
+        self.assertIsNone(by["cuda"]["iters_to_70"])
+        self.assertEqual(pgaio.summarize_dsls(self.cfg(kind="slot"), atts), [])
+
+    def test_snapshot_manifest(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "draft").mkdir()
+            (d / "draft" / "k.triton.py").write_text("kernel v1")
+            m = d / "draft" / "m.json"
+            m.write_text(json.dumps({"category": "softmax", "source": "k.triton.py", "launches": []}))
+            out, dsl = pgaio.snapshot_manifest(m, d / "snap")
+            self.assertEqual(dsl, "triton")
+            self.assertEqual(json.loads(out.read_text())["source"], "k.triton.py")
+            self.assertEqual((d / "snap" / "k.triton.py").read_text(), "kernel v1")
+            # later edits to the draft do not touch the snapshot
+            (d / "draft" / "k.triton.py").write_text("kernel v2")
+            self.assertEqual((d / "snap" / "k.triton.py").read_text(), "kernel v1")
+
+    def test_snapshot_rejects_unknown_dsl(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "k.py").write_text("x")
+            m = d / "m.json"
+            m.write_text(json.dumps({"source": "k.py"}))
+            with self.assertRaises(SystemExit):
+                pgaio.snapshot_manifest(m, d / "snap")
+
+    def test_html_page(self):
+        atts = [self.att(0, "cuda", 0.7), self.att(1, "triton", 0.85), self.att(2, "cuda")]
+        atts[1]["new_best"] = True
+        atts[1]["hypothesis"] = "vectorize <loads> & fuse"
+        page = pgaio.render_html([(self.cfg(), atts)])
+        self.assertTrue(page.startswith("<!doctype html>"))
+        self.assertIn("<title>PGAIO Progression</title>", page)
+        self.assertIn("prefers-color-scheme: dark", page)
+        self.assertIn("vectorize &lt;loads&gt; &amp; fuse", page)   # escaped
+        self.assertNotIn("<loads>", page)
+        self.assertEqual(page.count("<circle"), 2)                 # two passing points
+        self.assertIn("triton best 85.0%", page)
+        self.assertIn("<svg", pgaio.render_html([]) + pgaio.render_run_svg(self.cfg(), atts))

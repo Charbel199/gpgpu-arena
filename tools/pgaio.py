@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """Profile and benchmark guided AI optimization (PGAIO) driver for GPGPU Arena.
 
-An agent optimizes one kernel slot by writing candidate sources. This script
-is the environment around it: it measures each candidate the same way, refuses
-the ways a candidate can cheat, keeps the history, and turns raw counters into
-a short diagnosis the agent can act on.
+An agent optimizes a problem (a category such as softmax) by writing
+candidate kernels in any DSL, each with a small JSON manifest saying how to
+launch it. This script is the environment around it: it measures every
+candidate the same way, refuses the ways a candidate can cheat, keeps the
+history, and turns raw counters into a short diagnosis the agent can act on.
 
-    pgaio.py init   --kernel reduce_baseline [--budget 20] [--target 0.9]
-    pgaio.py eval   <run> <candidate file> --hypothesis "vectorize loads"
-    pgaio.py status <run>
-    pgaio.py best   <run>
-    pgaio.py learn  <run> --insight "..." [--evidence "..."]
-    pgaio.py report [--csv curves.csv]
+    pgaio.py init    --category softmax [--budget-per-dsl 10] [--target 0.9]
+    pgaio.py sass    <run> <manifest.json>           free: SASS mix, no timing
+    pgaio.py eval    <run> <manifest.json> --hypothesis "..."   one iteration
+    pgaio.py compare <run> <iteration> <iteration>   free
+    pgaio.py status  <run>
+    pgaio.py best    <run>
+    pgaio.py learn   <run> --insight "..." [--evidence "..."]
+    pgaio.py report  [--csv curves.csv] [--html progress.html]
+
+`init --kernel <name>` instead starts a single-slot run, where candidates
+are plain sources run in that kernel's slot with --source-override.
 
 Every eval counts as one iteration, including ones that fail to compile, fail
-correctness, or touch a protected file. That is what makes iterations-to-SOL
-comparable across DSLs.
+correctness, or touch a protected file. Looking at SASS does not: it shows
+how a draft compiled, never how fast it is.
 
 Only the standard library is used, so this runs on the host while arena runs
 in Docker.
@@ -68,6 +74,17 @@ CATEGORIES = {
 }
 CHECK_DISTS = ["uniform", "normal", "adversarial"]
 SOL_THRESHOLDS = [0.5, 0.7, 0.8, 0.9]
+
+# The reference a problem run starts from: the plainest existing kernel of
+# the category, measured as iteration 0.
+CATEGORY_BASELINE = {
+    "reduce": "reduce_baseline",
+    "scan": "scan_multiblock",
+    "softmax": "softmax_naive",
+    "matmul": "matmul_naive",
+}
+DSL_EXT = {".cu": "cuda", ".triton.py": "triton", ".cutile.py": "cutile", ".warp.py": "warp"}
+DSLS = ["cuda", "triton", "cutile", "warp"]
 
 
 # --------------------------------------------------------------------------
@@ -308,6 +325,50 @@ def candidate_ext(path):
     return name[dot:] if dot >= 0 else ""
 
 
+def dsl_of(path):
+    """"cuda" for x.cu, "triton" for x.triton.py, None otherwise."""
+    return DSL_EXT.get(candidate_ext(path))
+
+
+def budget_error(cfg, attempts, dsl):
+    """Why another iteration in this DSL is not allowed, or None.
+
+    Baselines (iteration 0) do not count against any budget."""
+    if cfg.get("kind") == "problem":
+        allowed = cfg.get("dsls", DSLS)
+        if dsl not in allowed:
+            return f"{dsl} is not allowed in this run (allowed: {', '.join(allowed)})"
+    used = [x for x in attempts if x.get("iteration", 0) > 0]
+    if len(used) >= cfg["budget"]:
+        return f"the run's budget of {cfg['budget']} iterations is used up"
+    per = cfg.get("budget_per_dsl") or 0
+    if per and sum(1 for x in used if x.get("dsl") == dsl) >= per:
+        return f"the {dsl} budget of {per} iterations is used up; try another DSL"
+    return None
+
+
+def best_per_dsl(attempts):
+    """Best passing score per DSL, over its own iterations. A DSL with no
+    passing attempt is absent rather than reported as 0%."""
+    out = {}
+    for a in attempts:
+        if a.get("iteration", 0) == 0 or a.get("verdict") != "ok" or a.get("score") is None:
+            continue
+        out[a["dsl"]] = max(out.get(a["dsl"], 0.0), a["score"])
+    return out
+
+
+def per_dsl_curves(attempts):
+    """Best-so-far per DSL, over that DSL's own iterations only (the baseline
+    excluded), so "iterations to 80%" means attempts spent in that language."""
+    out = {}
+    for a in attempts:
+        if a.get("iteration", 0) == 0 or not a.get("dsl"):
+            continue
+        out.setdefault(a["dsl"], []).append(a)
+    return {d: best_so_far(xs) for d, xs in out.items()}
+
+
 def summarize_run(run_cfg, attempts):
     """One row of the report."""
     curve = best_so_far(attempts)
@@ -328,6 +389,24 @@ def summarize_run(run_cfg, attempts):
     for th in SOL_THRESHOLDS:
         row[f"iters_to_{int(th * 100)}"] = iterations_to(curve, th)
     return row
+
+
+def summarize_dsls(run_cfg, attempts):
+    """For a problem run, one extra row per DSL tried: its own curve over its
+    own iterations. curve[0] is that DSL's first attempt, so iterations_to
+    counts from 1 here (an attempt that hits 80% at once took 1 iteration)."""
+    if run_cfg.get("kind") != "problem":
+        return []
+    base = summarize_run(run_cfg, attempts)
+    rows = []
+    for dsl, curve in sorted(per_dsl_curves(attempts).items()):
+        row = {**base, "run": f"{base['run']}:{dsl}", "dsl": dsl, "kernel": base["category"],
+               "iterations": len(curve), "baseline_sol": base["baseline_sol"],
+               "best_sol": curve[-1] if curve else 0.0, "curve": curve}
+        for th in SOL_THRESHOLDS:
+            row[f"iters_to_{int(th * 100)}"] = iterations_to(curve, th, start_iteration=1)
+        rows.append(row)
+    return rows
 
 
 def group_key(row):
@@ -355,6 +434,149 @@ def aggregate(rows):
             agg[key + "_reached"] = f"{len(hit)}/{len(rs)}"
         out[dsl] = agg
     return out
+
+
+DSL_COLORS = {"cuda": "#3f9d2f", "triton": "#d9822b", "cutile": "#2b7bd9", "warp": "#8e44ad"}
+
+
+def _esc(text):
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def render_run_svg(cfg, attempts, width=760, height=300):
+    """One run's progression: every iteration as a point coloured by DSL,
+    failures as crosses on the floor, the best-so-far as a step line, and the
+    target as a dashed rule. Pure string building, unit-tested."""
+    pad_l, pad_r, pad_t, pad_b = 48, 16, 16, 34
+    w, h = width - pad_l - pad_r, height - pad_t - pad_b
+    n = max(1, len(attempts) - 1)
+    scores = [a["score"] for a in attempts if a.get("score") is not None]
+    top = max([1.0] + scores)
+    x = lambda i: pad_l + w * i / n
+    y = lambda v: pad_t + h * (1 - v / top)
+
+    out = [f'<svg viewBox="0 0 {width} {height}" role="img" '
+           f'aria-label="SOL per iteration for {_esc(cfg.get("name", ""))}">']
+    for v in (0.0, 0.5, 0.7, 0.9, 1.0):
+        if v <= top:
+            out.append(f'<line class="grid" x1="{pad_l}" x2="{pad_l + w}" y1="{y(v):.1f}" y2="{y(v):.1f}"/>'
+                       f'<text class="axis" x="{pad_l - 6}" y="{y(v) + 4:.1f}" text-anchor="end">{v:.0%}</text>')
+    t = cfg.get("target")
+    if t:
+        out.append(f'<line class="target" x1="{pad_l}" x2="{pad_l + w}" y1="{y(t):.1f}" y2="{y(t):.1f}"/>'
+                   f'<text class="axis" x="{pad_l + w}" y="{y(t) - 5:.1f}" text-anchor="end">target {t:.0%}</text>')
+    step = max(1, n // 10)
+    for i in range(0, n + 1, step):
+        out.append(f'<text class="axis" x="{x(i):.1f}" y="{pad_t + h + 18}" text-anchor="middle">{i}</text>')
+    out.append(f'<text class="axis" x="{pad_l + w / 2:.1f}" y="{height - 2}" text-anchor="middle">iteration</text>')
+
+    curve = best_so_far(attempts)
+    pts = []
+    for i, v in enumerate(curve):
+        if i > 0:
+            pts.append(f"{x(i):.1f},{y(curve[i - 1]):.1f}")
+        pts.append(f"{x(i):.1f},{y(v):.1f}")
+    out.append(f'<polyline class="best" points="{" ".join(pts)}"/>')
+
+    for i, a in enumerate(attempts):
+        color = DSL_COLORS.get(a.get("dsl"), "#888")
+        tip = _esc(f"{i} · {a.get('dsl') or ''} · {a.get('verdict')}"
+                   + (f" · {a['score']:.1%}" if a.get("score") is not None else "")
+                   + f" · {a.get('hypothesis', '')}")
+        if a.get("score") is not None:
+            r = 6 if a.get("new_best") else 4
+            out.append(f'<circle cx="{x(i):.1f}" cy="{y(a["score"]):.1f}" r="{r}" fill="{color}">'
+                       f'<title>{tip}</title></circle>')
+        else:
+            cx, cy = x(i), pad_t + h - 6
+            out.append(f'<g stroke="{color}" stroke-width="2"><title>{tip}</title>'
+                       f'<line x1="{cx - 4:.1f}" y1="{cy - 4:.1f}" x2="{cx + 4:.1f}" y2="{cy + 4:.1f}"/>'
+                       f'<line x1="{cx - 4:.1f}" y1="{cy + 4:.1f}" x2="{cx + 4:.1f}" y2="{cy - 4:.1f}"/></g>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def render_html(runs):
+    """The progression page for a list of (run config, attempts)."""
+    sections = []
+    for cfg, attempts in runs:
+        curve = best_so_far(attempts)
+        dsl_best = best_per_dsl(attempts)
+        legend = "".join(f'<span class="chip"><i style="background:{DSL_COLORS.get(d, "#888")}"></i>'
+                         f'{_esc(d)}' + (f" best {dsl_best[d]:.1%}" if d in dsl_best else "") + "</span>"
+                         for d in (cfg.get("dsls") or [cfg.get("dsl")]))
+        rows, prev_best = [], None
+        for a in attempts:
+            delta = ""
+            if a.get("score") is not None and prev_best is not None and a.get("sass") and prev_best.get("sass"):
+                d = sass_delta(a["sass"], prev_best["sass"])
+                delta = ", ".join(f"{k} {v:+d}" for k, v in d.items())
+            if a.get("score") is not None and (prev_best is None or a["score"] > prev_best["score"]):
+                prev_best = a
+            sc = f"{a['score']:.1%}" if a.get("score") is not None else "-"
+            op = f"{a['op_ms']:.4f}" if a.get("op_ms") else "-"
+            rows.append(
+                f'<tr class="{"best" if a.get("new_best") else ""} {a.get("verdict")}">'
+                f'<td>{a["iteration"]}</td>'
+                f'<td><i class="dot" style="background:{DSL_COLORS.get(a.get("dsl"), "#888")}"></i>{_esc(a.get("dsl") or "")}</td>'
+                f'<td>{_esc(a.get("verdict"))}</td><td class="num">{sc}</td><td class="num">{op}</td>'
+                f'<td>{_esc(a.get("hypothesis", ""))}</td><td class="mono">{_esc(delta)}</td></tr>')
+        what = cfg["category"] if cfg.get("kind") == "problem" else cfg.get("kernel")
+        sections.append(f"""
+<section>
+  <h2>{_esc(what)} <span class="muted">{_esc(cfg.get("name", ""))}</span></h2>
+  <p class="meta">{_esc(cfg.get("device", ""))} · mode {_esc(cfg.get("mode", "isolated"))} ·
+    docs {"on" if cfg.get("docs") else "off"} · model {_esc(cfg.get("model") or "unrecorded")} ·
+    {max(0, len(attempts) - 1)} iterations · baseline {curve[0]:.1%} → best {curve[-1]:.1%}</p>
+  <div class="legend">{legend}</div>
+  <div class="chart">{render_run_svg(cfg, attempts)}</div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>#</th><th>DSL</th><th>verdict</th><th>SOL</th><th>op ms</th>
+      <th>hypothesis</th><th>SASS vs previous best</th></tr></thead>
+    <tbody>{"".join(rows)}</tbody>
+  </table></div>
+</section>""")
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PGAIO Progression</title>
+<style>
+:root {{ --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --panel:#ffffff; --best:#f0fdf4; }}
+@media (prefers-color-scheme: dark) {{ :root:not([data-theme="light"]) {{
+  --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --panel:#292524; --best:#1a2e1f; }} }}
+:root[data-theme="dark"] {{ --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --panel:#292524; --best:#1a2e1f; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; background:var(--bg); color:var(--fg);
+  font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }}
+main {{ max-width:1100px; margin:0 auto; padding:24px 16px 48px; }}
+h1 {{ font-size:22px; margin:0 0 4px; }} h2 {{ font-size:18px; margin:0; }}
+.muted, .meta {{ color:var(--muted); font-weight:400; }} .meta {{ margin:4px 0 10px; font-size:13px; }}
+section {{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-top:20px; }}
+.legend {{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }}
+.chip {{ font-size:13px; border:1px solid var(--line); border-radius:999px; padding:2px 10px; }}
+.chip i, .dot {{ display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:middle; }}
+.chart svg {{ width:100%; height:auto; display:block; }}
+.grid {{ stroke:var(--line); }} .target {{ stroke:var(--muted); stroke-dasharray:4 4; }}
+.axis {{ fill:var(--muted); font-size:11px; }}
+.best {{ fill:none; stroke:var(--fg); stroke-width:1.5; opacity:.55; }}
+.tablewrap {{ overflow-x:auto; margin-top:12px; }}
+table {{ border-collapse:collapse; width:100%; font-size:13px; }}
+th, td {{ text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }}
+td:nth-child(2), td:nth-child(3) {{ white-space:nowrap; }}
+th {{ color:var(--muted); font-weight:500; }}
+tr.best td {{ background:var(--best); }}
+.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
+.mono {{ font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; color:var(--muted); }}
+</style></head>
+<body><main>
+<h1>PGAIO progression</h1>
+<p class="muted">SOL is achieved throughput against the roofline at each kernel's arithmetic
+intensity. Large points are new bests, crosses failed (compile, correctness or guard).
+Hover a point for its hypothesis.</p>
+{"".join(sections) or "<p>No runs yet.</p>"}
+</main></body></html>
+"""
 
 
 # --------------------------------------------------------------------------
@@ -438,20 +660,41 @@ def append_jsonl(path, obj):
         f.write(json.dumps(obj) + "\n")
 
 
-def measure(cfg, rel_source, label):
-    """Correctness gate, cold-L2 timing and SASS inspection for one source."""
-    cmd = cfg["arena_cmd"]
+def target_args(cfg, rel_source=None, manifest=None):
+    """What to pass arena to run and to inspect a candidate.
+
+    A manifest names its own kernel. Otherwise the run's slot is used, with
+    the candidate source swapped in when there is one."""
+    if manifest:
+        return ["--manifest", manifest], ["--manifest", manifest]
     ovr = ["--source-override", rel_source] if rel_source else []
     text = (REPO / (rel_source or cfg["slot_source"])).read_text(errors="replace")
     block = block_directive(text)
     if block:
         ovr += ["--block", str(block)]
-    defines = []
     for k, v in sorted(cfg.get("defines", {}).items()):
-        defines += ["--define", f"{k}={v}"]
+        ovr += ["--define", f"{k}={v}"]
+    return ["--run", cfg["kernel"]] + ovr, [cfg["kernel"]] + ovr
+
+
+def inspect_static(cfg, rel_source=None, manifest=None):
+    """Compile only: the --inspect summary and the SASS text. No launch, no
+    timing, so this is free to call on any draft."""
+    _, insp_args = target_args(cfg, rel_source, manifest)
+    code, insp, _, err = arena(cfg["arena_cmd"], ["--inspect"] + insp_args)
+    if code != 0:
+        return None, "", (err or "").strip()[-3000:]
+    code, _, sass_text, err = arena(cfg["arena_cmd"], ["--sass"] + insp_args)
+    return insp, (sass_text if code == 0 else ""), ""
+
+
+def measure(cfg, label, rel_source=None, manifest=None):
+    """Correctness gate, cold-L2 timing and SASS inspection for one candidate."""
+    cmd = cfg["arena_cmd"]
+    run_args, _ = target_args(cfg, rel_source, manifest)
 
     # 1. correctness over held-out sizes, distributions and seeds
-    chk_args = (["--run", cfg["kernel"]] + ovr + defines + params_args(cfg["check_params"]) +
+    chk_args = (run_args + params_args(cfg["check_params"]) +
                 ["--dist", ",".join(cfg["check_dists"]),
                  "--seed", ",".join(str(s) for s in cfg["check_seeds"]),
                  "--runs", "1", "--warmup", "1"])
@@ -463,7 +706,7 @@ def measure(cfg, rel_source, label):
     tim_results, tim_exit, env, tim_err = [], None, (chk or {}).get("environment", {}), ""
     verdict_so_far = classify_attempt(chk_results, [], chk_exit, 0, [], required)
     if verdict_so_far == "ok":
-        tim_args = (["--run", cfg["kernel"]] + ovr + defines + params_args(cfg["train_params"]) +
+        tim_args = (run_args + params_args(cfg["train_params"]) +
                     ["--l2", "cold", "--runs", str(cfg.get("runs", 30))])
         if cfg.get("profile"):
             tim_args.append("--profile")
@@ -472,15 +715,9 @@ def measure(cfg, rel_source, label):
         env = (tim or {}).get("environment", env)
 
     # 3. static view of what the compiler made of it
-    insp = None
-    sass_text = ""
+    insp, sass_text = None, ""
     if verdict_so_far == "ok":
-        code, insp, _, _ = arena(cmd, ["--inspect", cfg["kernel"]] + ovr + defines)
-        if code != 0:
-            insp = None
-        code, _, sass_text, _ = arena(cmd, ["--sass", cfg["kernel"]] + ovr + defines)
-        if code != 0:
-            sass_text = ""
+        insp, sass_text, _ = inspect_static(cfg, rel_source, manifest)
 
     return {
         "label": label,
@@ -537,7 +774,8 @@ def observe(cfg, m, guard):
 
 def render(obs, it, cfg, best, baseline):
     """Short text for the agent. Everything in it is in the JSON too."""
-    lines = [f"iteration {it}/{cfg['budget']}  verdict: {obs['verdict'].upper()}"
+    dsl = obs.get("dsl") or cfg.get("dsl", "")
+    lines = [f"iteration {it}/{cfg['budget']} ({dsl})  verdict: {obs['verdict'].upper()}"
              + ("  (new best)" if obs.get("new_best") else "")]
     if obs["guard_violations"]:
         lines.append("protected files changed, iteration rejected: " +
@@ -559,7 +797,8 @@ def render(obs, it, cfg, best, baseline):
     if baseline and baseline.get("timing"):
         line += f"  | {baseline['timing']['op_ms'] / t['op_ms']:.2f}x vs baseline"
     if best and best.get("timing") and not obs.get("new_best"):
-        line += f", {best['timing']['op_ms'] / t['op_ms']:.2f}x vs best (iter {best['iteration']})"
+        line += (f", {best['timing']['op_ms'] / t['op_ms']:.2f}x vs best (iter {best['iteration']}"
+                 + (f", {obs['best_dsl']}" if obs.get("best_dsl") else "") + ")")
     lines.append(line)
     ai = s.get("intensity")
     lines.append(f"SOL: {s['fraction']:.1%} ({s['bound']}-bound, {s['achieved']:.0f}/{s['roof']:.0f} "
@@ -592,93 +831,120 @@ def render(obs, it, cfg, best, baseline):
 # Commands
 # --------------------------------------------------------------------------
 
-def cmd_init(a):
-    arena_cmd = a.arena or os.environ.get("ARENA_CMD") or DEFAULT_ARENA_CMD
+def parse_sizes(specs, fallback):
+    if not specs:
+        return {k: list(v) for k, v in fallback.items()}
+    out = {}
+    for spec in specs:
+        k, _, v = spec.partition("=")
+        out[k] = [int(x) for x in v.split(",") if x]
+    return out
 
-    # First call builds (Docker entrypoint) and describes the slot.
-    print(f"[pgaio] inspecting {a.kernel} via: {arena_cmd}", file=sys.stderr)
-    code, insp, out, err = arena(arena_cmd, ["--inspect", a.kernel], timeout=3600)
+
+def cmd_init(a):
+    if bool(a.kernel) == bool(a.category):
+        sys.exit("pass exactly one of --category (any DSL, candidates with manifests) "
+                 "or --kernel (one slot)")
+    arena_cmd = a.arena or os.environ.get("ARENA_CMD") or DEFAULT_ARENA_CMD
+    problem = bool(a.category)
+    kernel = a.kernel or a.baseline or CATEGORY_BASELINE.get(a.category)
+    if not kernel:
+        sys.exit(f"no baseline kernel known for category {a.category}; pass --baseline")
+
+    # First call builds (Docker entrypoint) and describes the baseline kernel.
+    print(f"[pgaio] inspecting {kernel} via: {arena_cmd}", file=sys.stderr)
+    code, insp, out, err = arena(arena_cmd, ["--inspect", kernel], timeout=3600)
     if code != 0 or not insp:
-        sys.exit(f"--inspect {a.kernel} failed (exit {code}):\n{err[-3000:]}")
+        sys.exit(f"--inspect {kernel} failed (exit {code}):\n{err[-3000:]}")
     if "docker compose" in arena_cmd and "ARENA_SKIP_BUILD" not in arena_cmd:
         # The binary is built now; later calls skip the cmake check.
         arena_cmd = arena_cmd.replace("run --rm", "run --rm -e ARENA_SKIP_BUILD=1", 1)
 
     root = insp.get("repo_root", "")
     slot_source = repo_rel(insp.get("slot_source", ""), root)
-    if not slot_source:
-        sys.exit(f"{a.kernel} has no source slot (it is compiled into the binary)")
     category = insp["category"]
+    if problem and category != a.category:
+        sys.exit(f"baseline {kernel} is a {category} kernel, not {a.category}")
+    if not problem and not slot_source:
+        sys.exit(f"{kernel} has no source slot (it is compiled into the binary)")
     defaults = CATEGORIES.get(category, {"train": {}, "check": {}})
 
-    def parse_p(specs, fallback):
-        if not specs:
-            return {k: list(v) for k, v in fallback.items()}
-        out = {}
-        for s in specs:
-            k, _, v = s.partition("=")
-            out[k] = [int(x) for x in v.split(",") if x]
-        return out
-
-    train = parse_p(a.train, defaults["train"])
-    check = parse_p(a.check, defaults["check"])
+    train = parse_sizes(a.train, defaults["train"])
+    check = parse_sizes(a.check, defaults["check"])
     for k, vs in train.items():   # the train size is always checked too
         check.setdefault(k, [])
         for v in vs:
             if v not in check[k]:
                 check[k].append(v)
 
+    dsls = [d.strip() for d in (a.dsls or ",".join(DSLS)).split(",") if d.strip()]
+    for d in dsls:
+        if d not in DSLS:
+            sys.exit(f"unknown DSL {d}; choose from {', '.join(DSLS)}")
+    per_dsl = a.budget_per_dsl if problem else 0
+    budget = a.budget or (per_dsl * len(dsls) if problem else 20)
+
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    name = a.name or f"{stamp}-{a.kernel}"
+    name = a.name or f"{stamp}-{a.category or kernel}"
     run_dir = RUNS_DIR / name
     if run_dir.exists():
         sys.exit(f"{run_dir} already exists")
-    (run_dir / "candidates").mkdir(parents=True)
-    (run_dir / "obs").mkdir()
-    (run_dir / "work").mkdir()   # where the agent drafts candidates
+    for sub in ("candidates", "obs", "work", "inspections"):
+        (run_dir / sub).mkdir(parents=True)
 
     seed_base = int(hashlib.sha1(name.encode()).hexdigest()[:8], 16)
     cfg = {
         "name": name, "created": now(),
-        "kernel": a.kernel, "category": category, "dsl": insp.get("dsl"),
+        "kind": "problem" if problem else "slot",
+        "kernel": kernel, "category": category,
+        "dsl": "any" if problem and len(dsls) > 1 else (dsls[0] if problem else insp.get("dsl")),
+        "dsls": dsls if problem else [insp.get("dsl")],
         "entry_point": insp.get("entry_point"),
         "slot_source": slot_source,
         "descriptor_file": repo_rel(insp.get("descriptor_file", ""), root),
         "arena_cmd": arena_cmd,
-        "budget": a.budget, "target": a.target, "runs": a.runs, "mode": a.mode,
+        "budget": budget, "budget_per_dsl": per_dsl,
+        "target": a.target, "runs": a.runs, "mode": a.mode,
         "docs": a.docs == "on",
         "train_params": train, "check_params": check,
         "check_dists": CHECK_DISTS,
         "check_seeds": [seed_base % 100000 + i for i in range(a.seeds)],
-        "defines": dict(kv.split("=") for kv in (a.define or [])),
+        "defines": {k: int(v) for k, v in (kv.split("=") for kv in (a.define or []))},
         "model": a.model or os.environ.get("PGAIO_MODEL", ""),
         "git_head": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
                                    capture_output=True, text=True).stdout.strip(),
         "profile": True,
         "protected_hashes": hash_protected(),
     }
-    cfg["defines"] = {k: int(v) for k, v in cfg["defines"].items()}
 
-    # Baseline: the slot's own source, copied in as iteration 0.
-    # Baseline: the slot's own source, or --start, copied in as iteration 0.
-    start = Path(a.start).resolve() if a.start else REPO / slot_source
-    if a.start and candidate_ext(start.name) != candidate_ext(slot_source):
-        shutil.rmtree(run_dir)
-        sys.exit(f"--start must be a {candidate_ext(slot_source)} file for slot {a.kernel}")
-    base_copy = run_dir / "candidates" / f"000_baseline{candidate_ext(slot_source)}"
-    shutil.copy2(start, base_copy)
-    base_rel = str(base_copy.relative_to(REPO)) if a.start else None
-    cfg["start_source"] = str(start.relative_to(REPO)) if start.is_relative_to(REPO) else str(start)
+    # Iteration 0. A slot run starts from the slot's source or --start; a
+    # problem run measures the baseline kernel as it is in the repo.
+    base_rel = None
+    if problem:
+        base_copy = run_dir / "candidates" / "000_baseline"
+        base_copy.mkdir()
+        if slot_source:
+            shutil.copy2(REPO / slot_source, base_copy / Path(slot_source).name)
+        cfg["start_source"] = slot_source or kernel
+    else:
+        start = Path(a.start).resolve() if a.start else REPO / slot_source
+        if a.start and candidate_ext(start.name) != candidate_ext(slot_source):
+            shutil.rmtree(run_dir)
+            sys.exit(f"--start must be a {candidate_ext(slot_source)} file for slot {kernel}")
+        base_copy = run_dir / "candidates" / f"000_baseline{candidate_ext(slot_source)}"
+        shutil.copy2(start, base_copy)
+        base_rel = str(base_copy.relative_to(REPO)) if a.start else None
+        cfg["start_source"] = str(start.relative_to(REPO)) if start.is_relative_to(REPO) else str(start)
 
     print(f"[pgaio] measuring baseline {cfg['start_source']} ...", file=sys.stderr)
-    m = measure(cfg, base_rel, "baseline")
+    m = measure(cfg, "baseline", rel_source=base_rel)
     if not m["timing_results"] or not all(r.get("success") for r in m["timing_results"]):
         # Counters unavailable (no perf access) is not a reason to stop.
         cfg["profile"] = False
-        m = measure(cfg, base_rel, "baseline")
+        m = measure(cfg, "baseline", rel_source=base_rel)
 
-    # Drop checks the slot itself cannot pass, so the gate asks for nothing
-    # the original kernel does not deliver.
+    # Drop checks the baseline itself cannot pass, so the gate asks for
+    # nothing the reference kernel does not deliver.
     passing = [r for r in m["check_results"] if r.get("success") and r.get("verified")]
     dropped = sorted({combo_key(r) for r in m["check_results"]} - {combo_key(r) for r in passing})
     cfg["required_checks"] = sorted({combo_key(r) for r in passing})
@@ -697,12 +963,20 @@ def cmd_init(a):
         sys.exit("baseline measurement failed")
     obs["iteration"] = 0
     obs["new_best"] = True
-    record(run_dir, cfg, 0, base_copy, "baseline: the slot's own source", obs, m)
+    obs["dsl"] = insp.get("dsl")
+    record(run_dir, cfg, 0, base_copy, f"baseline: {kernel} as it is in the repo"
+           if problem else "baseline: the slot's own source", obs, m, insp.get("dsl"))
 
     print(f"run: {run_dir.relative_to(REPO)}  (draft candidates in {(run_dir / 'work').relative_to(REPO)}/)")
-    print(f"kernel {a.kernel} ({cfg['dsl']}), slot {slot_source}, entry point "
-          f"{cfg['entry_point']}, descriptor {cfg['descriptor_file']}")
-    print(f"mode {cfg['mode']}, docs {'on' if cfg['docs'] else 'off'}, budget {cfg['budget']} iterations, target {cfg['target']:.0%} SOL, "
+    if problem:
+        print(f"problem: {category}, DSLs {', '.join(dsls)}, baseline {kernel} "
+              f"({cfg['start_source']}); candidates are manifests (see the arena-optimize skill)")
+        print(f"budget {budget} iterations" + (f", at most {per_dsl} per DSL" if per_dsl else ""))
+    else:
+        print(f"kernel {kernel} ({cfg['dsl']}), slot {slot_source}, entry point "
+              f"{cfg['entry_point']}, descriptor {cfg['descriptor_file']}")
+        print(f"budget {budget} iterations")
+    print(f"mode {cfg['mode']}, docs {'on' if cfg['docs'] else 'off'}, target {cfg['target']:.0%} SOL, "
           f"train {train}, counters {'on' if cfg['profile'] else 'off'}")
     if dropped:
         print(f"dropped {len(dropped)} checks the baseline fails: {', '.join(dropped[:6])}")
@@ -714,13 +988,13 @@ def cmd_init(a):
             print(f"  - [{l.get('dsl')}/{l.get('category')}, {l.get('device', '')}] {l['insight']}")
 
 
-def record(run_dir, cfg, it, cand_path, hypothesis, obs, m):
+def record(run_dir, cfg, it, cand_path, hypothesis, obs, m, dsl):
     (run_dir / "obs" / f"{it:03d}.json").write_text(json.dumps(
         {**obs, "raw": {k: m[k] for k in ("check_results", "timing_results", "inspect")}}, indent=1))
     if m.get("sass_text"):
         (run_dir / "obs" / f"{it:03d}.sass").write_text(m["sass_text"])
     append_jsonl(run_dir / "attempts.jsonl", {
-        "iteration": it, "time": now(),
+        "iteration": it, "time": now(), "dsl": dsl,
         "candidate": str(Path(cand_path).relative_to(REPO)),
         "hypothesis": hypothesis, "verdict": obs["verdict"], "score": obs.get("score"),
         "op_ms": obs.get("timing", {}).get("op_ms"),
@@ -731,26 +1005,81 @@ def record(run_dir, cfg, it, cand_path, hypothesis, obs, m):
     })
 
 
+def resolve_candidate(path):
+    src = Path(path)
+    if not src.is_absolute():
+        src = Path.cwd() / src
+    if not src.exists():
+        sys.exit(f"not found: {src}")
+    return src.resolve()
+
+
+def snapshot_manifest(manifest_path, dest_dir):
+    """Copies a manifest and the source it names into dest_dir, with the
+    copy's "source" pointing at the copied file, so the snapshot is
+    self-contained and later edits to the draft cannot change history.
+    Returns (manifest copy, dsl)."""
+    try:
+        spec = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as e:
+        sys.exit(f"{manifest_path} is not valid JSON: {e} (this did not count as an iteration)")
+    if "source" not in spec:
+        sys.exit(f"{manifest_path} has no \"source\" (this did not count as an iteration)")
+    src = Path(spec["source"])
+    if not src.is_absolute():
+        src = manifest_path.parent / src
+    if not src.exists():
+        sys.exit(f"manifest source not found: {src} (this did not count as an iteration)")
+    dsl = dsl_of(src.name)
+    if not dsl:
+        sys.exit(f"{src.name}: unknown DSL; use .cu, .triton.py, .cutile.py or .warp.py")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest_dir / src.name)
+    spec["source"] = src.name
+    out = dest_dir / manifest_path.name
+    out.write_text(json.dumps(spec, indent=2))
+    return out, dsl
+
+
+def best_of(run_dir, attempts, dsl=None):
+    ok = [x for x in attempts if x["verdict"] == "ok" and x.get("score") is not None
+          and (dsl is None or x.get("dsl") == dsl)]
+    if not ok:
+        return None, None
+    b = max(ok, key=lambda x: x["score"])
+    return b, json.loads((run_dir / "obs" / f"{b['iteration']:03d}.json").read_text())
+
+
 def cmd_eval(a):
     run_dir, cfg = load_run(a.run)
     attempts = load_attempts(run_dir)
     it = len(attempts)
-    if it > cfg["budget"]:
-        sys.exit(f"budget of {cfg['budget']} iterations is used up; see `pgaio.py status`")
+    src = resolve_candidate(a.candidate)
+    problem = cfg.get("kind") == "problem"
 
-    src = Path(a.candidate)
-    if not src.is_absolute():
-        src = (Path.cwd() / src)
-    if not src.exists():
-        sys.exit(f"candidate not found: {src}")
-    want = candidate_ext(cfg["slot_source"])
-    if candidate_ext(src.name) != want:
-        sys.exit(f"candidate must be a {want} file to fit slot {cfg['kernel']} "
-                 "(this did not count as an iteration)")
+    if problem:
+        if not src.name.endswith(".json"):
+            sys.exit("a problem run evaluates manifests: pass the .json that names the source "
+                     "(this did not count as an iteration)")
+        dsl = dsl_of(json.loads(src.read_text()).get("source", "")) if src.exists() else None
+    else:
+        dsl = cfg["dsl"]
+        want = candidate_ext(cfg["slot_source"])
+        if candidate_ext(src.name) != want:
+            sys.exit(f"candidate must be a {want} file to fit slot {cfg['kernel']} "
+                     "(this did not count as an iteration)")
+    why = budget_error(cfg, attempts, dsl)
+    if why:
+        sys.exit(why + "; see `pgaio.py status`")
 
-    snap = run_dir / "candidates" / f"{it:03d}_{slugify(a.hypothesis)}{want}"
-    shutil.copy2(src, snap)
-    rel = str(snap.relative_to(REPO))
+    slug = f"{it:03d}_{slugify(a.hypothesis)}"
+    if problem:
+        snap, dsl = snapshot_manifest(src, run_dir / "candidates" / slug)
+        target = {"manifest": str(snap.relative_to(REPO))}
+    else:
+        snap = run_dir / "candidates" / f"{slug}{candidate_ext(src.name)}"
+        shutil.copy2(src, snap)
+        target = {"rel_source": str(snap.relative_to(REPO))}
 
     guard = guard_violations(cfg["protected_hashes"], hash_protected())
     if guard:
@@ -759,42 +1088,144 @@ def cmd_eval(a):
         m.update(check_exit=None, timing_exit=None, check_stderr="", timing_stderr="",
                  environment={}, sass_text="")
     else:
-        m = measure(cfg, rel, f"iter {it}")
+        m = measure(cfg, f"iter {it}", **target)
     obs = observe(cfg, m, guard)
     obs["iteration"] = it
+    obs["dsl"] = dsl
 
-    ok = [x for x in attempts if x["verdict"] == "ok" and x.get("score") is not None]
-    best_att = max(ok, key=lambda x: x["score"]) if ok else None
-    best_obs = json.loads((run_dir / "obs" / f"{best_att['iteration']:03d}.json").read_text()) \
-        if best_att else None
+    best_att, best_obs = best_of(run_dir, attempts)
     base_obs = json.loads((run_dir / "obs" / "000.json").read_text()) \
         if (run_dir / "obs" / "000.json").exists() else None
     if obs["verdict"] == "ok":
         obs["new_best"] = best_att is None or obs["score"] > best_att["score"]
         if best_obs:
             obs["sass_vs_best"] = sass_delta(obs.get("sass"), best_obs.get("sass"))
+            obs["best_dsl"] = best_att.get("dsl")
 
-    record(run_dir, cfg, it, snap, a.hypothesis, obs, m)
+    record(run_dir, cfg, it, snap, a.hypothesis, obs, m, dsl)
     print(render(obs, it, cfg, best_obs, base_obs))
-    left = cfg["budget"] - it
+    attempts.append({"iteration": it, "dsl": dsl})
+    used = len([x for x in attempts if x.get("iteration", 0) > 0])
+    left = f"{cfg['budget'] - used} iteration(s) left"
+    if cfg.get("budget_per_dsl"):
+        per = {d: sum(1 for x in attempts if x.get("dsl") == d and x.get("iteration", 0) > 0)
+               for d in cfg.get("dsls", [])}
+        left += " (" + ", ".join(f"{d} {cfg['budget_per_dsl'] - n}" for d, n in per.items()) + ")"
     reached = obs.get("score") is not None and obs["score"] >= cfg["target"]
-    print(f"\n{left} iteration(s) left" + ("; target reached, you may stop" if reached else ""))
-    print(f"snapshot: {rel}   full observation: {(run_dir / 'obs' / f'{it:03d}.json').relative_to(REPO)}")
+    print(f"\n{left}" + ("; target reached, you may stop" if reached else ""))
+    print(f"snapshot: {snap.relative_to(REPO)}   full observation: "
+          f"{(run_dir / 'obs' / f'{it:03d}.json').relative_to(REPO)}")
+
+
+def cmd_sass(a):
+    """Free: how a draft compiled, against the best so far. Never timed."""
+    run_dir, cfg = load_run(a.run)
+    src = resolve_candidate(a.candidate)
+    if cfg.get("kind") == "problem":
+        n = sum(1 for d in (run_dir / "inspections").iterdir() if d.is_dir())
+        snap, dsl = snapshot_manifest(src, run_dir / "inspections" / f"{n:03d}_{src.stem}")
+        insp, sass_text, err = inspect_static(cfg, manifest=str(snap.relative_to(REPO)))
+    else:
+        n = sum(1 for d in (run_dir / "inspections").iterdir() if d.is_dir())
+        dsl = cfg["dsl"]
+        rel = str(src.relative_to(REPO)) if src.is_relative_to(REPO) else str(src)
+        insp, sass_text, err = inspect_static(cfg, rel_source=rel)
+    if insp is None:
+        print(f"did not compile:\n{err}")
+        sys.exit(2)
+    out = run_dir / "inspections" / f"{n:03d}_{src.stem}"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "inspect.json").write_text(json.dumps(insp, indent=1))
+    (out / "kernel.sass").write_text(sass_text)
+    append_jsonl(run_dir / "inspections.jsonl", {"time": now(), "draft": str(src), "dsl": dsl,
+                                                 "sass": sass_brief(insp)})
+
+    brief = sass_brief(insp)
+    r = insp.get("resources", {})
+    print(f"{dsl} draft {src.name}: compiled (not timed, not counted)")
+    print(f"resources: {r.get('registers')} regs, {r.get('shared')} B shared, {r.get('local')} B local")
+    print(f"SASS: {brief['instructions']} instr, {brief['global_loads']} global loads (mean "
+          f"{brief['mean_global_load_bytes']:.0f} B), {brief['global_atomic']} global atomics, "
+          f"{brief['warp_shuffle']} shuffles, {brief['warp_reduce']} warp reduces, "
+          f"{brief['shared_mem']} shared ops, {brief['sync']} syncs, {brief['tensor']} tensor")
+    for e in insp.get("entries", []):
+        print(f"  entry {e['entry']}: {e['instructions']} instr, {e['registers']} regs")
+    best_att, best_obs = best_of(run_dir, load_attempts(run_dir))
+    if best_obs:
+        d = sass_delta(brief, best_obs.get("sass"))
+        print(f"vs best (iteration {best_att['iteration']}, {best_att.get('dsl')}): " +
+              (", ".join(f"{k} {v:+d}" for k, v in d.items()) or "same instruction mix"))
+        best_sass = run_dir / "obs" / f"{best_att['iteration']:03d}.sass"
+        print(f"diff the SASS: diff {best_sass.relative_to(REPO)} {(out / 'kernel.sass').relative_to(REPO)}")
+    print(f"saved: {out.relative_to(REPO)}/")
+
+
+def cmd_compare(a):
+    """Free: two measured iterations side by side."""
+    run_dir, cfg = load_run(a.run)
+    obs = []
+    for it in (a.a, a.b):
+        p = run_dir / "obs" / f"{it:03d}.json"
+        if not p.exists():
+            sys.exit(f"no observation for iteration {it}")
+        obs.append(json.loads(p.read_text()))
+    atts = {x["iteration"]: x for x in load_attempts(run_dir)}
+
+    def row(label, f):
+        vals = []
+        for o in obs:
+            try:
+                vals.append(f(o))
+            except (KeyError, TypeError):
+                vals.append("-")
+        print(f"{label:24} {str(vals[0]):>22} {str(vals[1]):>22}")
+
+    print(f"{'':24} {'iteration ' + str(a.a):>22} {'iteration ' + str(a.b):>22}")
+    row("dsl", lambda o: atts[o["iteration"]].get("dsl"))
+    row("verdict", lambda o: o["verdict"])
+    row("SOL", lambda o: f"{o['score']:.1%}")
+    row("op_ms", lambda o: f"{o['timing']['op_ms']:.4f}")
+    row("gpu_ms", lambda o: f"{o['timing']['gpu_ms']:.4f}")
+    row("launches", lambda o: o["timing"]["launch_count"])
+    row("DRAM read MB", lambda o: f"{o['counters']['dram_read_bytes'] / 1e6:.1f}")
+    row("occupancy", lambda o: f"{o['counters']['occupancy']:.0%}")
+    row("registers", lambda o: o["resources"]["registers"])
+    row("local bytes", lambda o: o["resources"]["local"])
+    for k in ["instructions", "global_loads", "global_load_128", "mean_global_load_bytes",
+              "global_atomic", "warp_shuffle", "warp_reduce", "shared_mem", "sync", "tensor"]:
+        row(f"sass {k}", lambda o, k=k: o["sass"][k])
+    print(f"\nhypotheses:\n  {a.a}: {atts.get(a.a, {}).get('hypothesis', '')}\n"
+          f"  {a.b}: {atts.get(a.b, {}).get('hypothesis', '')}")
+    sa, sb = (run_dir / "obs" / f"{a.a:03d}.sass", run_dir / "obs" / f"{a.b:03d}.sass")
+    if sa.exists() and sb.exists():
+        print(f"SASS: diff {sa.relative_to(REPO)} {sb.relative_to(REPO)}")
 
 
 def cmd_status(a):
     run_dir, cfg = load_run(a.run)
     attempts = load_attempts(run_dir)
     curve = best_so_far(attempts)
-    print(f"{cfg['name']}: {cfg['kernel']} ({cfg['dsl']}, {cfg.get('mode', 'isolated')}, "
+    what = cfg["category"] if cfg.get("kind") == "problem" else cfg["kernel"]
+    print(f"{cfg['name']}: {what} ({cfg['dsl']}, {cfg.get('mode', 'isolated')}, "
           f"docs {'on' if cfg.get('docs') else 'off'}), "
           f"{len(attempts) - 1}/{cfg['budget']} "
           f"iterations used, target {cfg['target']:.0%}")
-    print(f"{'it':>3} {'verdict':15} {'SOL':>7} {'best':>7} {'op_ms':>10}  hypothesis")
+    if cfg.get("kind") == "problem":
+        per = {}
+        for x in attempts[1:]:
+            per[x.get("dsl")] = per.get(x.get("dsl"), 0) + 1
+        cap = cfg.get("budget_per_dsl") or 0
+        print("per DSL: " + ", ".join(f"{d} {per.get(d, 0)}" + (f"/{cap}" if cap else "")
+                                      for d in cfg.get("dsls", [])))
+        best = best_per_dsl(attempts)
+        if best:
+            print("best per DSL: " + ", ".join(f"{d} {v:.1%}" for d, v in sorted(best.items())))
+    print(f"{'it':>3} {'dsl':7} {'verdict':15} {'SOL':>7} {'best':>7} {'op_ms':>10}  hypothesis")
     for x, b in zip(attempts, curve):
         sc = f"{x['score']:.1%}" if x.get("score") is not None else "-"
         op = f"{x['op_ms']:.4f}" if x.get("op_ms") else "-"
-        print(f"{x['iteration']:>3} {x['verdict']:15} {sc:>7} {b:>7.1%} {op:>10}  {x['hypothesis'][:70]}")
+        print(f"{x['iteration']:>3} {str(x.get('dsl') or ''):7} {x['verdict']:15} {sc:>7} {b:>7.1%} "
+              f"{op:>10}  {x['hypothesis'][:70]}")
 
 
 def cmd_best(a):
@@ -803,7 +1234,7 @@ def cmd_best(a):
     if not ok:
         sys.exit("no passing iteration yet")
     b = max(ok, key=lambda x: x["score"])
-    print(json.dumps({"iteration": b["iteration"], "candidate": b["candidate"],
+    print(json.dumps({"iteration": b["iteration"], "candidate": b["candidate"], "dsl": b.get("dsl"),
                       "score": b["score"], "op_ms": b["op_ms"], "hypothesis": b["hypothesis"],
                       "slot_source": cfg["slot_source"],
                       "descriptor_file": cfg["descriptor_file"]}, indent=2))
@@ -836,6 +1267,7 @@ def collect_rows(pattern):
         attempts = load_attempts(cfg_path.parent)
         if attempts:
             rows.append(summarize_run(cfg, attempts))
+            rows.extend(summarize_dsls(cfg, attempts))
     return rows
 
 
@@ -870,15 +1302,33 @@ def cmd_report(a):
                     f.write(f"{r['run']},{r['dsl']},{r['mode']},{int(r['docs'])},{r['kernel']},"
                             f"{r['model']},{i},{v:.6f}\n")
         print(f"\ncurves written to {a.csv}")
+    if a.html:
+        runs = []
+        for cfg_path in sorted(RUNS_DIR.glob(f"{a.runs}/run.json")):
+            cfg = json.loads(cfg_path.read_text())
+            attempts = load_attempts(cfg_path.parent)
+            if attempts:
+                runs.append((cfg, attempts))
+        Path(a.html).write_text(render_html(runs))
+        print(f"\nprogression page written to {a.html}")
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    i = sub.add_parser("init", help="start a run on one kernel slot and measure its baseline")
-    i.add_argument("--kernel", required=True, help="kernel name from `arena --list`")
-    i.add_argument("--budget", type=int, default=20, help="iterations allowed after the baseline")
+    i = sub.add_parser("init", help="start a run and measure its baseline")
+    i.add_argument("--category", help="problem run: optimize this category in any DSL, "
+                   "candidates are manifests")
+    i.add_argument("--kernel", help="slot run: optimize this one kernel's source")
+    i.add_argument("--baseline", help="problem run: kernel measured as iteration 0 "
+                   "(default: the category's plainest kernel)")
+    i.add_argument("--dsls", help="problem run: comma list of allowed DSLs (default all)")
+    i.add_argument("--budget-per-dsl", type=int, default=10,
+                   help="problem run: iterations allowed per DSL (0 = no per-DSL cap)")
+    i.add_argument("--budget", type=int, default=0,
+                   help="total iterations after the baseline (default: per-DSL budget x DSLs, "
+                        "or 20 for a slot run)")
     i.add_argument("--target", type=float, default=0.9, help="SOL fraction to aim for")
     i.add_argument("--runs", type=int, default=30, help="timed runs per measurement")
     i.add_argument("--seeds", type=int, default=2, help="held-out seeds per check")
@@ -900,9 +1350,20 @@ def main(argv=None):
 
     e = sub.add_parser("eval", help="measure one candidate (counts as an iteration)")
     e.add_argument("run")
-    e.add_argument("candidate")
+    e.add_argument("candidate", help="a manifest (problem run) or a source (slot run)")
     e.add_argument("--hypothesis", required=True, help="what this change should do and why")
     e.set_defaults(fn=cmd_eval)
+
+    x = sub.add_parser("sass", help="compile a draft and show its SASS mix; free, never timed")
+    x.add_argument("run")
+    x.add_argument("candidate", help="a manifest (problem run) or a source (slot run)")
+    x.set_defaults(fn=cmd_sass)
+
+    c = sub.add_parser("compare", help="two measured iterations side by side; free")
+    c.add_argument("run")
+    c.add_argument("a", type=int)
+    c.add_argument("b", type=int)
+    c.set_defaults(fn=cmd_compare)
 
     s = sub.add_parser("status", help="history of a run")
     s.add_argument("run")
@@ -921,6 +1382,7 @@ def main(argv=None):
     r = sub.add_parser("report", help="iterations-to-SOL across runs, per DSL")
     r.add_argument("--runs", default="*", help="glob over run names")
     r.add_argument("--csv", help="write best-so-far curves here")
+    r.add_argument("--html", help="write a progression page here")
     r.set_defaults(fn=cmd_report)
 
     a = p.parse_args(argv)
