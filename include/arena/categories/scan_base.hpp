@@ -69,15 +69,19 @@ public:
         std::vector<float> h_output(n_);
         ctx.copy_to_host(h_output.data(), d_output_, size_data_);
 
-        // Exclusive scan: out[i] is the sum of in[0..i-1]. The running total
-        // has to walk every element, but only a strided sample is scored so
-        // large n stays cheap.
+        // Exclusive scan: out[i] is the sum of in[0..i-1]. Every element is
+        // scored. A strided sample at fixed positions let a kernel that wrote
+        // only those positions pass, which an optimizing agent will find.
+        //
+        // Each error is measured against the sum of |in[0..i-1]|, the scale
+        // summation error actually grows with. Against the prefix itself, a
+        // mixed-sign prefix passing near zero fails a correct kernel.
         ErrorAccumulator acc;
-        const int stride = std::max(1, n_ / 1000);
-        double running = 0.0;
+        double running = 0.0, magnitude = 0.0;
         for (int i = 0; i < n_; i++) {
-            if (i % stride == 0) acc.add(h_output[i], running);
+            acc.add_scaled(h_output[i], running, magnitude);
             running += h_input_[i];
+            magnitude += std::abs((double)h_input_[i]);
         }
 
         auto r = acc.finish(tolerance());

@@ -48,6 +48,13 @@ public:
     // Same reference for both, which is the fp32 case.
     void add(double got, double expected) { add(got, expected, expected); }
 
+    // Error relative to a scale the caller supplies instead of to the
+    // expected value. For sums this is the sum of |terms|: the standard
+    // bound on summation error grows with that, not with the result, and a
+    // prefix sum of mixed-sign data passes near zero where the plain ratio
+    // would fail a correct kernel. fp32 case, one reference.
+    void add_scaled(double got, double expected, double scale);
+
     // elements_checked of zero yields passed=false: a check that examined
     // nothing has not demonstrated anything.
     VerifyResult finish(double tolerance) const;

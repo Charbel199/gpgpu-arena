@@ -73,30 +73,55 @@ public:
     }
 
     VerifyResult verify(Context& ctx) override {
-        std::vector<float> h_c(M_ * N_);
+        std::vector<float> h_c((size_t)M_ * N_);
         ctx.copy_to_host(h_c.data(), d_c_, size_c_);
 
-        // Spot-check random output elements against a double-accumulated CPU
-        // dot product. Checking all of them would cost O(M*N*K) on the host.
-        std::mt19937 rng(1337);
-        std::uniform_int_distribution<int> row_dist(0, M_ - 1);
-        std::uniform_int_distribution<int> col_dist(0, N_ - 1);
+        // Checking every element costs O(M*N*K) on the host, so the output is
+        // covered instead: C is cut into tiles and one element is checked in
+        // each, plus the whole last row and last column, where partial-tile
+        // bugs live. Positions follow the input seed, so they cannot be
+        // learned. The old 64 fixed positions let a wrong tile go unseen.
+        //
+        // Tiles are 16x16 or larger, sized to keep this near 65k dot
+        // products: about a quarter of a second at 4096^3.
+        //
+        // Each element is judged against the sum of |a*b| over its dot
+        // product, as scan is: with thousands of checks some dot products
+        // of mixed-sign data land near zero, where the plain ratio would fail
+        // a correct kernel.
+        // B is transposed once so each dot product walks memory in order.
+        std::vector<float> bt((size_t)K_ * N_);
+        for (int k = 0; k < K_; k++)
+            for (int n = 0; n < N_; n++) bt[(size_t)n * K_ + k] = h_b_[(size_t)k * N_ + n];
 
         ErrorAccumulator acc;
-        const int checks = 64;
-        for (int t = 0; t < checks; t++) {
-            const int row = row_dist(rng);
-            const int col = col_dist(rng);
+        auto check = [&](int row, int col) {
+            const float* a = h_a_.data() + (size_t)row * K_;
+            const float* b = bt.data() + (size_t)col * K_;
+            double ref = 0.0, magnitude = 0.0;
+            for (int k = 0; k < K_; k++) {
+                const double p = (double)a[k] * (double)b[k];
+                ref += p;
+                magnitude += std::abs(p);
+            }
+            acc.add_scaled(h_c[(size_t)row * N_ + col], ref, magnitude);
+        };
 
-            double ref = 0.0;
-            for (int k = 0; k < K_; k++)
-                ref += (double)h_a_[row * K_ + k] * (double)h_b_[k * N_ + col];
+        int tile = 16;
+        while ((size_t)((M_ + tile - 1) / tile) * ((N_ + tile - 1) / tile) > 65536) tile *= 2;
 
-            acc.add(h_c[row * N_ + col], ref);
+        std::mt19937 rng(static_cast<uint32_t>(input_seed_ * 2654435761u + 1337));
+        for (int tr = 0; tr < M_; tr += tile) {
+            for (int tc = 0; tc < N_; tc += tile) {
+                check(tr + (int)(rng() % (uint32_t)std::min(tile, M_ - tr)),
+                      tc + (int)(rng() % (uint32_t)std::min(tile, N_ - tc)));
+            }
         }
+        for (int col = 0; col < N_; col++) check(M_ - 1, col);
+        for (int row = 0; row < M_ - 1; row++) check(row, N_ - 1);
 
         auto r = acc.finish(tolerance());
-        spdlog::get("verify")->debug("matmul: max rel err {:.3e} over {} checks",
+        spdlog::get("verify")->debug("matmul: max rel err {:.3e} over {} checked elements",
             r.max_rel_error, r.elements_checked);
         return r;
     }
