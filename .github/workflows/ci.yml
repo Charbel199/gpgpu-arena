@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds the binary and runs the C++ unit tests. Hosted runners have no GPU,
+  # which is fine: nothing here launches a kernel. The CUDA image supplies
+  # nvcc, CUPTI and the NVML stub the binary links against, and the arch is
+  # pinned because "native" needs a GPU to resolve.
+  build-and-test:
+    name: build (gui=${{ matrix.gui }})
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.1.0-devel-ubuntu24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        gui: [OFF, ON]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake build-essential git python3 ca-certificates
+          if [ "${{ matrix.gui }}" = "ON" ]; then
+            apt-get install -y --no-install-recommends libgl1-mesa-dev libglu1-mesa-dev \
+              libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
+          fi
+
+      - name: Cache fetched dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ matrix.gui }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -DBUILD_GUI=${{ matrix.gui }} -DCMAKE_CUDA_ARCHITECTURES=120
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Binary starts and parses arguments
+        # No GPU and no driver here, so only paths that exit before touching
+        # it. The toolkit's stub libraries satisfy the dynamic loader; they
+        # ship without the .so.1 names the binary asks for, hence the links.
+        run: |
+          mkdir -p /tmp/stubs
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /tmp/stubs/libcuda.so.1
+          ln -sf /usr/local/cuda/lib64/stubs/libnvidia-ml.so /tmp/stubs/libnvidia-ml.so.1
+          export LD_LIBRARY_PATH=/tmp/stubs:$LD_LIBRARY_PATH
+          ./build/arena --help > /dev/null
+          set +e
+          ./build/arena --run reduce --l2 lukewarm; code=$?
+          set -e
+          test "$code" -eq 3
+
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Byte-compile tools and kernel bases
+        run: python -m py_compile tools/*.py kernels/*_base.py
+      - name: PGAIO and skills unit tests
+        run: python -m unittest discover -s tools/tests -v
+      - name: Skills frontmatter and paths
+        run: python tools/check_skills.py
+
+  # End-to-end on real hardware. Runs only where a self-hosted runner labelled
+  # "gpu" exists and the repository variable GPU_RUNNER is set to "true", so
+  # forks and hosted CI skip it.
+  gpu-smoke:
+    if: vars.GPU_RUNNER == 'true'
+    needs: [build-and-test, python]
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker compose build cli
+      - name: Every reduce kernel verifies on held-out inputs
+        run: |
+          docker compose run --rm -T cli --run reduce \
+            -p n=1,1000003,16777217 --dist uniform,adversarial --seed 1,2 \
+            --runs 2 --warmup 1 > reduce.json
+      - name: Inspect works for every DSL
+        run: |
+          for k in reduce_vectorized triton_reduce cutile_reduce warp_reduce; do
+            docker compose run --rm -T -e ARENA_SKIP_BUILD=1 cli --inspect "$k" > /dev/null
+          done
+      - name: PGAIO baseline measurement
+        run: |
+          python3 tools/pgaio.py init --kernel reduce_grid_stride --budget 1 --name ci-smoke
+          python3 tools/pgaio.py eval ci-smoke kernels/reduce/fp32/grid_stride.cu \
+            --hypothesis "known-good kernel as a candidate"
+          python3 tools/pgaio.py status ci-smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gpu-smoke
+          path: |
+            reduce.json
+            pgaio/runs/ci-smoke/
