@@ -39,4 +39,24 @@ struct LaunchSummary {
 // kernel, and their durations are summed.
 LaunchSummary summarize_launches(std::vector<KernelLaunchRecord> records);
 
+// Counter values for one operation, picked from a run of profiled ranges.
+//
+// The range profiler gives one range per launch, so an operation that makes
+// several launches (two_stage, CUB) spans several consecutive ranges. They
+// have to be grouped back into operations: taking the minimum over single
+// ranges used to pick the tiny second-stage launch and report 0 MB of DRAM
+// traffic for the whole operation.
+//
+// ranges[i][m] is metric m of range i. additive[m] says whether metric m adds
+// up across an operation's launches (bytes) or is a rate that does not
+// (occupancy, IPC). Additive metrics are summed over the group; the others
+// come from the group's range with the largest value of metric 0, the launch
+// that dominates. The first operation is skipped because it starts cold, and
+// of the rest the one with the smallest metric 0 is returned: instrumentation
+// can only add DRAM traffic, so the minimum is the closest to the real loop.
+// Falls back to operation 0 when it is the only complete one.
+std::vector<double> select_counter_op(const std::vector<std::vector<double>>& ranges,
+                                      int launches_per_op,
+                                      const std::vector<bool>& additive);
+
 }

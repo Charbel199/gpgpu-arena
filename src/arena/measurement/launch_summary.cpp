@@ -40,4 +40,39 @@ LaunchSummary summarize_launches(std::vector<KernelLaunchRecord> records) {
     return out;
 }
 
+std::vector<double> select_counter_op(const std::vector<std::vector<double>>& ranges,
+                                      int launches_per_op,
+                                      const std::vector<bool>& additive) {
+    if (ranges.empty()) return {};
+    const size_t per_op = launches_per_op > 0 ? static_cast<size_t>(launches_per_op) : 1;
+    const size_t n_metrics = additive.size();
+    const size_t n_ops = ranges.size() / per_op;
+    if (n_ops == 0) return {};
+
+    auto reduce_op = [&](size_t op) {
+        std::vector<double> out(n_metrics, 0.0);
+        size_t dominant = op * per_op;
+        for (size_t i = op * per_op; i < (op + 1) * per_op; i++) {
+            if (ranges[i].size() < n_metrics) continue;
+            for (size_t m = 0; m < n_metrics; m++) {
+                if (additive[m]) out[m] += ranges[i][m];
+            }
+            if (ranges[i][0] > ranges[dominant][0]) dominant = i;
+        }
+        for (size_t m = 0; m < n_metrics; m++) {
+            if (!additive[m] && ranges[dominant].size() >= n_metrics) out[m] = ranges[dominant][m];
+        }
+        return out;
+    };
+
+    if (n_ops == 1) return reduce_op(0);
+
+    std::vector<double> best;
+    for (size_t op = 1; op < n_ops; op++) {
+        auto v = reduce_op(op);
+        if (best.empty() || v[0] < best[0]) best = std::move(v);
+    }
+    return best;
+}
+
 }

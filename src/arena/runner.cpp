@@ -147,7 +147,8 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         if (config.collect_metrics) {
             log->info("  profiling: collecting hardware counters ...");
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
-            auto mv = profiler_.collect_counters(launch_kernel, reset_fn);
+            auto mv = profiler_.collect_counters(launch_kernel, reset_fn,
+                                                  result.launch_count);
             nvtxRangePop();
 
             // The counter pass runs a warm back-to-back sequence and reports

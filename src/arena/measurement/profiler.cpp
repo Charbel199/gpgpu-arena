@@ -178,10 +178,12 @@ Profiler::ProfileResult Profiler::collect_activity(KernelLaunchFn launch_fn) {
 static constexpr int kCounterWarmupLaunches = 12;
 
 std::map<std::string, double> Profiler::collect_counters(
-    KernelLaunchFn launch_fn, KernelLaunchFn reset_fn)
+    KernelLaunchFn launch_fn, KernelLaunchFn reset_fn, int launches_per_op)
 {
     auto log = spdlog::get("profiler");
     std::map<std::string, double> result;
+    if (launches_per_op < 1) launches_per_op = 1;
+    const int max_ranges = kCounterWarmupLaunches * launches_per_op;
 
     init_range_profiler();
 
@@ -254,8 +256,8 @@ std::map<std::string, double> Profiler::collect_counters(
     counterDataSizeParams.pRangeProfilerObject = rpObject;
     counterDataSizeParams.pMetricNames = metric_cstrs.data();
     counterDataSizeParams.numMetrics = metric_cstrs.size();
-    counterDataSizeParams.maxNumOfRanges = kCounterWarmupLaunches;
-    counterDataSizeParams.maxNumRangeTreeNodes = kCounterWarmupLaunches;
+    counterDataSizeParams.maxNumOfRanges = max_ranges;
+    counterDataSizeParams.maxNumRangeTreeNodes = max_ranges;
     check_cupti(cuptiRangeProfilerGetCounterDataSize(&counterDataSizeParams),
         "cuptiRangeProfilerGetCounterDataSize");
 
@@ -277,7 +279,7 @@ std::map<std::string, double> Profiler::collect_counters(
     setConfigParams.configSize = configImage.size();
     setConfigParams.pCounterDataImage = counterDataImage.data();
     setConfigParams.counterDataImageSize = counterDataImage.size();
-    setConfigParams.maxRangesPerPass = kCounterWarmupLaunches;
+    setConfigParams.maxRangesPerPass = max_ranges;
     setConfigParams.numNestingLevels = 1;
     setConfigParams.minNestingLevel = 1;
     setConfigParams.passIndex = 0;
@@ -323,17 +325,16 @@ std::map<std::string, double> Profiler::collect_counters(
         "cuptiRangeProfilerDecodeData");
 
     // evaluate
-    // Ranges are read individually and the smallest is kept. The profiler
-    // re-cools L2 every few ranges, so the last one is warm or cold depending
-    // on where it lands in that cycle: a 12-range trace of one kernel read
-    // 86, 4.7, 0.07, 0.05, 0.00, 86, 4.0, 2.4, 0.001, 85, 4.1, 0.05 MB.
-    // Instrumentation can only add DRAM traffic, by evicting data the kernel
-    // would otherwise have found in cache, so the minimum is the closest
-    // available estimate of what the untouched timed loop does. Range 0 is
-    // always cold and is skipped.
-    std::vector<double> metricValues(cupti_names.size(), 0.0);
-    bool have_values = false;
-    for (int ri = 1; ri < kCounterWarmupLaunches; ri++) {
+    // Every range is read, then grouped back into operations by
+    // select_counter_op. The profiler re-cools L2 every few ranges, so a given
+    // launch is warm or cold depending on where it lands in that cycle: a
+    // 12-range trace of one kernel read 86, 4.7, 0.07, 0.05, 0.00, 86, 4.0,
+    // 2.4, 0.001, 85, 4.1, 0.05 MB. Instrumentation can only add DRAM traffic,
+    // so the operation with the least is the closest estimate of the
+    // untouched timed loop. Bytes add up across an operation's launches;
+    // occupancy and IPC come from its dominant launch.
+    std::vector<std::vector<double>> ranges;
+    for (int ri = 0; ri < max_ranges; ri++) {
         std::vector<double> v(cupti_names.size(), 0.0);
         CUpti_Profiler_Host_EvaluateToGpuValues_Params ep = {
             CUpti_Profiler_Host_EvaluateToGpuValues_Params_STRUCT_SIZE};
@@ -344,28 +345,17 @@ std::map<std::string, double> Profiler::collect_counters(
         ep.numMetrics = metric_cstrs.size();
         ep.rangeIndex = ri;
         ep.pMetricValues = v.data();
-        if (cuptiProfilerHostEvaluateToGpuValues(&ep) != CUPTI_SUCCESS) continue;
-
-        // Keyed on DRAM read: the whole point is to find the launch that hit
-        // cache, and the other metrics are taken from that same launch so they
-        // describe one consistent execution.
-        if (!have_values || v[0] < metricValues[0]) {
-            metricValues = v;
-            have_values = true;
-        }
+        if (cuptiProfilerHostEvaluateToGpuValues(&ep) != CUPTI_SUCCESS) break;
+        ranges.push_back(std::move(v));
     }
-    if (!have_values) {
-        CUpti_Profiler_Host_EvaluateToGpuValues_Params ep = {
-            CUpti_Profiler_Host_EvaluateToGpuValues_Params_STRUCT_SIZE};
-        ep.pHostObject = hostObj;
-        ep.pCounterDataImage = counterDataImage.data();
-        ep.counterDataImageSize = counterDataImage.size();
-        ep.ppMetricNames = metric_cstrs.data();
-        ep.numMetrics = metric_cstrs.size();
-        ep.rangeIndex = 0;
-        ep.pMetricValues = metricValues.data();
-        check_cupti(cuptiProfilerHostEvaluateToGpuValues(&ep),
-            "cuptiProfilerHostEvaluateToGpuValues");
+    log->debug("Range Profiler: {} ranges, {} launches per operation",
+        ranges.size(), launches_per_op);
+
+    // order matches cupti_names: dram_read, dram_write, occupancy, ipc
+    auto metricValues = select_counter_op(ranges, launches_per_op,
+                                          {true, true, false, false});
+    if (metricValues.empty()) {
+        throw std::runtime_error("Range Profiler returned no complete operation");
     }
 
     for (size_t i = 0; i < cupti_names.size(); i++) {

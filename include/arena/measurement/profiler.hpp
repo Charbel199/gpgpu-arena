@@ -38,8 +38,13 @@ public:
     // Hardware counters via the Range Profiler (occupancy, IPC, DRAM bytes).
     // Runner sequences this separately from collect_activity because activity
     // runs unconditionally while counters are opt-in.
+    //
+    // launches_per_op is how many kernel launches one call of launch_fn
+    // makes (from collect_activity), so ranges can be grouped back into
+    // whole operations.
     std::map<std::string, double> collect_counters(
-        KernelLaunchFn launch_fn, KernelLaunchFn reset_fn = nullptr);
+        KernelLaunchFn launch_fn, KernelLaunchFn reset_fn = nullptr,
+        int launches_per_op = 1);
 
 private:
     void init_activity();

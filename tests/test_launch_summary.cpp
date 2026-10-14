@@ -66,3 +66,57 @@ TEST_CASE("summarize_launches") {
         CHECK(s.kernel_time_ms == doctest::Approx(0.0f));
     }
 }
+
+TEST_CASE("select_counter_op") {
+    const std::vector<bool> additive = {true, true, false, false};
+
+    SUBCASE("single-launch operations: skip the cold first, keep the minimum") {
+        std::vector<std::vector<double>> r = {
+            {86, 1, 0.5, 1.0},   // cold first launch, skipped
+            {4.7, 1, 0.6, 1.1},
+            {0.05, 1, 0.7, 1.2},
+            {85, 1, 0.8, 1.3},
+        };
+        auto v = select_counter_op(r, 1, additive);
+        REQUIRE(v.size() == 4);
+        CHECK(v[0] == doctest::Approx(0.05));
+        CHECK(v[2] == doctest::Approx(0.7));
+    }
+
+    SUBCASE("multi-launch operations are summed, not split") {
+        // Two-stage reduce: a big stage 1, then a one-block stage 2 that reads
+        // almost nothing. Per-range minimum used to report the stage-2 range.
+        std::vector<std::vector<double>> r = {
+            {268, 0.1, 0.90, 2.0}, {0.0, 0.0, 0.01, 0.1},   // op 0, cold
+            {268, 0.1, 0.92, 2.1}, {0.0, 0.0, 0.01, 0.1},   // op 1
+            {270, 0.2, 0.91, 2.2}, {0.0, 0.0, 0.01, 0.1},   // op 2
+        };
+        auto v = select_counter_op(r, 2, additive);
+        REQUIRE(v.size() == 4);
+        CHECK(v[0] == doctest::Approx(268.0));
+        CHECK(v[1] == doctest::Approx(0.1));
+        // rates come from the dominant launch, not the tiny one
+        CHECK(v[2] == doctest::Approx(0.92));
+        CHECK(v[3] == doctest::Approx(2.1));
+    }
+
+    SUBCASE("a trailing partial operation is ignored") {
+        std::vector<std::vector<double>> r = {
+            {10, 0, 0.5, 1}, {1, 0, 0.1, 1},
+            {9, 0, 0.5, 1},  {1, 0, 0.1, 1},
+            {0.5, 0, 0.5, 1},                 // incomplete op 2
+        };
+        auto v = select_counter_op(r, 2, additive);
+        CHECK(v[0] == doctest::Approx(10.0));
+    }
+
+    SUBCASE("only one complete operation falls back to it") {
+        auto v = select_counter_op({{50, 1, 0.4, 1}}, 1, additive);
+        CHECK(v[0] == doctest::Approx(50.0));
+    }
+
+    SUBCASE("nothing to select") {
+        CHECK(select_counter_op({}, 1, additive).empty());
+        CHECK(select_counter_op({{1, 1, 1, 1}}, 2, additive).empty());
+    }
+}
