@@ -66,11 +66,12 @@ def compile_kernel(fn, signature, constants, options=None):
     compiled = triton.compile(src, target=triton.runtime.driver.active.get_current_target(),
                               **kwargs)
     cubin = compiled.asm["cubin"]
+    ptx = compiled.asm.get("ptx", "")
     metadata = compiled.metadata
     kernel_name = getattr(metadata, "name", fn.__name__)
     num_warps = getattr(metadata, "num_warps", 4)
     shared = getattr(metadata, "shared", 0)
-    return cubin, kernel_name, num_warps, shared, constants
+    return cubin, kernel_name, num_warps, shared, constants, ptx
 
 
 def main(fn, signature, constants):
@@ -94,7 +95,7 @@ def main(fn, signature, constants):
     try:
         print(f"[triton] Compiling {args.output_name} ...", file=sys.stderr)
         _compile_t0 = time.perf_counter()
-        cubin, kernel_name, num_warps, shared, constants = compile_kernel(
+        cubin, kernel_name, num_warps, shared, constants, ptx = compile_kernel(
             fn, signature, constants, defines)
         compile_ms = (time.perf_counter() - _compile_t0) * 1000.0
     except Exception as e:
@@ -106,6 +107,10 @@ def main(fn, signature, constants):
 
     cubin_path = output_dir / f"{args.output_name}.cubin"
     cubin_path.write_bytes(cubin)
+    # PTX sidecar for `arena --ptx`. Free here, since Triton produced it on the
+    # way to the cubin anyway.
+    if ptx:
+        (output_dir / f"{args.output_name}.ptx").write_text(ptx)
 
     num_params = count_cubin_params(cubin_path)
 

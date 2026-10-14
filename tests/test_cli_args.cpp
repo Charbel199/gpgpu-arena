@@ -119,3 +119,95 @@ TEST_CASE("tuning_variants_for") {
         CHECK(v[0].block_size == 0);
     }
 }
+
+TEST_CASE("split_csv") {
+    CHECK(split_csv("a,b,c") == std::vector<std::string>{"a", "b", "c"});
+    CHECK(split_csv("single") == std::vector<std::string>{"single"});
+    CHECK(split_csv("a,,b,") == std::vector<std::string>{"a", "b"});
+    CHECK(split_csv("").empty());
+}
+
+TEST_CASE("parse_param_list") {
+    SUBCASE("single value is a one-element list") {
+        auto kv = parse_param_list("n=4096");
+        REQUIRE(kv.has_value());
+        CHECK(kv->first == "n");
+        CHECK(kv->second == std::vector<int>{4096});
+    }
+    SUBCASE("several values keep their order") {
+        auto kv = parse_param_list("n=1000003,256,67108864");
+        REQUIRE(kv.has_value());
+        CHECK(kv->second == std::vector<int>{1000003, 256, 67108864});
+    }
+    SUBCASE("empty items are malformed rather than skipped") {
+        // A stray comma is a typo, and silently running fewer sizes than
+        // asked for would be worse than refusing.
+        CHECK_FALSE(parse_param_list("n=1,,2").has_value());
+        CHECK_FALSE(parse_param_list("n=1,").has_value());
+        CHECK_FALSE(parse_param_list("n=,1").has_value());
+    }
+    SUBCASE("any bad value rejects the whole list") {
+        CHECK_FALSE(parse_param_list("n=1,abc").has_value());
+        CHECK_FALSE(parse_param_list("n=1,-5").has_value());
+    }
+    SUBCASE("missing key or values") {
+        CHECK_FALSE(parse_param_list("=1,2").has_value());
+        CHECK_FALSE(parse_param_list("n=").has_value());
+        CHECK_FALSE(parse_param_list("n").has_value());
+    }
+}
+
+TEST_CASE("apply_param_list") {
+    std::map<std::string, std::vector<int>> m;
+    REQUIRE(apply_param_list("M=128,256", m));
+    REQUIRE(apply_param_list("N=64", m));
+    CHECK(m["M"] == std::vector<int>{128, 256});
+    CHECK(m["N"] == std::vector<int>{64});
+
+    SUBCASE("a later spec for the same key replaces it") {
+        REQUIRE(apply_param_list("M=512", m));
+        CHECK(m["M"] == std::vector<int>{512});
+    }
+    SUBCASE("a malformed spec leaves the map untouched") {
+        auto before = m;
+        CHECK_FALSE(apply_param_list("M=1,x", m));
+        CHECK(m == before);
+    }
+}
+
+TEST_CASE("parse_u64_list") {
+    auto v = parse_u64_list("1,2,18446744073709551615");
+    REQUIRE(v.has_value());
+    CHECK(v->size() == 3);
+    CHECK((*v)[2] == 18446744073709551615ULL);
+
+    CHECK_FALSE(parse_u64_list("").has_value());
+    CHECK_FALSE(parse_u64_list("1,x").has_value());
+    CHECK_FALSE(parse_u64_list("-1").has_value());
+    CHECK_FALSE(parse_u64_list("7z").has_value());
+}
+
+TEST_CASE("expand_grid") {
+    SUBCASE("no parameters still runs once") {
+        auto g = expand_grid({});
+        REQUIRE(g.size() == 1);
+        CHECK(g[0].empty());
+    }
+    SUBCASE("one parameter, several values") {
+        auto g = expand_grid({{"n", {1, 2, 3}}});
+        REQUIRE(g.size() == 3);
+        CHECK(g[0].at("n") == 1);
+        CHECK(g[2].at("n") == 3);
+    }
+    SUBCASE("cartesian product, last key fastest") {
+        auto g = expand_grid({{"M", {1, 2}}, {"N", {10, 20, 30}}});
+        REQUIRE(g.size() == 6);
+        CHECK(g[0] == std::map<std::string, int>{{"M", 1}, {"N", 10}});
+        CHECK(g[1] == std::map<std::string, int>{{"M", 1}, {"N", 20}});
+        CHECK(g[3] == std::map<std::string, int>{{"M", 2}, {"N", 10}});
+        CHECK(g[5] == std::map<std::string, int>{{"M", 2}, {"N", 30}});
+    }
+    SUBCASE("an empty value list yields nothing") {
+        CHECK(expand_grid({{"n", {}}}).empty());
+    }
+}
