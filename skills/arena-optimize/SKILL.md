@@ -11,14 +11,21 @@ Run everything from the repo root. By default `pgaio.py` drives arena through Do
 
 ## 1. Start a run
 
-Pick a slot: an existing kernel whose descriptor fixes the ABI. The run starts from the slot's own source, or from any file of the same type passed with `--start <file>`. For the reduce category:
+Pick a slot: an existing kernel whose descriptor fixes the ABI. The run starts from the slot's own source, or from any file of the same type passed with `--start <file>`. Slots that work well, with their starting SOL on an RTX PRO 6000 at the PGAIO sizes:
 
-| DSL | Slot | Notes |
-| --- | --- | --- |
-| CUDA | `reduce_grid_stride` | Grid is `32 * SMs` blocks; `// arena: block=N` in the source picks 64 to 1024. |
-| Triton | `triton_reduce_grid_stride` | Grid comes from the source's `NUM_BLOCKS`, tile from `BLOCK_SIZE`, threads from `num_warps`. |
-| cuTile | `cutile_reduce` | One tile per block, grid `n / TILE_SIZE`. |
-| Warp | `warp_reduce` | One thread per element, block 256. Tight ABI; note it in the report. |
+| Category | DSL | Slot | Start | Launch shape |
+| --- | --- | --- | --- | --- |
+| reduce | CUDA | `reduce_grid_stride` | ~75% | `32 * SMs` blocks; `// arena: block=N` picks 64 to 1024 |
+| reduce | Triton | `triton_reduce_grid_stride` | ~76% | grid from the source's `NUM_BLOCKS`, tile `BLOCK_SIZE`, threads `num_warps` |
+| reduce | cuTile | `cutile_reduce` | | one tile per block, grid `n / TILE_SIZE` |
+| reduce | Warp | `warp_reduce` | | one thread per element, block 256; tight, note it in the report |
+| scan | CUDA | `scan_multiblock` | ~0.2% | `// arena: THREADS=256 GRID_PER_SM=4 SHMEM=0`; a 4th argument is a zeroed workspace of at least 64 + 16 * ceil(n / 32) bytes |
+| softmax | CUDA | `softmax_naive` | ~72% | one block per row; `// arena: block=N` picks 64 to 1024; dynamic shared memory is block * 4 bytes |
+| matmul | CUDA | `matmul_tiled` | ~6.5% of FP32 peak | `// arena: BLOCK_M=16 BLOCK_N=16 THREADS=256 SHMEM=0`; grid covers C in BLOCK_M x BLOCK_N tiles |
+| matmul | Triton | `triton_matmul` | | grid and tiles from the source's constants |
+| matmul | cuTile | `cutile_matmul` | | tiles from `BLOCK_M`/`BLOCK_N`/`BLOCK_K`; computes in fp16 |
+
+Avoid `scan_naive` (one block, capped at a fraction of a percent) and `matmul_naive` (fixed 16x16 thread blocks). Upper-case `// arena: KEY=N` lines in a CUDA source are read into the slot's launch constants, so for slots that use them the candidate chooses its own launch shape. Matmul SOL is measured against the FP32 CUDA-core peak, so a tensor-core kernel can read above 100%.
 
 The slots start at different SOL levels, and the report shows each run's baseline next to its curve, so compare runs from the same starting point.
 

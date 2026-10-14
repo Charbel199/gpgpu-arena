@@ -19,6 +19,8 @@ Descriptors are found by `file(GLOB_RECURSE kernels/*.cpp)` in CMake, so a new d
 | You are adding | Start from |
 | --- | --- |
 | CUDA kernel, one launch | `kernels/reduce/fp32/grid_stride.{cu,cpp}` |
+| CUDA kernel, launch shape set by the source | `kernels/matmul/fp32/tiled.{cu,cpp}` |
+| CUDA kernel with a scratch buffer | `kernels/scan/fp32/multiblock.{cu,cpp}` |
 | CUDA kernel, several launches | `kernels/reduce/fp32/two_stage.{cu,cpp}` (`uses_module() = false`, launches in `execute()`) |
 | Library call (CUB, cuBLAS) | `kernels/reduce/fp32/cub_reduce.cu` (descriptor and call in one `.cu`, linked at build time) |
 | Triton | `kernels/reduce/fp32/reduce_grid_stride.triton.{py,cpp}` |
@@ -51,6 +53,8 @@ REGISTER_KERNEL(ReduceMyKernel);
 ```
 
 - CUDA sources export the entry point with `extern "C" __global__`, so the name is not mangled.
+- A CUDA source can declare launch constants in a comment, `// arena: BLOCK_M=128 THREADS=256` (upper-case keys, integers). They arrive in `compile_result_.constants`, so the descriptor can take its grid, block and shared memory from the source, as `kernels/matmul/fp32/tiled.cpp` and `kernels/scan/fp32/multiblock.cpp` do. Prefer this for any slot meant for optimization.
+- Verification must cover the whole output. A check that samples fixed positions, or only the first rows, can be passed by a kernel that skips the rest. For sums, judge error against the sum of |terms| with `ErrorAccumulator::add_scaled`, not against the result, which can be near zero.
 - Arguments come from the category base's `get_kernel_args()` (for reduce: input pointer, output pointer, `int n`). Override it only if the kernel needs something else.
 - DSL descriptors read their entry point and launch shape from `compile_result_`: `kernel_name`, `num_warps`, `constants`, `block_dim`. Declare `tunable_compile_options()` to put compile-time knobs on the tuning axis.
 - `input_dtype()` / `output_dtype()` default to fp32. Override them for narrow types; tolerance follows the output type.
