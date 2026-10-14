@@ -146,6 +146,10 @@ json environment_json(const Context& ctx, const PowerMonitor& power) {
     j["memory_clock_khz"]    = ctx.memory_clock_khz();
     j["memory_bus_width"]    = ctx.memory_bus_width();
     j["l2_cache_bytes"]      = ctx.l2_cache_bytes();
+    j["arch"]                = ctx.arch();
+    j["repo_root"]           = ARENA_SOURCE_DIR;
+    j["peak_dram_gbps"]      = ctx.peak_dram_gbps();
+    j["peak_fp32_gflops"]    = ctx.peak_fp32_gflops();
     j["driver_version"]      = driver_version;
     j["cuda_toolkit_version"] = CUDA_VERSION;
     j["nvml_available"]      = power.available();

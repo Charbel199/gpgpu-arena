@@ -130,20 +130,8 @@ Gui::Gui(arena::Runner& runner)
 
     // Compute GPU theoretical peaks
     const auto& ctx = runner_.context();
-    int sms = ctx.sm_count();
-    int clock_khz = ctx.clock_rate_khz();
-    int mem_clock_khz = ctx.memory_clock_khz();
-    int bus_width = ctx.memory_bus_width();
-    int cc = ctx.compute_capability_major();
-    int cc_minor = ctx.compute_capability_minor();
-
-    // FP32 cores per SM by compute capability
-    int fp32_per_sm = 128;
-    if (cc == 7) fp32_per_sm = 64;
-    else if (cc == 8 && cc_minor == 0) fp32_per_sm = 64;  // A100
-
-    peak_fp32_gflops_ = (float)sms * fp32_per_sm * clock_khz * 2.0f / 1e6f;
-    peak_mem_bw_gbs_  = (float)mem_clock_khz * 2.0f * (bus_width / 8.0f) / 1e6f;
+    peak_fp32_gflops_ = (float)ctx.peak_fp32_gflops();
+    peak_mem_bw_gbs_  = (float)ctx.peak_dram_gbps();
 
     refresh_kernels();
 }

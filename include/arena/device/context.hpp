@@ -50,6 +50,19 @@ public:
     int memory_clock_khz() const { return memory_clock_khz_; }
     int memory_bus_width() const { return memory_bus_width_; }
 
+    // Theoretical peaks, the roofs a speed-of-light figure is measured
+    // against. DRAM is double data rate on the reported memory clock. FP32 is
+    // two FLOPs per FMA per core per clock.
+    double peak_dram_gbps() const {
+        return memory_clock_khz_ * 2.0 * (memory_bus_width_ / 8.0) / 1e6;
+    }
+    double peak_fp32_gflops() const {
+        int fp32_per_sm = 128;
+        if (cc_major_ == 7) fp32_per_sm = 64;
+        else if (cc_major_ == 8 && cc_minor_ == 0) fp32_per_sm = 64;   // A100
+        return (double)sm_count_ * fp32_per_sm * clock_rate_khz_ * 2.0 / 1e6;
+    }
+
     // "sm_120". Cubins are built for this and the compile cache is keyed on it.
     std::string arch() const {
         return "sm_" + std::to_string(cc_major_) + std::to_string(cc_minor_);
