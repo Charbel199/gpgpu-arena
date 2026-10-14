@@ -40,7 +40,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
 
         // runtime compilation for DSL kernels
         if (desc.needs_compilation()) {
-            auto cr = compiler_.compile(desc.source_path(), desc.compile_options());
+            auto cr = compiler_.compile(desc.effective_source_path(), desc.compile_options());
             result.cache_hit  = cr.cache_hit;
             result.compile_ms = cr.compile_ms;
             result.import_ms  = cr.import_ms;
@@ -251,6 +251,13 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         log->error("{}: {}", result.kernel_name, e.what());
         result.success = false;
         result.error = e.what();
+        // The usual way a candidate breaks a slot is by renaming its entry
+        // point, and the driver's message does not say what was expected.
+        if (!desc.source_override().empty() &&
+            result.error.find("named symbol not found") != std::string::npos) {
+            result.error += " (a --source-override must keep the slot's entry point '" +
+                            desc.function_name() + "' and its parameter list)";
+        }
         try { desc.cleanup(ctx_); } catch (...) {}
 
         // A sticky error is terminal. Recreating the context, and resetting

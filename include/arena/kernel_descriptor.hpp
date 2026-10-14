@@ -181,6 +181,22 @@ public:
     virtual std::string source_path() const { return ""; }
     void set_compile_result(const CompileResult& result) { compile_result_ = result; }
 
+    // Runs a different source file in this kernel's slot: same descriptor,
+    // same launch config, same buffers, same verification. This is how a
+    // candidate gets measured without writing a descriptor or rebuilding.
+    // The candidate has to keep the slot's ABI: the entry point name and the
+    // parameter list the descriptor passes. Absolute path, or empty to clear.
+    void set_source_override(const std::string& path) { source_override_ = path; }
+    const std::string& source_override() const { return source_override_; }
+    std::string effective_source_path() const {
+        return source_override_.empty() ? source_path() : source_override_;
+    }
+
+    // The .cpp/.cu file this descriptor was registered from. Filled in by
+    // REGISTER_KERNEL, so tools can point at the code that defines the ABI.
+    const std::string& descriptor_file() const { return descriptor_file_; }
+    void set_descriptor_file(const std::string& f) { descriptor_file_ = f; }
+
     // device properties (captured automatically on first allocate)
     int sm_count() const { return sm_count_; }
 
@@ -193,6 +209,8 @@ protected:
 
     CompileResult compile_result_;
     int sm_count_ = 0;
+    std::string source_override_;
+    std::string descriptor_file_;
 
     // call from allocate() overrides to capture device properties
     void capture_device_props(Context& ctx) { sm_count_ = ctx.sm_count(); }
@@ -207,7 +225,9 @@ public:
         return registry;
     }
     
-    void register_kernel(std::unique_ptr<KernelDescriptor> descriptor) {
+    void register_kernel(std::unique_ptr<KernelDescriptor> descriptor,
+                         const char* file = "") {
+        descriptor->set_descriptor_file(file);
         descriptors_.push_back(std::move(descriptor));
     }
     
@@ -251,7 +271,7 @@ private:
 #define REGISTER_KERNEL(DescriptorClass) \
     static bool _registered_##DescriptorClass = []() { \
         arena::KernelRegistry::instance().register_kernel( \
-            std::make_unique<DescriptorClass>()); \
+            std::make_unique<DescriptorClass>(), __FILE__); \
         return true; \
     }()
 
