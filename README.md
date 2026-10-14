@@ -280,6 +280,10 @@ kernels/reduce/my_kernel.cutile.cpp   # descriptor plus param buffer
 The descriptor sets `needs_compilation() = true` and `source_path()`. Compiling,
 loading, benchmarking and verifying happen automatically.
 
+To try a kernel without writing a descriptor or rebuilding, give it a JSON
+manifest instead and run `./arena --manifest k.json`. The format, with a
+verified example for each DSL, is in `skills/arena-optimize/manifests.md`.
+
 A CUDA source can also choose its own launch shape with a comment such as
 `// arena: BLOCK_M=128 BLOCK_N=128 THREADS=256`. Upper-case keys land in the
 compile result's constants, the same place a Triton kernel's constexprs go,
@@ -348,25 +352,40 @@ both links to `skills/`, and `AGENTS.md` lists them.
 | `arena-add-kernel` | Files, descriptors, ABI, promoting a candidate to a kernel |
 | `arena-optimize` | The PGAIO loop |
 
-`tools/pgaio.py` is the environment for that loop. It measures every candidate
-the same way and keeps the agent honest:
+`tools/pgaio.py` is the environment for that loop. A run targets a problem,
+and the agent writes as many candidates as it wants, in any DSL:
 
 ```bash
-python3 tools/pgaio.py init --kernel reduce_grid_stride --budget 20 --mode isolated
-python3 tools/pgaio.py eval <run> <candidate.cu> --hypothesis "float4 loads, one atomic per block"
-python3 tools/pgaio.py status <run>
-python3 tools/pgaio.py report
+python3 tools/pgaio.py init --category softmax --budget-per-dsl 10 --target 0.9
+python3 tools/pgaio.py sass <run> work/v3.json        # free: how a draft compiled
+python3 tools/pgaio.py eval <run> work/v3.json --hypothesis "warp-shuffle reduction"
+python3 tools/pgaio.py compare <run> 2 7              # free: two iterations side by side
+python3 tools/pgaio.py report --html progress.html
 ```
 
-Each `eval` runs the candidate in the slot with `--source-override`, gates it
-on held-out sizes, distributions and seeds, times it at a size larger than L2
-with `--l2 cold`, scores it as a fraction of the roofline, diffs its SASS
-against the best so far, and prints a short diagnosis. It hashes the harness
-before and after, so a candidate that edits verification or a descriptor is
-rejected. Every eval counts as an iteration, failed ones included, which is
-what makes `report`'s iterations-to-50/70/80/90% SOL comparable across DSLs.
-`--mode cross-dsl` allows the agent to study other kernels' SASS; comparing it
-against `isolated` measures what the other DSLs are worth as hints.
+A candidate is a kernel source plus a small JSON manifest saying how to launch
+it: grid and block as expressions such as `cdiv(rows, ROWS_PER_PROGRAM)`, and
+arguments from a fixed vocabulary (the category's buffers and sizes, scratch
+buffers, and each DSL's argument format). `arena --manifest k.json` runs one
+directly. The manifest is data, not code, so it chooses how a kernel is
+launched but never touches the data, the reference, the verification or the
+byte counts SOL is computed from. Arena checks every argument against the
+compiled function's real parameter sizes and refuses a mismatch.
+
+Each `eval` gates the candidate on held-out sizes, distributions and seeds,
+times it at a size larger than L2 with `--l2 cold`, scores it as a fraction of
+the roofline, diffs its SASS against the best so far, and prints a short
+diagnosis. Verification uses inputs regenerated from a seed the kernel never
+saw and covers the whole output, so a kernel that caches, precomputes or skips
+work fails. The harness is hashed before and after, so a candidate that edits
+it is rejected. Every eval counts as an iteration of its DSL's budget, failed
+ones included; looking at SASS does not. `report` gives iterations-to-50, 70,
+80 and 90% SOL overall and per DSL, and `--html` draws the progression: every
+iteration coloured by DSL, with its hypothesis and SASS changes.
+
+`--mode cross-dsl` lets the agent study the existing kernels as well;
+comparing it with `isolated` measures what they are worth as hints.
+`init --kernel <name>` instead tunes one existing kernel's source in place.
 
 Run directories go to `pgaio/runs/` (ignored by git). Insights recorded with
 `pgaio.py learn` go to `pgaio/learnings.jsonl` and are shown at the start of
