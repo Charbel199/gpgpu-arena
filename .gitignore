@@ -45,3 +45,10 @@ gpgpu_arena_results.csv
 # Local overrides
 .env
 *.local
+
+# .claude/ is tracked for its skills link; personal settings stay local
+.claude/settings.local.json
+
+# PGAIO run directories: candidates, observations and SASS dumps. Large and
+# machine-specific. pgaio/learnings.jsonl is tracked.
+pgaio/runs/
