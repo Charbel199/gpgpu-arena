@@ -3,6 +3,7 @@ add_executable(arena_tests
     test_cli_args.cpp
     test_accuracy.cpp
     test_distribution.cpp
+    test_sass.cpp
     test_launch_summary.cpp
     test_compiler_cache.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/measurement/measure_policy.cpp
@@ -12,6 +13,7 @@ add_executable(arena_tests
     ${CMAKE_SOURCE_DIR}/src/arena/distribution.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/measurement/accuracy.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/compilers/cache_key.cpp
+    ${CMAKE_SOURCE_DIR}/src/arena/compilers/sass.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/compilers/compiler_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/compilers/kernel_compiler.cpp
 )
