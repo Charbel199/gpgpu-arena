@@ -425,6 +425,14 @@ void print_cli_usage(const char* program) {
         "  3  usage error\n";
 }
 
+bool validate_cli_args(int argc, char** argv) {
+    CliOptions o = parse_args(argc, argv);
+    if (o.ok) return true;
+    std::cerr << "Error: " << o.error << "\n\n";
+    print_cli_usage(argv[0]);
+    return false;
+}
+
 int run_cli(arena::Runner& runner, int argc, char** argv) {
     CliOptions o = parse_args(argc, argv);
     if (!o.ok) {

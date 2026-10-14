@@ -37,6 +37,9 @@ int main(int argc, char** argv) {
     }
 
     const bool cli_mode = frontend::wants_cli(argc, argv);
+    if (cli_mode && !frontend::validate_cli_args(argc, argv)) {
+        return static_cast<int>(frontend::CliExit::UsageError);
+    }
 
 #ifndef ARENA_GUI_ENABLED
     if (!cli_mode) {

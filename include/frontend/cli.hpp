@@ -27,6 +27,11 @@ bool cli_writes_to_stdout(int argc, char** argv);
 
 void print_cli_usage(const char* program);
 
+// Parses the arguments without touching the GPU. Returns false and prints the
+// error with usage, so a bad flag exits 3 on a machine with no GPU at all
+// instead of failing first on CUDA initialization.
+bool validate_cli_args(int argc, char** argv);
+
 int run_cli(arena::Runner& runner, int argc, char** argv);
 
 }
