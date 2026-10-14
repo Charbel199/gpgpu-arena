@@ -27,6 +27,13 @@ struct RunConfig {
     int  number_of_runs   = 10;
     bool collect_metrics  = false;
 
+    // Evict L2 before every timed launch. Off, a working set that fits in L2
+    // (16 MB at n=4M on a 128 MB part) is served from cache on every run after
+    // the first, and the timing describes L2 rather than DRAM. On, every
+    // launch starts cold, which is what a kernel sees when its input was
+    // produced by something else. The scrub runs outside the timed interval.
+    bool cold_l2 = false;
+
     bool  collect_energy   = false;
     float energy_window_ms = 500.0f;
 

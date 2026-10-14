@@ -12,11 +12,35 @@ Runner::Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
     : ctx_(ctx), loader_(loader), compiler_(compiler),
       profiler_(profiler), power_(power) {}
 
+Runner::~Runner() {
+    if (scrub_buf_ && scrub_ctx_ == ctx_.handle()) cuMemFree(scrub_buf_);
+}
+
+void Runner::scrub_l2() {
+    if (scrub_ctx_ != ctx_.handle()) {
+        // Allocated straight from the driver rather than through ctx_, so it
+        // does not show up in any kernel's peak_device_bytes.
+        scrub_buf_ = 0;
+        scrub_bytes_ = std::max<size_t>(2 * ctx_.l2_cache_bytes(), 64u << 20);
+        check_cuda(cuMemAlloc(&scrub_buf_, scrub_bytes_), "cuMemAlloc (L2 scrub)");
+        scrub_ctx_ = ctx_.handle();
+    }
+    // A different value each time, so no part of the hardware can treat the
+    // write as a no-op.
+    check_cuda(cuMemsetD32Async(scrub_buf_, ++scrub_value_, scrub_bytes_ / 4, nullptr),
+               "cuMemsetD32Async (L2 scrub)");
+}
+
 RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     RunResult result;
     result.kernel_name = desc.name();
     result.category = desc.category();
     result.description = desc.description();
+    result.source = desc.effective_source_path();
+    result.params = config.params;
+    result.distribution = distribution_name(config.input_distribution);
+    result.seed = config.input_seed;
+    result.cold_l2 = config.cold_l2;
 
     auto log = spdlog::get("runner");
 
@@ -99,7 +123,10 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             }
         };
 
-        auto reset_fn = [&]() { desc.reset(ctx_); };
+        auto reset_fn = [&]() {
+            desc.reset(ctx_);
+            if (config.cold_l2) scrub_l2();
+        };
 
         result.sm_clock_start_mhz = power_.sm_clock_mhz();
 

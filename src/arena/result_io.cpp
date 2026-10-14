@@ -28,7 +28,15 @@ json to_json(const RunResult& r) {
     j["kernel"]      = r.kernel_name;
     j["category"]    = r.category;
     j["description"] = r.description;
+    j["source"]      = r.source;
     j["uses_module"] = r.uses_module;
+
+    j["input"] = {
+        {"params",       r.params},
+        {"distribution", r.distribution},
+        {"seed",         r.seed},
+        {"cold_l2",      r.cold_l2},
+    };
 
     j["launch"] = {
         {"block", {r.block_x, r.block_y, r.block_z}},
@@ -156,6 +164,7 @@ json config_json(const RunConfig& cfg) {
     j["drift_threshold"]  = cfg.drift_threshold;
     j["number_of_runs"]   = cfg.number_of_runs;
     j["collect_metrics"]  = cfg.collect_metrics;
+    j["cold_l2"]          = cfg.cold_l2;
     j["collect_energy"]   = cfg.collect_energy;
     j["energy_window_ms"] = cfg.energy_window_ms;
     j["sweep_min"]        = cfg.sweep_min;

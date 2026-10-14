@@ -20,6 +20,14 @@ struct RunResult {
     std::string kernel_name;
     std::string category;
     std::string description;
+    std::string source;   // the file actually compiled, override included
+
+    // What it ran on. A CLI run can cover several sizes, distributions and
+    // seeds, so each result says which one it is.
+    std::map<std::string, int> params;
+    std::string distribution;
+    uint64_t seed = 0;
+    bool cold_l2 = false;
 
     // launch type: true = cubin via driver API, false = compiled (e.g. CUB)
     bool uses_module = false;
@@ -109,6 +117,9 @@ class Runner {
 public:
     Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
            Profiler& profiler, PowerMonitor& power);
+    ~Runner();
+    Runner(const Runner&) = delete;
+    Runner& operator=(const Runner&) = delete;
 
     RunResult run(KernelDescriptor& descriptor, const RunConfig& config);
 
@@ -125,11 +136,21 @@ public:
     const PowerMonitor& power() const { return power_; }
 
 private:
+    // Overwrites a buffer twice the size of L2, which evicts whatever the
+    // previous launch left there. Enqueued on the null stream, so it finishes
+    // before the next timed launch starts and is not part of its interval.
+    void scrub_l2();
+
     Context& ctx_;
     KernelLoader& loader_;
     KernelCompiler& compiler_;
     Profiler& profiler_;
     PowerMonitor& power_;
+
+    CUdeviceptr scrub_buf_ = 0;
+    size_t      scrub_bytes_ = 0;
+    CUcontext   scrub_ctx_ = nullptr;   // a context reset invalidates the buffer
+    unsigned    scrub_value_ = 0;
 };
 
 }
