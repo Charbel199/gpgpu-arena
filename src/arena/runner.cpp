@@ -126,7 +126,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         auto activity = profiler_.collect_activity(launch_kernel);
         result.gpu_ms = activity.kernel_time_ms;
         result.sub_kernels = activity.sub_kernels;
-        result.launch_count = static_cast<int>(activity.sub_kernels.size());
+        result.launch_count = activity.launch_count;
         result.overhead_ms = std::max(0.0f, result.op_ms - result.gpu_ms);
         result.counters.regs_per_thread = activity.registers_per_thread;
         result.counters.shared_mem_bytes = activity.shared_memory_per_block;

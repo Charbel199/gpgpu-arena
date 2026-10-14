@@ -112,6 +112,7 @@ json to_json(const RunResult& r) {
         j["sub_kernels"].push_back({
             {"name",        sk.name},
             {"duration_ms", sk.duration_ms},
+            {"start_offset_ms", sk.start_offset_ms},
             {"registers",   sk.registers},
             {"shared_mem",  sk.shared_memory},
         });

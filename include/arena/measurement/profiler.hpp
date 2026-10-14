@@ -6,6 +6,7 @@
 #include <cupti_profiler_host.h>
 #include <cupti_profiler_target.h>
 #include <cupti_range_profiler.h>
+#include "arena/measurement/launch_summary.hpp"
 #include <string>
 #include <vector>
 #include <map>
@@ -28,20 +29,8 @@ public:
 
     using KernelLaunchFn = std::function<void()>;
 
-    struct SubKernelInfo {
-        std::string name;
-        float duration_ms = 0.0f;
-        int registers = 0;
-        int shared_memory = 0;
-    };
-
-    struct ProfileResult {
-        float kernel_time_ms = 0.0f;   // GPU-only kernel execution time
-        int registers_per_thread = 0;
-        int shared_memory_per_block = 0;
-        std::vector<SubKernelInfo> sub_kernels;  // per-kernel breakdown
-        std::map<std::string, double> metric_values;  // keyed by metric:: constants
-    };
+    using SubKernelInfo = arena::SubKernelInfo;
+    using ProfileResult = LaunchSummary;
 
     // kernel-only time + registers + shmem (Activity API, one kernel launch)
     ProfileResult collect_activity(KernelLaunchFn launch_fn);

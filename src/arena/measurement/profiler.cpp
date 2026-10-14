@@ -9,13 +9,10 @@ namespace arena {
 
 // Note: Profiler (CUPTI) will not run if nsys or ncu used (They will reserve CUPTI context before the arena app)
 
-struct KernelActivityData {
-    uint64_t duration_ns = 0;
-    int registers_per_thread = 0;
-    int shared_memory = 0;
-};
-
-static std::unordered_map<std::string, KernelActivityData> s_activity_results;
+// One record per launch. Keyed by name this used to overwrite: an operation
+// that launched the same kernel twice reported one launch with the second
+// one's duration, and the map lost the order the launches ran in.
+static std::vector<KernelLaunchRecord> s_activity_records;
 
 static void CUPTIAPI activity_buffer_requested(
     uint8_t** buffer, size_t* size, size_t* maxNumRecords)
@@ -33,10 +30,13 @@ static void CUPTIAPI activity_buffer_completed(
     while (cuptiActivityGetNextRecord(buffer, validSize, &record) == CUPTI_SUCCESS) {
         if (record->kind == CUPTI_ACTIVITY_KIND_KERNEL) {
             auto* kernel = (CUpti_ActivityKernel4*)record;
-            auto& data = s_activity_results[kernel->name];
-            data.duration_ns = kernel->end - kernel->start;
-            data.registers_per_thread = kernel->registersPerThread;
-            data.shared_memory = kernel->staticSharedMemory + kernel->dynamicSharedMemory;
+            KernelLaunchRecord r;
+            r.name = kernel->name ? kernel->name : "";
+            r.start_ns = kernel->start;
+            r.end_ns = kernel->end;
+            r.registers_per_thread = kernel->registersPerThread;
+            r.shared_memory = kernel->staticSharedMemory + kernel->dynamicSharedMemory;
+            s_activity_records.push_back(std::move(r));
         }
     }
     free(buffer);
@@ -146,9 +146,7 @@ void Profiler::destroy_host_object() {
 
 
 Profiler::ProfileResult Profiler::collect_activity(KernelLaunchFn launch_fn) {
-    ProfileResult result;
-
-    s_activity_results.clear();
+    s_activity_records.clear();
     cuptiActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL);
 
     launch_fn();
@@ -157,31 +155,17 @@ Profiler::ProfileResult Profiler::collect_activity(KernelLaunchFn launch_fn) {
     cuptiActivityFlushAll(0);
     cuptiActivityDisable(CUPTI_ACTIVITY_KIND_KERNEL);
 
-    if (!s_activity_results.empty()) {
-        auto log = spdlog::get("profiler");
+    auto result = summarize_launches(s_activity_records);
 
-        // sum durations across all kernels (handles multi-kernel ops like CUB or e.g. two-stage kernels)
-        uint64_t total_ns = 0;
-        for (const auto& [name, data] : s_activity_results) {
-            total_ns += data.duration_ns;
-            result.sub_kernels.push_back({name, data.duration_ns / 1e6f,
-                data.registers_per_thread, data.shared_memory});
-            log->debug("  GPU kernel: {} | {:.3f} ms | {} regs | {} B shmem",
-                name, data.duration_ns / 1e6f, data.registers_per_thread, data.shared_memory);
-        }
-        result.kernel_time_ms = total_ns / 1e6f;
-
-        // take metadata from the longest-running kernel (the "main" one) TODO: Will need to change that
-        auto longest = std::max_element(s_activity_results.begin(), s_activity_results.end(),
-            [](const auto& a, const auto& b) { return a.second.duration_ns < b.second.duration_ns; });
-        result.registers_per_thread = longest->second.registers_per_thread;
-        result.shared_memory_per_block = longest->second.shared_memory;
-
-        if (s_activity_results.size() > 1) {
-            log->debug("  GPU total: {:.3f} ms ({} kernels)", result.kernel_time_ms, s_activity_results.size());
-        }
+    auto log = spdlog::get("profiler");
+    for (const auto& sk : result.sub_kernels) {
+        log->debug("  GPU kernel: {} | {:.3f} ms | {} regs | {} B shmem",
+            sk.name, sk.duration_ms, sk.registers, sk.shared_memory);
     }
-
+    if (result.sub_kernels.size() > 1) {
+        log->debug("  GPU total: {:.3f} ms ({} launches)",
+            result.kernel_time_ms, result.sub_kernels.size());
+    }
     return result;
 }
 

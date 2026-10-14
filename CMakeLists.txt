@@ -128,6 +128,7 @@ set(ARENA_SOURCES
     src/arena/measurement/power.cpp
     src/arena/measurement/measure.cpp
     src/arena/measurement/measure_policy.cpp
+    src/arena/measurement/launch_summary.cpp
     src/arena/cli_args.cpp
     src/arena/dtype.cpp
     src/arena/distribution.cpp
