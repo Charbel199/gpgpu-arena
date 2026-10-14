@@ -26,6 +26,27 @@ pipe the output straight into other tools.
 ./arena --run all --energy -o results.csv --format csv
 ```
 
+Sizes, input distributions and seeds take comma-separated lists, and every
+combination runs, each result recording which one it was:
+
+```bash
+./arena --run reduce_vectorized -p n=1000003,67108864 --dist uniform,adversarial --seed 1,2
+```
+
+Three commands describe a kernel without running it:
+
+```bash
+./arena --inspect reduce_vectorized    # JSON: source, descriptor, registers, spills, SASS mix
+./arena --sass triton_reduce           # SASS of the entry point
+./arena --ptx reduce_vectorized        # PTX, for CUDA and Triton
+```
+
+`--source-override <file>` compiles a different source into an existing
+kernel's slot and runs it with that slot's descriptor, launch config and
+verification. The file has to keep the slot's entry point and parameters.
+This is how a modified kernel gets measured without writing a descriptor or
+rebuilding.
+
 Exit codes let a caller branch without parsing the output:
 
 | Code | Meaning |
@@ -72,7 +93,9 @@ Best against worst config over `reduce` at n=4M:
 | `triton_reduce_grid_stride` | BLOCK_SIZE=4096, num_warps=2 | 1.6x |
 
 The last row is why this matters. Tuned, that kernel runs in 0.0084 ms and
-beats `cub_reduce` at 0.0133 and every hand-written CUDA kernel here. At the
+beats `cub_reduce` at 0.0133 and every hand-written CUDA kernel here. These
+figures were taken with a warm L2 (see Measurement); the 16 MB input fits in
+cache. At the
 value written in its source file it runs in 0.0131. Without this axis you are
 comparing how well each kernel was guessed at, not what the language can do.
 
@@ -88,6 +111,14 @@ together or compare one against another.
 | Build | `compile_ms`, `import_ms`, `invoke_ms` | One time, cached to disk. `compile_ms` is the DSL compiler itself, separate from Python startup. |
 
 GFLOPS and GB/s divide by `op_ms`. Hardware counters divide by `gpu_ms`.
+
+By default the timed loop runs with whatever the previous launch left in L2.
+A working set smaller than L2 (128 MB on an RTX PRO 6000) is then served from
+cache after the first run, and the number describes L2 rather than DRAM.
+`--l2 cold` overwrites a buffer twice the size of L2 before every timed launch,
+outside the timed interval. On `reduce_vectorized` at n=4M the GPU time goes
+from 0.0098 ms warm to 0.0217 ms cold. Each result records which mode it ran
+in, under `input.cold_l2`.
 
 Warmup runs until the timings settle instead of a fixed count. It compares the
 median of one window against the previous one, because a clock that is still
@@ -189,15 +220,9 @@ things. Expect `dram_read_bytes` to sit far below an `ncu` figure when the data
 fits in cache, and to agree when it does not: at a 400 MB working set this
 reports 400.1 MB against Nsight's 400.5.
 
-The compile cache is keyed on source mtime and the defines a cubin was built
-with, but not on target architecture, compiler version, or the rest of the
-compile flags. A cubin can outlive the toolchain that built it and get reused.
-This has produced wrong results that verification caught. After a toolchain
-change, clear it:
-
-```bash
-rm build/kernels/*.cubin build/kernels/*.json
-```
+The compile cache is keyed on a hash of the source, the DSL's shared base
+module, the compiler version and flags, the GPU arch, and the compile-time
+defines. Editing any of them rebuilds; nothing else does.
 
 ## How it works
 
@@ -213,7 +238,8 @@ cuModuleLoad  ->  cuLaunchKernel  ->  benchmark and profile
 
 Everything compiles to a cubin, final SASS, at runtime on first use. Cubins are
 cached on disk and later runs skip compilation. Edit a kernel source, run
-again, and only that kernel rebuilds.
+again, and only that kernel rebuilds. CUDA builds carry `-lineinfo`, which has
+no runtime cost and lets SASS be mapped back to source lines.
 
 ![Reduce sweep, 12 reduce kernels with speedup, wall against GPU time, and throughput against theoretical peak](docs/reduce-sweep.png)
 
@@ -249,12 +275,13 @@ loading, benchmarking and verifying happen automatically.
 ## Layout
 
 Compiler backends in `src/arena/compilers/`, one per DSL. `CudaBackend` runs
-nvcc. `TritonBackend`, `CuTileBackend` and `WarpBackend` run Python scripts
-that write a cubin plus JSON metadata.
+nvcc. `TritonBackend`, `CuTileBackend` and `WarpBackend` share `PythonBackend`,
+which runs the kernel's Python file; that file writes a cubin plus JSON
+metadata. `sass.cpp` parses `cuobjdump` output for `--inspect`.
 
 `KernelCompiler` picks a backend by file extension and owns the two-level
-cache (memory, then disk with mtime invalidation), output naming and compile
-timing.
+cache (memory, then disk keyed on a content fingerprint), output naming and
+compile timing.
 
 The kernel loader in `src/arena/device/` loads cubins with `cuModuleLoad` and
 launches with `cuLaunchKernel`.
@@ -285,3 +312,60 @@ sudo reboot
 ```
 
 Without it benchmarking still works and only the profiling pass fails.
+
+The range profiler reports one range per launch. For a kernel that launches
+more than once per operation, such as `reduce_two_stage` or CUB, ranges are
+grouped back into whole operations before the least-traffic one is picked,
+with bytes summed across launches and occupancy and IPC taken from the
+dominant launch.
+
+## Agents and PGAIO
+
+`skills/` holds instructions for coding agents: running the CLI, reading
+results, inspecting SASS and PTX, adding kernels, and running a profile and
+benchmark guided optimization (PGAIO) loop. Nothing needs installing. Claude
+Code finds them through `.claude/skills` and Codex through `.agents/skills`,
+both links to `skills/`, and `AGENTS.md` lists them.
+
+| Skill | What it covers |
+| --- | --- |
+| `arena-cli` | Running kernels, the JSON schema, exit codes, how to compare fairly |
+| `arena-inspect` | `--inspect`, `--sass`, `--ptx`, counters and the roofline, `--source-override` |
+| `arena-add-kernel` | Files, descriptors, ABI, promoting a candidate to a kernel |
+| `arena-optimize` | The PGAIO loop |
+
+`tools/pgaio.py` is the environment for that loop. It measures every candidate
+the same way and keeps the agent honest:
+
+```bash
+python3 tools/pgaio.py init --kernel reduce_grid_stride --budget 20 --mode isolated
+python3 tools/pgaio.py eval <run> <candidate.cu> --hypothesis "float4 loads, one atomic per block"
+python3 tools/pgaio.py status <run>
+python3 tools/pgaio.py report
+```
+
+Each `eval` runs the candidate in the slot with `--source-override`, gates it
+on held-out sizes, distributions and seeds, times it at a size larger than L2
+with `--l2 cold`, scores it as a fraction of the roofline, diffs its SASS
+against the best so far, and prints a short diagnosis. It hashes the harness
+before and after, so a candidate that edits verification or a descriptor is
+rejected. Every eval counts as an iteration, failed ones included, which is
+what makes `report`'s iterations-to-50/70/80/90% SOL comparable across DSLs.
+`--mode cross-dsl` allows the agent to study other kernels' SASS; comparing it
+against `isolated` measures what the other DSLs are worth as hints.
+
+Run directories go to `pgaio/runs/` (ignored by git). Insights recorded with
+`pgaio.py learn` go to `pgaio/learnings.jsonl` and are shown at the start of
+later runs.
+
+## Tests
+
+```bash
+ctest --test-dir build --output-on-failure        # C++: cache keys, SASS parsing, CLI args, numerics
+python3 -m unittest discover -s tools/tests       # PGAIO scoring, gating, reports, skills checks
+python3 tools/check_skills.py                     # skill frontmatter, paths named in skills
+```
+
+None of these need a GPU. CI runs them on every push and pull request, builds
+with and without the GUI, and has an opt-in job for a self-hosted GPU runner
+that runs the reduce category on held-out inputs and a PGAIO baseline.
