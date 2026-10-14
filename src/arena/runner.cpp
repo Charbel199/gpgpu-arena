@@ -206,9 +206,17 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
                 result.counters.dram_read_gbps, result.counters.dram_write_gbps, result.counters.ipc);
         }
 
-        // --- verification gets its own clean run ---
+        // --- verification gets its own clean run, on fresh inputs ---
         // Independent of which profiling passes ran, so a multi-pass
         // UserReplay counter collection cannot cause a spurious failure.
+        //
+        // The inputs are regenerated from a seed nothing has seen until now.
+        // A kernel that worked out its answer during setup, or kept one from
+        // an earlier launch, then fails instead of passing on stale output.
+        // Same distribution, so the tolerance means the same thing.
+        result.verify_seed = config.input_seed ^ 0x9E3779B97F4A7C15ULL;
+        desc.set_input_spec(config.input_distribution, result.verify_seed);
+        desc.initialize(ctx_);
         reset_fn();
         launch_kernel();
         check_cuda(cuCtxSynchronize(), "verify sync");

@@ -27,6 +27,7 @@ struct RunResult {
     std::map<std::string, int> params;
     std::string distribution;
     uint64_t seed = 0;
+    uint64_t verify_seed = 0;   // inputs are regenerated with this for verification
     bool cold_l2 = false;
 
     // launch type: true = cubin via driver API, false = compiled (e.g. CUB)

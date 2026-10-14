@@ -35,6 +35,7 @@ json to_json(const RunResult& r) {
         {"params",       r.params},
         {"distribution", r.distribution},
         {"seed",         r.seed},
+        {"verify_seed",  r.verify_seed},
         {"cold_l2",      r.cold_l2},
     };
 
