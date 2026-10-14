@@ -124,6 +124,9 @@ set(ARENA_SOURCES
     src/arena/compilers/python_backend.cpp
     src/arena/compilers/cache_key.cpp
     src/arena/compilers/sass.cpp
+    src/arena/manifest/expr.cpp
+    src/arena/manifest/args.cpp
+    src/arena/manifest/manifest_kernel.cpp
     src/arena/compilers/kernel_compiler.cpp
     src/arena/measurement/profiler.cpp
     src/arena/measurement/power.cpp

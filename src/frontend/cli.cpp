@@ -7,6 +7,7 @@
 #include "arena/compilers/compiler_utils.hpp"
 #include "arena/compilers/kernel_compiler.hpp"
 #include "arena/compilers/sass.hpp"
+#include "arena/manifest/manifest_kernel.hpp"
 
 #include <nlohmann/json.hpp>
 #include <cstring>
@@ -37,6 +38,7 @@ struct CliOptions {
     std::vector<uint64_t> seeds = {42};
 
     std::string source_override;      // as given; resolved in run_cli
+    std::string manifest;             // a kernel described by JSON instead of C++
     std::string output = "-";         // "-" = stdout
     std::string format = "json";      // json | csv
     arena::RunConfig config;
@@ -72,11 +74,14 @@ CliOptions parse_args(int argc, char** argv) {
             o.selector = v;
         } else if (arg_is(a, "--inspect") || arg_is(a, "--sass") || arg_is(a, "--ptx")) {
             const char* flag = a;
-            if (!take_value(argc, argv, i, flag, v, o)) return o;
-            o.selector = v;
+            // The kernel name is optional here, for use with --manifest.
+            if (i + 1 < argc && argv[i + 1][0] != '-') o.selector = argv[++i];
             o.inspect = arg_is(flag, "--inspect") ? CliOptions::Inspect::Summary
                       : arg_is(flag, "--sass")    ? CliOptions::Inspect::Sass
                                                   : CliOptions::Inspect::Ptx;
+        } else if (arg_is(a, "--manifest")) {
+            if (!take_value(argc, argv, i, "--manifest", v, o)) return o;
+            o.manifest = v;
         } else if (arg_is(a, "--source-override")) {
             if (!take_value(argc, argv, i, "--source-override", v, o)) return o;
             o.source_override = v;
@@ -279,6 +284,12 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
         k.set_compile_result(cr);
         const std::string entry = compiled ? k.function_name() : "";
 
+        // A manifest can launch several entry points from one cubin; each is
+        // described, and the instruction mix covers all of them.
+        std::vector<std::string> entries = {entry};
+        const auto* minfo = dynamic_cast<const arena::ManifestInfo*>(&k);
+        if (minfo && compiled) entries = minfo->entry_points();
+
         if (o.inspect == CliOptions::Inspect::Ptx) {
             const auto ptx = runner.compiler().emit_ptx(k.effective_source_path(),
                                                         o.config.compile_options);
@@ -296,7 +307,12 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
             sass_dump = arena::run_command("cuobjdump -sass " + cubin + " 2>&1", "cuobjdump -sass");
             res_dump  = arena::run_command("cuobjdump -res-usage " + cubin + " 2>&1", "cuobjdump -res-usage");
         }
-        const std::string fn_sass = arena::sass::function_text(sass_dump, entry);
+        std::string fn_sass;
+        for (const auto& e : entries) {
+            const auto t = arena::sass::function_text(sass_dump, e);
+            if (entries.size() > 1 && t == sass_dump) continue;   // entry not found
+            if (fn_sass.find(t) == std::string::npos) fn_sass += t;
+        }
 
         if (o.inspect == CliOptions::Inspect::Sass) {
             *out << fn_sass;
@@ -315,6 +331,7 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
         j["slot_source"]     = k.source_path().empty() ? "" : arena::resolve_source(ARENA_KERNEL_DIR, k.source_path());
         j["descriptor_file"] = k.descriptor_file();
         j["source_override"] = k.source_override();
+        if (minfo) j["manifest"] = minfo->manifest_path();
         j["parameters"]      = k.get_parameter_names();
         j["tunable_block_sizes"]     = k.tunable_block_sizes();
         j["tunable_compile_options"] = k.tunable_compile_options();
@@ -344,6 +361,18 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
                 {"local",     res.local},
                 {"spills_or_local_arrays", res.local > 0 || res.stack > 0},
             };
+            if (entries.size() > 1) {
+                j["entries"] = json::array();
+                for (const auto& e : entries) {
+                    const auto h = arena::sass::opcode_histogram(arena::sass::function_text(sass_dump, e));
+                    const auto r = arena::sass::parse_resource_usage(res_dump, e);
+                    int n = 0;
+                    for (const auto& [op, c] : h) n += c;
+                    j["entries"].push_back({{"entry", e}, {"registers", r.registers},
+                                            {"shared", r.shared}, {"local", r.local},
+                                            {"instructions", n}, {"classes", arena::sass::classify(h)}});
+                }
+            }
             j["sass"] = {
                 {"instructions",  total},
                 {"classes",       arena::sass::classify(hist)},
@@ -365,7 +394,7 @@ bool wants_cli(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (arg_is(argv[i], "--list") || arg_is(argv[i], "--run") ||
             arg_is(argv[i], "--inspect") || arg_is(argv[i], "--sass") ||
-            arg_is(argv[i], "--ptx")) return true;
+            arg_is(argv[i], "--ptx") || arg_is(argv[i], "--manifest")) return true;
     }
     return false;
 }
@@ -395,6 +424,9 @@ void print_cli_usage(const char* program) {
         "                            descriptor, registers, spills, SASS instruction mix\n"
         "  --sass <kernel>           Compile and print the kernel's SASS\n"
         "  --ptx <kernel>            Compile and print PTX (CUDA and Triton only)\n"
+        "  --manifest <file.json>    Run, or with --inspect/--sass/--ptx describe, a kernel\n"
+        "                            defined by a JSON manifest instead of a C++\n"
+        "                            descriptor; relative paths are from the repo root\n"
         "  --source-override <file>  Use this source in the kernel's slot instead of its\n"
         "                            own; relative paths are from the repo root. Needs a\n"
         "                            single kernel and the same file type as the slot\n"
@@ -473,17 +505,35 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
         return static_cast<int>(CliExit::Ok);
     }
 
-    if (o.selector.empty()) {
-        std::cerr << "Error: --run requires a selector\n\n";
-        print_cli_usage(argv[0]);
-        return static_cast<int>(CliExit::UsageError);
-    }
-
-    std::string sel_error;
-    auto kernels = select_kernels(runner, o.selector, sel_error);
-    if (kernels.empty()) {
-        std::cerr << "Error: " << sel_error << "\n";
-        return static_cast<int>(CliExit::UsageError);
+    std::vector<arena::KernelDescriptor*> kernels;
+    std::unique_ptr<arena::KernelDescriptor> manifest_kernel;
+    if (!o.manifest.empty()) {
+        if (!o.selector.empty() || !o.source_override.empty()) {
+            std::cerr << "Error: --manifest names its own kernel; drop the kernel name and "
+                         "--source-override\n";
+            return static_cast<int>(CliExit::UsageError);
+        }
+        std::filesystem::path mp(o.manifest);
+        if (mp.is_relative()) mp = std::filesystem::path(ARENA_SOURCE_DIR) / mp;
+        try {
+            manifest_kernel = arena::load_manifest(mp.string());
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return static_cast<int>(CliExit::UsageError);
+        }
+        kernels = {manifest_kernel.get()};
+    } else {
+        if (o.selector.empty()) {
+            std::cerr << "Error: --run, --inspect, --sass and --ptx need a kernel name or --manifest\n\n";
+            print_cli_usage(argv[0]);
+            return static_cast<int>(CliExit::UsageError);
+        }
+        std::string sel_error;
+        kernels = select_kernels(runner, o.selector, sel_error);
+        if (kernels.empty()) {
+            std::cerr << "Error: " << sel_error << "\n";
+            return static_cast<int>(CliExit::UsageError);
+        }
     }
 
     if (o.inspect != CliOptions::Inspect::None && kernels.size() != 1) {

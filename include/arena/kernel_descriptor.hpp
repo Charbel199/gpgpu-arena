@@ -108,6 +108,12 @@ public:
     void set_compile_options(const CompileDefines& d) { compile_options_ = d; }
     const CompileDefines& compile_options() const { return compile_options_; }
 
+    // The category's device buffers and problem sizes by name, which is the
+    // vocabulary a kernel manifest refers to ("input", "rows"). Buffers are
+    // valid after allocate().
+    virtual std::map<std::string, CUdeviceptr> named_buffers() const { return {}; }
+    virtual std::map<std::string, int> problem_values() const { return {}; }
+
     // kernel launch configuration
     virtual KernelLoader::LaunchConfig get_launch_config() const = 0;
     virtual std::vector<void*> get_kernel_args() = 0;

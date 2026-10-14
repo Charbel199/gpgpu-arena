@@ -65,6 +65,13 @@ public:
         return { &d_input_, &d_output_, &rows_, &cols_ };
     }
 
+    std::map<std::string, CUdeviceptr> named_buffers() const override {
+        return {{"input", d_input_}, {"output", d_output_}};
+    }
+    std::map<std::string, int> problem_values() const override {
+        return {{"rows", rows_}, {"cols", cols_}};
+    }
+
     double calculate_flops() const override {
         // per row: n comparisons (max) + n exp + n additions (sum) + n divides ~ 4n
         return 4.0 * rows_ * cols_;

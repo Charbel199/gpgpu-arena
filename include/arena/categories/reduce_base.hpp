@@ -89,6 +89,11 @@ public:
     std::vector<void*> get_kernel_args() override {
         return { &d_input_, &d_output_, &n_ };
     }
+
+    std::map<std::string, CUdeviceptr> named_buffers() const override {
+        return {{"input", d_input_}, {"output", d_output_}};
+    }
+    std::map<std::string, int> problem_values() const override { return {{"n", n_}}; }
     
     double calculate_flops() const override {
         return static_cast<double>(n_ - 1);

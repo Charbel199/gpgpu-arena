@@ -64,6 +64,13 @@ public:
         return { &d_a_, &d_b_, &d_c_, &M_, &K_, &N_ };
     }
 
+    std::map<std::string, CUdeviceptr> named_buffers() const override {
+        return {{"a", d_a_}, {"b", d_b_}, {"c", d_c_}};
+    }
+    std::map<std::string, int> problem_values() const override {
+        return {{"M", M_}, {"K", K_}, {"N", N_}};
+    }
+
     double calculate_flops() const override {
         return 2.0 * M_ * N_ * K_;
     }
