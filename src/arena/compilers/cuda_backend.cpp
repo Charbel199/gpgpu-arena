@@ -95,6 +95,7 @@ CompileResult CudaBackend::compile(const std::string& source_path,
     result.num_params = num_params;
     result.compile_ms = nvcc_ms;   // for nvcc the subprocess is the compiler
     result.import_ms = 0.0f;
+    result.constants = parse_arena_directives(read_file(full_source));
     return result;
 }
 

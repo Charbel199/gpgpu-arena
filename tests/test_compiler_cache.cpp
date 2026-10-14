@@ -227,3 +227,29 @@ TEST_CASE("KernelCompiler cache") {
         CHECK_THROWS(c.compile((tmp.path / "src" / "k.metal").string()));
     }
 }
+
+TEST_CASE("parse_arena_directives") {
+    SUBCASE("several keys on one line, several lines") {
+        auto d = parse_arena_directives(
+            "// arena: BLOCK_M=128 BLOCK_N=64\n"
+            "#include <x>\n"
+            "// arena: THREADS = 256\n");
+        CHECK(d.size() == 3);
+        CHECK(d["BLOCK_M"] == 128);
+        CHECK(d["BLOCK_N"] == 64);
+        CHECK(d["THREADS"] == 256);
+    }
+    SUBCASE("lower-case keys belong to pgaio and are ignored") {
+        auto d = parse_arena_directives("// arena: block=512 TILE=4\n");
+        CHECK(d.count("block") == 0);
+        CHECK(d["TILE"] == 4);
+    }
+    SUBCASE("a later value wins") {
+        CHECK(parse_arena_directives("// arena: X=1\n// arena: X=2\n")["X"] == 2);
+    }
+    SUBCASE("no directive, or malformed values") {
+        CHECK(parse_arena_directives("int BLOCK_M = 128;\n").empty());
+        CHECK(parse_arena_directives("// arena: BLOCK_M=-4 N=abc\n").empty());
+        CHECK(parse_arena_directives("").empty());
+    }
+}

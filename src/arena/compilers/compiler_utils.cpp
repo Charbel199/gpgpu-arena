@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <array>
 #include <fstream>
+#include <regex>
 #include <sys/wait.h>
 
 namespace arena {
@@ -68,6 +69,21 @@ std::string defines_args(const CompileDefines& defines) {
     std::string out;
     for (const auto& [key, val] : defines) {
         out += " --define " + key + "=" + std::to_string(val);
+    }
+    return out;
+}
+
+std::map<std::string, int> parse_arena_directives(const std::string& source) {
+    static const std::regex line_re(R"(arena:([^\n]*))");
+    static const std::regex kv_re(R"(\b([A-Z][A-Z0-9_]*)\s*=\s*(\d+)\b)");
+    std::map<std::string, int> out;
+    for (auto it = std::sregex_iterator(source.begin(), source.end(), line_re);
+         it != std::sregex_iterator(); ++it) {
+        const std::string rest = (*it)[1].str();
+        for (auto kv = std::sregex_iterator(rest.begin(), rest.end(), kv_re);
+             kv != std::sregex_iterator(); ++kv) {
+            out[(*kv)[1].str()] = std::stoi((*kv)[2].str());
+        }
     }
     return out;
 }
