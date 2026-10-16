@@ -89,6 +89,11 @@ public:
     std::vector<void*> get_kernel_args() override {
         return { &d_input_, &d_output_, &n_ };
     }
+
+    std::map<std::string, CUdeviceptr> named_buffers() const override {
+        return {{"input", d_input_}, {"output", d_output_}};
+    }
+    std::map<std::string, int> problem_values() const override { return {{"n", n_}}; }
     
     double calculate_flops() const override {
         return static_cast<double>(n_ - 1);
@@ -96,6 +101,10 @@ public:
     
     double calculate_bytes_accessed() const override {
         return static_cast<double>(size_input_ + size_output_);
+    }
+
+    IdealBytes ideal_bytes() const override {
+        return ideal::reduce((size_t)n_, input_dtype(), output_dtype());
     }
     
     VerifyResult verify(Context& ctx) override {

@@ -13,6 +13,17 @@ float median(std::vector<float> v) {
     return 0.5f * (v[n / 2 - 1] + v[n / 2]);
 }
 
+float trimmed_mean(std::vector<float> v) {
+    if (v.empty()) return 0.0f;
+    std::sort(v.begin(), v.end());
+    const size_t n = v.size();
+    size_t lo = n / 4, hi = n - n / 4;
+    if (hi <= lo) { lo = 0; hi = n; }
+    double s = 0.0;
+    for (size_t i = lo; i < hi; i++) s += v[i];
+    return static_cast<float>(s / (hi - lo));
+}
+
 DriftCheck check_drift(const std::vector<float>& history, int window, float threshold) {
     DriftCheck out;
     if (window <= 0) return out;
@@ -34,6 +45,60 @@ DriftCheck check_drift(const std::vector<float>& history, int window, float thre
 double rate_per_sec(double quantity, float ms) {
     if (!(ms > 0.0f)) return 0.0;   // also rejects NaN
     return quantity / (static_cast<double>(ms) / 1000.0);
+}
+
+ClockPowerStats summarize_clock_power(const std::vector<unsigned>& sm_mhz,
+                                      const std::vector<double>& watts) {
+    ClockPowerStats out;
+    if (!sm_mhz.empty()) {
+        double sum = 0.0;
+        out.sm_min_mhz = sm_mhz.front();
+        out.sm_max_mhz = sm_mhz.front();
+        for (unsigned c : sm_mhz) {
+            sum += c;
+            out.sm_min_mhz = std::min(out.sm_min_mhz, c);
+            out.sm_max_mhz = std::max(out.sm_max_mhz, c);
+        }
+        out.samples = static_cast<int>(sm_mhz.size());
+        out.sm_mean_mhz = sum / sm_mhz.size();
+    }
+    if (!watts.empty()) {
+        double sum = 0.0;
+        for (double w : watts) {
+            sum += w;
+            out.power_max_w = std::max(out.power_max_w, w);
+        }
+        out.power_mean_w = sum / watts.size();
+    }
+    return out;
+}
+
+void ClockTally::add(const std::vector<unsigned>& sm_mhz) {
+    for (unsigned c : sm_mhz) sum_mhz += c;
+    samples += static_cast<long long>(sm_mhz.size());
+}
+
+std::optional<double> ClockTally::mean() const {
+    if (samples <= 0) return std::nullopt;
+    return sum_mhz / static_cast<double>(samples);
+}
+
+bool clock_below_request(double achieved_mhz, unsigned requested_mhz, double tolerance) {
+    if (!(achieved_mhz > 0.0) || requested_mhz == 0) return false;
+    return achieved_mhz < requested_mhz * (1.0 - tolerance);
+}
+
+unsigned pick_auto_lock_clock(unsigned max_mhz, unsigned default_app_mhz,
+                              const std::vector<unsigned>& supported) {
+    if (max_mhz == 0) return 0;
+    unsigned target = static_cast<unsigned>(max_mhz * 0.85);
+    if (default_app_mhz > 0) target = std::min(target, default_app_mhz);
+
+    unsigned best = 0;
+    for (unsigned c : supported) {
+        if (c <= target && c > best) best = c;
+    }
+    return best > 0 ? best : target;
 }
 
 }

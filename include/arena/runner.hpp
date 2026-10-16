@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <optional>
 
 namespace arena {
 
@@ -20,22 +21,38 @@ struct RunResult {
     std::string kernel_name;
     std::string category;
     std::string description;
+    std::string source;   // the file actually compiled, override included
+
+    // What it ran on. A CLI run can cover several sizes, distributions and
+    // seeds, so each result says which one it is.
+    std::map<std::string, int> params;
+    std::string distribution;
+    uint64_t seed = 0;
+    uint64_t verify_seed = 0;   // inputs are regenerated with this for verification
+    bool cold_l2 = false;
 
     // launch type: true = cubin via driver API, false = compiled (e.g. CUB)
     bool uses_module = false;
+
+    // a vendor library baseline such as cuBLAS (KernelDescriptor::reference)
+    bool reference = false;
 
     // launch config
     unsigned int grid_x = 0, grid_y = 0, grid_z = 0;
     unsigned int block_x = 0, block_y = 0, block_z = 0;
     unsigned int shared_mem_bytes = 0;
+    std::string scratch_policy = "legacy";   // see ScratchPolicy
 
     // --- Tier 1: per-invocation ---
     float op_ms        = 0.0f;   // event-bracketed whole operation, median
+    float op_ms_trimmed = 0.0f;  // same, interquartile mean: steadier for short ops
     float gpu_ms       = 0.0f;   // sum of SASS durations (CUPTI Activity)
     float overhead_ms  = 0.0f;   // max(0, op_ms - gpu_ms)
+    std::string timing_mode = "v1";   // see TimingMode
     int   launch_count = 0;
     std::vector<float> all_times_ms;
     std::vector<Profiler::SubKernelInfo> sub_kernels;
+    std::vector<LaunchedKernel> launched_kernels;   // sub_kernels grouped by name
 
     // --- Tier 2: per-process cold start ---
     float module_load_ms  = 0.0f;
@@ -51,6 +68,11 @@ struct RunResult {
     // --- throughput: denominator is op_ms ---
     double gflops = 0.0;
     double bandwidth_gbps = 0.0;
+    // The ideal bytes behind bandwidth_gbps, split per op. Not known for
+    // every descriptor; see KernelDescriptor::ideal_bytes.
+    bool   ideal_bytes_known = false;
+    double ideal_read_bytes = 0.0;
+    double ideal_write_bytes = 0.0;
 
     // --- hardware counters: denominator is gpu_ms ---
     struct Counters {
@@ -68,6 +90,12 @@ struct RunResult {
         double dram_read_gbps = 0.0;
         double dram_write_gbps = 0.0;
         double ipc = 0.0;
+
+        // --counters full. Only what the chip supports is present.
+        std::string level = "basic";
+        std::map<std::string, double> extra;    // issue_active, eligible_warps, ...
+        std::map<std::string, double> pipes;    // fraction 0..1 of peak
+        std::map<std::string, double> stalls;   // warps stalled per issued instruction
     } counters;
 
     struct Energy {
@@ -99,6 +127,14 @@ struct RunResult {
     std::string warmup_stop;   // why it stopped, for when it did not converge
     unsigned sm_clock_start_mhz = 0;
     unsigned sm_clock_end_mhz = 0;
+    // Sampled by NVML across the timed runs only. Zero samples when NVML is
+    // unavailable.
+    double   sm_clock_mean_mhz = 0.0;
+    unsigned sm_clock_min_mhz = 0;
+    unsigned sm_clock_max_mhz = 0;
+    double   power_mean_w = 0.0;
+    double   power_max_w = 0.0;
+    int      clock_samples = 0;
 
     bool verified = false;
     bool success = false;
@@ -109,6 +145,9 @@ class Runner {
 public:
     Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
            Profiler& profiler, PowerMonitor& power);
+    ~Runner();
+    Runner(const Runner&) = delete;
+    Runner& operator=(const Runner&) = delete;
 
     RunResult run(KernelDescriptor& descriptor, const RunConfig& config);
 
@@ -124,12 +163,28 @@ public:
     KernelCompiler& compiler() { return compiler_; }
     const PowerMonitor& power() const { return power_; }
 
+    // Overrides RunConfig::timing_mode for every run of this Runner, for a
+    // process-wide --timing-mode. nullopt goes back to the config's value.
+    void set_timing_mode(std::optional<TimingMode> m) { forced_timing_mode_ = m; }
+
 private:
+    // Overwrites a buffer twice the size of L2, which evicts whatever the
+    // previous launch left there. Enqueued on the null stream, so it finishes
+    // before the next timed launch starts and is not part of its interval.
+    void scrub_l2();
+
     Context& ctx_;
     KernelLoader& loader_;
     KernelCompiler& compiler_;
     Profiler& profiler_;
     PowerMonitor& power_;
+
+    std::optional<TimingMode> forced_timing_mode_;
+
+    CUdeviceptr scrub_buf_ = 0;
+    size_t      scrub_bytes_ = 0;
+    CUcontext   scrub_ctx_ = nullptr;   // a context reset invalidates the buffer
+    unsigned    scrub_value_ = 0;
 };
 
 }

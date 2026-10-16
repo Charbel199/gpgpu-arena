@@ -65,6 +65,13 @@ public:
         return { &d_input_, &d_output_, &rows_, &cols_ };
     }
 
+    std::map<std::string, CUdeviceptr> named_buffers() const override {
+        return {{"input", d_input_}, {"output", d_output_}};
+    }
+    std::map<std::string, int> problem_values() const override {
+        return {{"rows", rows_}, {"cols", cols_}};
+    }
+
     double calculate_flops() const override {
         // per row: n comparisons (max) + n exp + n additions (sum) + n divides ~ 4n
         return 4.0 * rows_ * cols_;
@@ -75,17 +82,23 @@ public:
         return 2.0 * rows_ * cols_ * sizeof(float);
     }
 
+    IdealBytes ideal_bytes() const override {
+        return ideal::softmax((size_t)rows_, (size_t)cols_);
+    }
+
     VerifyResult verify(Context& ctx) override {
         std::vector<float> h_input(rows_ * cols_);
         std::vector<float> h_output(rows_ * cols_);
         ctx.copy_to_host(h_input.data(), d_input_, size_data_);
         ctx.copy_to_host(h_output.data(), d_output_, size_data_);
 
+        // Every row is checked. Checking the first 8 only let a kernel that
+        // skipped the rest pass with a large fake speedup. One pass over the
+        // matrix is cheap next to generating it.
         ErrorAccumulator acc;
-        const int rows_checked = std::min(rows_, 8);
-        for (int r = 0; r < rows_checked; r++) {
-            const float* in_row  = h_input.data()  + r * cols_;
-            const float* out_row = h_output.data() + r * cols_;
+        for (int r = 0; r < rows_; r++) {
+            const float* in_row  = h_input.data()  + (size_t)r * cols_;
+            const float* out_row = h_output.data() + (size_t)r * cols_;
 
             const float row_max = *std::max_element(in_row, in_row + cols_);
             double row_sum = 0.0;

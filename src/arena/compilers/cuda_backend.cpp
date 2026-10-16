@@ -6,24 +6,56 @@
 
 namespace arena {
 
+namespace {
+
+// Flags shared by the cubin and the PTX build, so both describe one program.
+// Kept in one place because they are part of the cache key.
+const char* kNvccFlags = "-arch=native -lineinfo";
+
+std::string nvcc_defines(const CompileDefines& defines) {
+    std::string out;
+    for (const auto& [key, val] : defines) {
+        out += " -D" + key + "=" + std::to_string(val);
+    }
+    return out;
+}
+
+}
+
 CudaBackend::CudaBackend(const std::string& kernel_dir)
     : kernel_dir_(kernel_dir) {}
+
+std::string CudaBackend::toolchain_id() {
+    if (toolchain_.empty()) {
+        // The last line of `nvcc --version` is the build string, which changes
+        // with every toolkit release, unlike the marketing version above it.
+        std::string version;
+        try {
+            version = run_command(std::string(ARENA_NVCC) + " --version 2>&1", "nvcc --version");
+        } catch (...) {
+            version = "unknown";
+        }
+        while (!version.empty() && (version.back() == '\n' || version.back() == '\r'))
+            version.pop_back();
+        const auto nl = version.rfind('\n');
+        if (nl != std::string::npos) version = version.substr(nl + 1);
+        toolchain_ = "nvcc " + version + " " + kNvccFlags;
+    }
+    return toolchain_;
+}
 
 CompileResult CudaBackend::compile(const std::string& source_path,
                                      const std::string& output_name,
                                      const std::string& cache_dir,
                                      const CompileDefines& defines) {
-    auto full_source = kernel_dir_ + "/" + source_path;
+    auto full_source = resolve_source(kernel_dir_, source_path);
     auto cubin_path = cache_dir + "/" + output_name + ".cubin";
 
-    std::string nvcc_defines;
-    for (const auto& [key, val] : defines) {
-        nvcc_defines += " -D" + key + "=" + std::to_string(val);
-    }
-
+    // -lineinfo costs nothing at run time and lets nvdisasm map SASS back to
+    // source lines, which is what makes a SASS dump readable.
     std::string cmd =
-        std::string(ARENA_NVCC) + " -cubin -arch=native" + nvcc_defines +
-        " -o " + cubin_path + " " + full_source +
+        std::string(ARENA_NVCC) + " -cubin " + kNvccFlags + nvcc_defines(defines) +
+        " -o " + shell_quote(cubin_path) + " " + shell_quote(full_source) +
         " 2>&1";
 
     auto nvcc_t0 = std::chrono::steady_clock::now();
@@ -49,7 +81,7 @@ CompileResult CudaBackend::compile(const std::string& source_path,
     // count kernel params from cubin
     int num_params = 0;
     {
-        auto dump = run_command("cuobjdump --dump-elf " + cubin_path + " 2>&1",
+        auto dump = run_command("cuobjdump --dump-elf " + shell_quote(cubin_path) + " 2>&1",
                                 "cuobjdump for " + source_path);
         std::regex kparam_re("EIATTR_KPARAM_INFO");
         auto begin = std::sregex_iterator(dump.begin(), dump.end(), kparam_re);
@@ -63,7 +95,21 @@ CompileResult CudaBackend::compile(const std::string& source_path,
     result.num_params = num_params;
     result.compile_ms = nvcc_ms;   // for nvcc the subprocess is the compiler
     result.import_ms = 0.0f;
+    result.constants = parse_arena_directives(read_file(full_source));
     return result;
+}
+
+std::string CudaBackend::emit_ptx(const std::string& source_path,
+                                  const std::string& output_name,
+                                  const std::string& cache_dir,
+                                  const CompileDefines& defines) {
+    auto ptx_path = cache_dir + "/" + output_name + ".ptx";
+    std::string cmd =
+        std::string(ARENA_NVCC) + " -ptx " + kNvccFlags + nvcc_defines(defines) +
+        " -o " + shell_quote(ptx_path) + " " +
+        shell_quote(resolve_source(kernel_dir_, source_path)) + " 2>&1";
+    run_command(cmd, "nvcc -ptx for " + source_path);
+    return ptx_path;
 }
 
 }

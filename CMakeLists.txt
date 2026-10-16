@@ -121,15 +121,21 @@ set(ARENA_SOURCES
     src/arena/device/kernel_loader.cpp
     src/arena/compilers/compiler_utils.cpp
     src/arena/compilers/cuda_backend.cpp
-    src/arena/compilers/triton_backend.cpp
-    src/arena/compilers/cutile_backend.cpp
-    src/arena/compilers/warp_backend.cpp
+    src/arena/compilers/python_backend.cpp
+    src/arena/compilers/cache_key.cpp
+    src/arena/compilers/sass.cpp
+    src/arena/manifest/expr.cpp
+    src/arena/manifest/args.cpp
+    src/arena/manifest/manifest_kernel.cpp
     src/arena/compilers/kernel_compiler.cpp
     src/arena/measurement/profiler.cpp
     src/arena/measurement/power.cpp
     src/arena/measurement/measure.cpp
     src/arena/measurement/measure_policy.cpp
+    src/arena/measurement/launch_summary.cpp
+    src/arena/measurement/launch_floor.cu
     src/arena/cli_args.cpp
+    src/arena/paths.cpp
     src/arena/dtype.cpp
     src/arena/distribution.cpp
     src/arena/measurement/accuracy.cpp
@@ -155,9 +161,11 @@ else()
 endif()
 
 target_include_directories(arena PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::nvml CUDA::nvtx3 spdlog::spdlog nlohmann_json::nlohmann_json)
+# cuBLAS backs the matmul_cublas reference kernel
+target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::cublas CUDA::nvml CUDA::nvtx3 spdlog::spdlog nlohmann_json::nlohmann_json)
 target_compile_definitions(arena PRIVATE
     ARENA_KERNEL_DIR="${CMAKE_SOURCE_DIR}/kernels"
+    ARENA_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     ARENA_PYTHON="${Python3_EXECUTABLE}"
     ARENA_NVCC="${CMAKE_CUDA_COMPILER}"
 )

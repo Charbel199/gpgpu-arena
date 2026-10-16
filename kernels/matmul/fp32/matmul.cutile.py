@@ -23,9 +23,15 @@ def matmul_kernel(
 
     acc = ct.zeros((BLOCK_M, BLOCK_N), dtype=ct.float32)
 
+    # Zero padding matters for the K tail: the default is undetermined, and
+    # garbage past the edge of A and B lands in the dot product whenever K is
+    # not a multiple of BLOCK_K. M and N tails are safe either way, since the
+    # store drops out-of-bounds elements.
     for k in range(ct.cdiv(K_DIM, BLOCK_K)):
-        a_tile = ct.load(A, (pid_m, k), (BLOCK_M, BLOCK_K)).astype(ct.float16)
-        b_tile = ct.load(B, (k, pid_n), (BLOCK_K, BLOCK_N)).astype(ct.float16)
+        a_tile = ct.load(A, (pid_m, k), (BLOCK_M, BLOCK_K),
+                         padding_mode=ct.PaddingMode.ZERO).astype(ct.float16)
+        b_tile = ct.load(B, (k, pid_n), (BLOCK_K, BLOCK_N),
+                         padding_mode=ct.PaddingMode.ZERO).astype(ct.float16)
         acc = ct.mma(a_tile, b_tile, acc)
 
     ct.store(C, (pid_m, pid_n), acc)

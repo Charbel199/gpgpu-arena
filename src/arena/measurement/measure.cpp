@@ -9,6 +9,14 @@ namespace arena::measure {
 
 namespace {
 
+// Runs the per-iteration reset and, in V2, waits for it to finish, so the
+// start event that follows is recorded on an idle stream. The wait is outside
+// the timed interval either way.
+void prepare(const LaunchFn& reset_fn, TimingMode mode) {
+    if (reset_fn) reset_fn();
+    if (mode == TimingMode::V2) cuCtxSynchronize();
+}
+
 // RAII pair of CUDA events, created once and reused across iterations.
 class EventTimer {
 public:
@@ -60,7 +68,7 @@ WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
 
     if (config.warmup_mode == RunConfig::WarmupMode::Fixed) {
         for (int i = 0; i < config.warmup_runs; i++) {
-            if (reset_fn) reset_fn();
+            prepare(reset_fn, config.timing_mode);
             float ms = timer.time(launch_fn);
             if (i == 0) out.first_launch_ms = ms;
             out.iterations++;
@@ -76,7 +84,7 @@ WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
     const auto wall_start = std::chrono::steady_clock::now();
 
     for (int i = 0; i < config.warmup_max; i++) {
-        if (reset_fn) reset_fn();
+        prepare(reset_fn, config.timing_mode);
         float ms = timer.time(launch_fn);
         if (i == 0) out.first_launch_ms = ms;
         history.push_back(ms);
@@ -119,7 +127,7 @@ WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
 }
 
 TimingResult time_operation(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
-                            int runs) {
+                            int runs, TimingMode mode) {
     TimingResult out;
     if (runs <= 0) return out;
 
@@ -127,13 +135,14 @@ TimingResult time_operation(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
     EventTimer timer;
 
     for (int i = 0; i < runs; i++) {
-        if (reset_fn) reset_fn();
+        prepare(reset_fn, mode);
         nvtxRangePushA(("Run " + std::to_string(i)).c_str());
         out.all_times_ms.push_back(timer.time(launch_fn));
         nvtxRangePop();
     }
 
     out.median_ms = median(out.all_times_ms);
+    out.trimmed_ms = trimmed_mean(out.all_times_ms);
     return out;
 }
 

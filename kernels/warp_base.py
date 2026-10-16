@@ -67,6 +67,24 @@ def main(kernel_fn, constants=None):
     cubin_path = output_dir / f"{args.output_name}.cubin"
     shutil.copy2(cubin_src, cubin_path)
 
+    # Warp generates CUDA C++ and compiles that; keeping it next to the cubin
+    # shows what a Python kernel turned into before it became SASS.
+    module_dir = Path(cubin_src).parent
+    for src in module_dir.glob("*.cu"):
+        shutil.copy2(src, output_dir / f"{args.output_name}.warp_gen.cu")
+        break
+
+    # Tile kernels need dynamic shared memory, which Warp's own launcher sizes
+    # from this metadata. Reporting it lets a manifest use `shared_memory`
+    # instead of recomputing the figure by hand.
+    shared_memory = 0
+    for meta in module_dir.glob("*.meta"):
+        try:
+            shared_memory = int(json.loads(meta.read_text()).get(
+                f"{kernel_name}_smem_bytes", 0))
+        except (ValueError, OSError):
+            pass
+
     num_params = count_cubin_params(cubin_path)
 
     print(f"[warp] {args.output_name} -> {cubin_path} "
@@ -85,7 +103,7 @@ def main(kernel_fn, constants=None):
     print(json.dumps({
         "kernel_name": kernel_name,
         "num_warps": 0,
-        "shared_memory": 0,
+        "shared_memory": shared_memory,
         "num_params": num_params,
         "constants": out_constants,
         "import_ms": _IMPORT_MS,

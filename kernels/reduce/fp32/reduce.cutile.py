@@ -8,7 +8,9 @@ TILE_SIZE = 256
 @ct.kernel(occupancy=2)
 def reduce_sum(input_ptr, output_ptr, TILE_SIZE: ct.Constant[int]):
     pid = ct.bid(0)
-    tile = ct.load(input_ptr, index=(pid,), shape=(TILE_SIZE,))
+    # The last tile runs past n; the default padding is undetermined, and
+    # whatever it holds would be summed.
+    tile = ct.load(input_ptr, index=(pid,), shape=(TILE_SIZE,), padding_mode=ct.PaddingMode.ZERO)
     block_sum = ct.sum(tile)
     ct.atomic_add(output_ptr, (0,), block_sum)
 

@@ -39,13 +39,15 @@ WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
 
 struct TimingResult {
     float median_ms = 0.0f;
+    float trimmed_ms = 0.0f;   // interquartile mean, see trimmed_mean()
     std::vector<float> all_times_ms;
 };
 
 // Times `runs` isolated iterations. reset_fn runs before each and is excluded
-// from the measured interval, so each run starts from a drained queue.
+// from the measured interval. In V1 the start event is queued right behind
+// the reset; in V2 the stream is drained first (see TimingMode).
 TimingResult time_operation(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
-                            int runs);
+                            int runs, TimingMode mode = TimingMode::V1);
 
 struct EnergyResult {
     bool   available  = false;

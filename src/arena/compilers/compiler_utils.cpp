@@ -5,6 +5,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <array>
+#include <fstream>
+#include <regex>
 #include <sys/wait.h>
 
 namespace arena {
@@ -69,6 +71,43 @@ std::string defines_args(const CompileDefines& defines) {
         out += " --define " + key + "=" + std::to_string(val);
     }
     return out;
+}
+
+std::map<std::string, int> parse_arena_directives(const std::string& source) {
+    static const std::regex line_re(R"(arena:([^\n]*))");
+    static const std::regex kv_re(R"(\b([A-Z][A-Z0-9_]*)\s*=\s*(\d+)\b)");
+    std::map<std::string, int> out;
+    for (auto it = std::sregex_iterator(source.begin(), source.end(), line_re);
+         it != std::sregex_iterator(); ++it) {
+        const std::string rest = (*it)[1].str();
+        for (auto kv = std::sregex_iterator(rest.begin(), rest.end(), kv_re);
+             kv != std::sregex_iterator(); ++kv) {
+            out[(*kv)[1].str()] = std::stoi((*kv)[2].str());
+        }
+    }
+    return out;
+}
+
+std::string resolve_source(const std::string& kernel_dir, const std::string& source_path) {
+    if (!source_path.empty() && source_path[0] == '/') return source_path;
+    return kernel_dir + "/" + source_path;
+}
+
+std::string read_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return "";
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+std::string shell_quote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    return out + "'";
 }
 
 }

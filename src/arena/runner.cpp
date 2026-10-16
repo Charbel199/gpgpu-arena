@@ -12,11 +12,43 @@ Runner::Runner(Context& ctx, KernelLoader& loader, KernelCompiler& compiler,
     : ctx_(ctx), loader_(loader), compiler_(compiler),
       profiler_(profiler), power_(power) {}
 
-RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
+Runner::~Runner() {
+    if (scrub_buf_ && scrub_ctx_ == ctx_.handle()) cuMemFree(scrub_buf_);
+}
+
+void Runner::scrub_l2() {
+    if (scrub_ctx_ != ctx_.handle()) {
+        // Allocated straight from the driver rather than through ctx_, so it
+        // does not show up in any kernel's peak_device_bytes.
+        scrub_buf_ = 0;
+        scrub_bytes_ = std::max<size_t>(2 * ctx_.l2_cache_bytes(), 64u << 20);
+        check_cuda(cuMemAlloc(&scrub_buf_, scrub_bytes_), "cuMemAlloc (L2 scrub)");
+        scrub_ctx_ = ctx_.handle();
+    }
+    // A different value each time, so no part of the hardware can treat the
+    // write as a no-op.
+    check_cuda(cuMemsetD32Async(scrub_buf_, ++scrub_value_, scrub_bytes_ / 4, nullptr),
+               "cuMemsetD32Async (L2 scrub)");
+}
+
+RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config_in) {
+    RunConfig config = config_in;
+    if (forced_timing_mode_) config.timing_mode = *forced_timing_mode_;
+
     RunResult result;
     result.kernel_name = desc.name();
     result.category = desc.category();
     result.description = desc.description();
+    result.reference = desc.reference();
+    result.source = desc.effective_source_path();
+    result.params = config.params;
+    result.distribution = distribution_name(config.input_distribution);
+    result.seed = config.input_seed;
+    result.cold_l2 = config.cold_l2;
+    result.timing_mode = timing_mode_name(config.timing_mode);
+    result.scratch_policy = scratch_policy_name(config.scratch_policy);
+    result.counters.level =
+        config.counter_level == RunConfig::CounterLevel::Full ? "full" : "basic";
 
     auto log = spdlog::get("runner");
 
@@ -35,18 +67,30 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     try {
         desc.set_problem_size(config.params);
         desc.set_input_spec(config.input_distribution, config.input_seed);
+        desc.set_scratch_policy(config.scratch_policy);
         desc.set_block_size(config.block_size);
         desc.set_compile_options(config.compile_options);
 
         // runtime compilation for DSL kernels
         if (desc.needs_compilation()) {
-            auto cr = compiler_.compile(desc.source_path(), desc.compile_options());
+            auto cr = compiler_.compile(desc.effective_source_path(), desc.compile_options());
             result.cache_hit  = cr.cache_hit;
             result.compile_ms = cr.compile_ms;
             result.import_ms  = cr.import_ms;
             result.invoke_ms  = cr.invoke_ms;
             result.compile_options = desc.compile_options();
             desc.set_compile_result(cr);
+
+            std::map<std::string, CompileResult> extra;
+            for (const auto& src : desc.extra_sources()) {
+                auto ecr = compiler_.compile(src);
+                result.compile_ms += ecr.compile_ms;
+                result.import_ms  += ecr.import_ms;
+                result.invoke_ms  += ecr.invoke_ms;
+                result.cache_hit   = result.cache_hit && ecr.cache_hit;
+                extra[src] = ecr;
+            }
+            if (!extra.empty()) desc.set_extra_compile_results(extra);
         }
 
         // --- Tier 2: module load ---
@@ -99,7 +143,10 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             }
         };
 
-        auto reset_fn = [&]() { desc.reset(ctx_); };
+        auto reset_fn = [&]() {
+            desc.reset(ctx_);
+            if (config.cold_l2) scrub_l2();
+        };
 
         result.sm_clock_start_mhz = power_.sm_clock_mhz();
 
@@ -114,11 +161,33 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         // --- Tier 1: operation timing ---
         log->info("  benchmark: {} runs ...", config.number_of_runs);
         nvtxRangePushA(("BENCHMARK: " + result.kernel_name).c_str());
-        auto bench_result = measure::time_operation(launch_kernel, reset_fn,
-                                                    config.number_of_runs);
+        // Clock and power are sampled on another thread across exactly these
+        // runs, so they describe the window op_ms comes from.
+        power_.start_sampling();
+        measure::TimingResult bench_result;
+        try {
+            bench_result = measure::time_operation(launch_kernel, reset_fn,
+                                                   config.number_of_runs,
+                                                   config.timing_mode);
+        } catch (...) {
+            power_.stop_sampling();
+            throw;
+        }
+        const auto samples = power_.stop_sampling();
         nvtxRangePop();
 
+        result.clock_samples     = samples.samples;
+        result.sm_clock_mean_mhz = samples.sm_mean_mhz;
+        result.sm_clock_min_mhz  = samples.sm_min_mhz;
+        result.sm_clock_max_mhz  = samples.sm_max_mhz;
+        result.power_mean_w      = samples.power_mean_w;
+        result.power_max_w       = samples.power_max_w;
+        log->debug("  timed window: {} samples, SM {:.0f} MHz ({}..{}), {:.1f} W (max {:.1f})",
+            samples.samples, samples.sm_mean_mhz, samples.sm_min_mhz, samples.sm_max_mhz,
+            samples.power_mean_w, samples.power_max_w);
+
         result.op_ms = bench_result.median_ms;
+        result.op_ms_trimmed = bench_result.trimmed_ms;
         result.all_times_ms = bench_result.all_times_ms;
 
         // --- Tier 1: SASS breakdown ---
@@ -126,7 +195,8 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         auto activity = profiler_.collect_activity(launch_kernel);
         result.gpu_ms = activity.kernel_time_ms;
         result.sub_kernels = activity.sub_kernels;
-        result.launch_count = static_cast<int>(activity.sub_kernels.size());
+        result.launched_kernels = group_launched_kernels(activity.sub_kernels, 1);
+        result.launch_count = activity.launch_count;
         result.overhead_ms = std::max(0.0f, result.op_ms - result.gpu_ms);
         result.counters.regs_per_thread = activity.registers_per_thread;
         result.counters.shared_mem_bytes = activity.shared_memory_per_block;
@@ -137,6 +207,10 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             desc.calculate_flops(), result.op_ms) / 1e9;
         result.bandwidth_gbps = measure::rate_per_sec(
             desc.calculate_bytes_accessed(), result.op_ms) / 1e9;
+        const IdealBytes ideal = desc.ideal_bytes();
+        result.ideal_bytes_known = ideal.known();
+        result.ideal_read_bytes  = ideal.read;
+        result.ideal_write_bytes = ideal.write;
 
         log->info("  result: op={:.3f} ms  gpu={:.3f} ms  overhead={:.3f} ms  "
                   "{:.2f} GFLOPS  {:.2f} GB/s",
@@ -147,7 +221,9 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         if (config.collect_metrics) {
             log->info("  profiling: collecting hardware counters ...");
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
-            auto mv = profiler_.collect_counters(launch_kernel, reset_fn);
+            const bool full = config.counter_level == RunConfig::CounterLevel::Full;
+            auto mv = profiler_.collect_counters(launch_kernel, reset_fn,
+                                                  result.launch_count, full);
             nvtxRangePop();
 
             // The counter pass runs a warm back-to-back sequence and reports
@@ -170,6 +246,28 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             if (mv.count(metric::IPC)) {
                 result.counters.ipc = mv.at(metric::IPC);
             }
+            if (full) {
+                // Percentages become fractions; ratios and per-op counts
+                // pass through as CUPTI reports them.
+                const std::string pipe = metric::PIPE_PREFIX;
+                const std::string stall = metric::STALL_PREFIX;
+                for (const auto& [key, value] : mv) {
+                    if (key.rfind(pipe, 0) == 0) {
+                        result.counters.pipes[key.substr(pipe.size())] = value / 100.0;
+                    } else if (key.rfind(stall, 0) == 0) {
+                        result.counters.stalls[key.substr(stall.size())] = value;
+                    } else if (key == metric::ISSUE_ACTIVE) {
+                        result.counters.extra[key] = value / 100.0;
+                    } else if (key == metric::ELIGIBLE_WARPS ||
+                               key == metric::SHARED_WAVEFRONTS ||
+                               key == metric::SHARED_BANK_CONFLICTS ||
+                               key == metric::L2_SECTORS) {
+                        result.counters.extra[key] = value;
+                    }
+                }
+                log->info("  profiling: full counters in {} replay passes",
+                    profiler_.last_num_passes());
+            }
             result.counters.available = true;
 
             log->info("  profiling: regs={} shmem={}B occupancy={:.1f}% DRAM(R={:.2f} W={:.2f} GB/s) IPC={:.2f}",
@@ -178,9 +276,17 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
                 result.counters.dram_read_gbps, result.counters.dram_write_gbps, result.counters.ipc);
         }
 
-        // --- verification gets its own clean run ---
+        // --- verification gets its own clean run, on fresh inputs ---
         // Independent of which profiling passes ran, so a multi-pass
         // UserReplay counter collection cannot cause a spurious failure.
+        //
+        // The inputs are regenerated from a seed nothing has seen until now.
+        // A kernel that worked out its answer during setup, or kept one from
+        // an earlier launch, then fails instead of passing on stale output.
+        // Same distribution, so the tolerance means the same thing.
+        result.verify_seed = config.input_seed ^ 0x9E3779B97F4A7C15ULL;
+        desc.set_input_spec(config.input_distribution, result.verify_seed);
+        desc.initialize(ctx_);
         reset_fn();
         launch_kernel();
         check_cuda(cuCtxSynchronize(), "verify sync");
@@ -250,6 +356,13 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         log->error("{}: {}", result.kernel_name, e.what());
         result.success = false;
         result.error = e.what();
+        // The usual way a candidate breaks a slot is by renaming its entry
+        // point, and the driver's message does not say what was expected.
+        if (!desc.source_override().empty() &&
+            result.error.find("named symbol not found") != std::string::npos) {
+            result.error += " (a --source-override must keep the slot's entry point '" +
+                            desc.function_name() + "' and its parameter list)";
+        }
         try { desc.cleanup(ctx_); } catch (...) {}
 
         // A sticky error is terminal. Recreating the context, and resetting

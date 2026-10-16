@@ -7,6 +7,7 @@
 #include "arena/distribution.hpp"
 #include "arena/runner_config.hpp"
 #include "arena/measurement/accuracy.hpp"
+#include "arena/categories/ideal_bytes.hpp"
 #include <string>
 #include <vector>
 #include <map>
@@ -67,6 +68,10 @@ public:
         input_seed_ = seed;
     }
 
+    // Pushed in by the runner before allocate(). Only manifest kernels have
+    // scratch buffers, so only they act on it.
+    virtual void set_scratch_policy(ScratchPolicy) {}
+
     // memory management (through the context class)
     virtual void allocate(Context& ctx) = 0;
     virtual void initialize(Context& ctx) = 0;
@@ -108,6 +113,12 @@ public:
     void set_compile_options(const CompileDefines& d) { compile_options_ = d; }
     const CompileDefines& compile_options() const { return compile_options_; }
 
+    // The category's device buffers and problem sizes by name, which is the
+    // vocabulary a kernel manifest refers to ("input", "rows"). Buffers are
+    // valid after allocate().
+    virtual std::map<std::string, CUdeviceptr> named_buffers() const { return {}; }
+    virtual std::map<std::string, int> problem_values() const { return {}; }
+
     // kernel launch configuration
     virtual KernelLoader::LaunchConfig get_launch_config() const = 0;
     virtual std::vector<void*> get_kernel_args() = 0;
@@ -115,6 +126,10 @@ public:
     // calculate speed of light metrics
     virtual double calculate_flops() const = 0;
     virtual double calculate_bytes_accessed() const = 0;
+
+    // calculate_bytes_accessed() split into reads and writes, per op. The
+    // default is unknown (both zero), reported as null rather than as zero.
+    virtual IdealBytes ideal_bytes() const { return {}; }
     
     // Element types of the input and output buffers. These are what the
     // framework can actually observe: it allocates those buffers and reads
@@ -170,6 +185,10 @@ public:
     }
 
 
+    // True for a vendor library baseline (cuBLAS and the like) rather than a
+    // kernel written here. It is there to be measured against, not optimized.
+    virtual bool reference() const { return false; }
+
     // run cubin or cpp code
     virtual bool uses_module() const { return true; }
     virtual void execute(Context& ctx) {
@@ -180,6 +199,28 @@ public:
     virtual bool needs_compilation() const { return false; }
     virtual std::string source_path() const { return ""; }
     void set_compile_result(const CompileResult& result) { compile_result_ = result; }
+
+    // Further sources a kernel launches from, besides source_path(): a
+    // manifest whose launches name different files. The runner compiles each
+    // and hands the results back keyed by the same path.
+    virtual std::vector<std::string> extra_sources() const { return {}; }
+    virtual void set_extra_compile_results(const std::map<std::string, CompileResult>&) {}
+
+    // Runs a different source file in this kernel's slot: same descriptor,
+    // same launch config, same buffers, same verification. This is how a
+    // candidate gets measured without writing a descriptor or rebuilding.
+    // The candidate has to keep the slot's ABI: the entry point name and the
+    // parameter list the descriptor passes. Absolute path, or empty to clear.
+    void set_source_override(const std::string& path) { source_override_ = path; }
+    const std::string& source_override() const { return source_override_; }
+    std::string effective_source_path() const {
+        return source_override_.empty() ? source_path() : source_override_;
+    }
+
+    // The .cpp/.cu file this descriptor was registered from. Filled in by
+    // REGISTER_KERNEL, so tools can point at the code that defines the ABI.
+    const std::string& descriptor_file() const { return descriptor_file_; }
+    void set_descriptor_file(const std::string& f) { descriptor_file_ = f; }
 
     // device properties (captured automatically on first allocate)
     int sm_count() const { return sm_count_; }
@@ -193,6 +234,8 @@ protected:
 
     CompileResult compile_result_;
     int sm_count_ = 0;
+    std::string source_override_;
+    std::string descriptor_file_;
 
     // call from allocate() overrides to capture device properties
     void capture_device_props(Context& ctx) { sm_count_ = ctx.sm_count(); }
@@ -207,7 +250,9 @@ public:
         return registry;
     }
     
-    void register_kernel(std::unique_ptr<KernelDescriptor> descriptor) {
+    void register_kernel(std::unique_ptr<KernelDescriptor> descriptor,
+                         const char* file = "") {
+        descriptor->set_descriptor_file(file);
         descriptors_.push_back(std::move(descriptor));
     }
     
@@ -251,7 +296,7 @@ private:
 #define REGISTER_KERNEL(DescriptorClass) \
     static bool _registered_##DescriptorClass = []() { \
         arena::KernelRegistry::instance().register_kernel( \
-            std::make_unique<DescriptorClass>()); \
+            std::make_unique<DescriptorClass>(), __FILE__); \
         return true; \
     }()
 

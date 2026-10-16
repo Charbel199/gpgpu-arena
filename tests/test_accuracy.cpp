@@ -77,6 +77,48 @@ TEST_CASE("ErrorAccumulator") {
     }
 }
 
+TEST_CASE("ErrorAccumulator::add_scaled") {
+    SUBCASE("a prefix sum near zero is judged against the size of its terms") {
+        // 1000 terms of magnitude ~1 that happen to sum to 1e-6. Off by 1e-5
+        // is a 10x relative error but tiny next to the 1000 that was summed.
+        ErrorAccumulator plain, scaled;
+        plain.add(1.1e-5, 1e-6);
+        scaled.add_scaled(1.1e-5, 1e-6, 1000.0);
+        CHECK(plain.finish(1e-3).max_rel_error > 1.0);
+        CHECK(scaled.finish(1e-3).max_rel_error == doctest::Approx(1e-8));
+        CHECK(scaled.finish(1e-3).passed);
+    }
+    SUBCASE("a skipped element still fails") {
+        // An output left at zero where the prefix is large is an error of
+        // order one against the scale.
+        ErrorAccumulator a;
+        a.add_scaled(0.0, 500.0, 1000.0);
+        CHECK_FALSE(a.finish(1e-3).passed);
+    }
+    SUBCASE("the scale never shrinks below the expected value") {
+        ErrorAccumulator a;
+        a.add_scaled(110.0, 100.0, 1.0);
+        CHECK(a.finish(1.0).max_rel_error == doctest::Approx(0.1));
+    }
+    SUBCASE("NaN fails, exact passes, zero scale falls back to absolute") {
+        ErrorAccumulator n;
+        n.add_scaled(std::nan(""), 1.0, 1.0);
+        CHECK_FALSE(n.finish(1.0).passed);
+        ErrorAccumulator e;
+        e.add_scaled(3.0, 3.0, 0.0);
+        CHECK(e.finish(0.0).passed);
+        ErrorAccumulator z;
+        z.add_scaled(1e-3, 0.0, 0.0);
+        CHECK(z.finish(1.0).max_rel_error == doctest::Approx(1e-3));
+    }
+    SUBCASE("arithmetic and total errors agree for fp32") {
+        ErrorAccumulator a;
+        a.add_scaled(1.01, 1.0, 10.0);
+        auto r = a.finish(1.0);
+        CHECK(r.max_rel_error == doctest::Approx(r.max_total_error));
+    }
+}
+
 TEST_CASE("dtype") {
     SUBCASE("sizes") {
         CHECK(dtype_buffer_bytes(1, DType::FP32) == 4);

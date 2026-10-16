@@ -56,6 +56,11 @@ public:
     std::vector<void*> get_kernel_args() override {
         return { &d_input_, &d_output_, &n_ };
     }
+
+    std::map<std::string, CUdeviceptr> named_buffers() const override {
+        return {{"input", d_input_}, {"output", d_output_}};
+    }
+    std::map<std::string, int> problem_values() const override { return {{"n", n_}}; }
     
     double calculate_flops() const override {
         return static_cast<double>(n_ - 1); // we only need n-1 additions
@@ -64,20 +69,26 @@ public:
     double calculate_bytes_accessed() const override {
         return static_cast<double>(2 * size_data_); // we read all elements and write all of them back
     }
+
+    IdealBytes ideal_bytes() const override { return ideal::scan((size_t)n_); }
     
     VerifyResult verify(Context& ctx) override {
         std::vector<float> h_output(n_);
         ctx.copy_to_host(h_output.data(), d_output_, size_data_);
 
-        // Exclusive scan: out[i] is the sum of in[0..i-1]. The running total
-        // has to walk every element, but only a strided sample is scored so
-        // large n stays cheap.
+        // Exclusive scan: out[i] is the sum of in[0..i-1]. Every element is
+        // scored. A strided sample at fixed positions let a kernel that wrote
+        // only those positions pass, which an optimizing agent will find.
+        //
+        // Each error is measured against the sum of |in[0..i-1]|, the scale
+        // summation error actually grows with. Against the prefix itself, a
+        // mixed-sign prefix passing near zero fails a correct kernel.
         ErrorAccumulator acc;
-        const int stride = std::max(1, n_ / 1000);
-        double running = 0.0;
+        double running = 0.0, magnitude = 0.0;
         for (int i = 0; i < n_; i++) {
-            if (i % stride == 0) acc.add(h_output[i], running);
+            acc.add_scaled(h_output[i], running, magnitude);
             running += h_input_[i];
+            magnitude += std::abs((double)h_input_[i]);
         }
 
         auto r = acc.finish(tolerance());

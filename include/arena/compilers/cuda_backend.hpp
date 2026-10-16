@@ -13,8 +13,14 @@ public:
                           const std::string& output_name,
                           const std::string& cache_dir,
                           const CompileDefines& defines) override;
+    std::string toolchain_id() override;
+    std::string emit_ptx(const std::string& source_path,
+                         const std::string& output_name,
+                         const std::string& cache_dir,
+                         const CompileDefines& defines) override;
 private:
     std::string kernel_dir_;
+    std::string toolchain_;   // resolved once per process
 };
 
 }

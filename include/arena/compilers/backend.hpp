@@ -2,6 +2,7 @@
 
 #include <string>
 #include <map>
+#include <vector>
 
 namespace arena {
 
@@ -33,6 +34,9 @@ std::string defines_suffix(const CompileDefines& defines);
 // One backend per DSL. KernelCompiler owns the set of these and picks one by
 // file extension; a backend only has to turn a source file into a cubin plus
 // metadata. Caching, output naming and timing all live in KernelCompiler.
+//
+// source_path is relative to the kernel directory, or absolute for a source
+// that lives elsewhere (a --source-override candidate).
 class CompilerBackend {
 public:
     virtual ~CompilerBackend() = default;
@@ -40,6 +44,25 @@ public:
                                   const std::string& output_name,
                                   const std::string& cache_dir,
                                   const CompileDefines& defines) = 0;
+
+    // Names the compiler that would build a cubin right now: tool, version
+    // and flags. Part of the cache key, so upgrading the toolchain invalidates
+    // every cubin it did not build.
+    virtual std::string toolchain_id() = 0;
+
+    // Files other than the source whose contents change the output, such as
+    // the shared *_base.py a DSL kernel imports. Also part of the cache key.
+    virtual std::vector<std::string> dependencies() const { return {}; }
+
+    // Writes PTX for the source and returns its path, or "" when the DSL does
+    // not expose PTX. Called on demand, never on the timed path.
+    virtual std::string emit_ptx(const std::string& source_path,
+                                 const std::string& output_name,
+                                 const std::string& cache_dir,
+                                 const CompileDefines& defines) {
+        (void)source_path; (void)output_name; (void)cache_dir; (void)defines;
+        return "";
+    }
 };
 
 }

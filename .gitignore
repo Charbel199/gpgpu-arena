@@ -22,6 +22,9 @@ cmake-build-*/
 # than build/kernels/ whenever the binary runs with the repo root as its
 # working directory, since KernelCompiler's cache path is relative.
 kernels/*.json
+# Everything else the compile cache writes there (Triton IR, Warp's generated
+# CUDA) for sources outside kernels/, such as PGAIO candidates.
+kernels/ext_*
 *.a
 *.so
 
@@ -45,3 +48,11 @@ gpgpu_arena_results.csv
 # Local overrides
 .env
 *.local
+
+# .claude/ is tracked for its skills link; personal settings stay local
+.claude/settings.local.json
+
+# PGAIO run directories: candidates, journals, observations and compiler
+# dumps. Kept out of git; open them in the GUI or read journal.md and
+# progress.html. pgaio/learnings.jsonl is tracked.
+pgaio/runs/

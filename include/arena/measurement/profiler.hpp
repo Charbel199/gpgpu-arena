@@ -6,6 +6,7 @@
 #include <cupti_profiler_host.h>
 #include <cupti_profiler_target.h>
 #include <cupti_range_profiler.h>
+#include "arena/measurement/launch_summary.hpp"
 #include <string>
 #include <vector>
 #include <map>
@@ -19,6 +20,19 @@ namespace metric {
     constexpr const char* DRAM_WRITE = "dram_write_bytes";
     constexpr const char* OCCUPANCY  = "occupancy";
     constexpr const char* IPC        = "ipc";
+
+    // --counters full only. Keys with these prefixes carry a pipe or stall
+    // reason name after the dot.
+    constexpr const char* ISSUE_ACTIVE    = "issue_active";
+    constexpr const char* ELIGIBLE_WARPS  = "eligible_warps";
+    constexpr const char* SHARED_WAVEFRONTS = "shared_wavefronts";
+    constexpr const char* SHARED_BANK_CONFLICTS = "shared_bank_conflicts";
+    constexpr const char* L2_SECTORS      = "l2_sectors";
+    // Summed launch time of the operation. Used to pick the launch that
+    // dominates when rates are read from one launch of several.
+    constexpr const char* GPU_TIME_NS     = "gpu_time_ns";
+    constexpr const char* PIPE_PREFIX     = "pipe.";
+    constexpr const char* STALL_PREFIX    = "stall.";
 }
 
 class Profiler {
@@ -28,20 +42,8 @@ public:
 
     using KernelLaunchFn = std::function<void()>;
 
-    struct SubKernelInfo {
-        std::string name;
-        float duration_ms = 0.0f;
-        int registers = 0;
-        int shared_memory = 0;
-    };
-
-    struct ProfileResult {
-        float kernel_time_ms = 0.0f;   // GPU-only kernel execution time
-        int registers_per_thread = 0;
-        int shared_memory_per_block = 0;
-        std::vector<SubKernelInfo> sub_kernels;  // per-kernel breakdown
-        std::map<std::string, double> metric_values;  // keyed by metric:: constants
-    };
+    using SubKernelInfo = arena::SubKernelInfo;
+    using ProfileResult = LaunchSummary;
 
     // kernel-only time + registers + shmem (Activity API, one kernel launch)
     ProfileResult collect_activity(KernelLaunchFn launch_fn);
@@ -49,8 +51,20 @@ public:
     // Hardware counters via the Range Profiler (occupancy, IPC, DRAM bytes).
     // Runner sequences this separately from collect_activity because activity
     // runs unconditionally while counters are opt-in.
+    //
+    // launches_per_op is how many kernel launches one call of launch_fn
+    // makes (from collect_activity), so ranges can be grouped back into
+    // whole operations.
+    //
+    // full adds pipe utilisation, stall reasons, shared memory and L2
+    // traffic. Metrics this chip does not have are dropped once, on first
+    // use, so the result only carries the keys that were measured.
     std::map<std::string, double> collect_counters(
-        KernelLaunchFn launch_fn, KernelLaunchFn reset_fn = nullptr);
+        KernelLaunchFn launch_fn, KernelLaunchFn reset_fn = nullptr,
+        int launches_per_op = 1, bool full = false);
+
+    // Replay passes the last collect_counters call needed.
+    int last_num_passes() const { return last_num_passes_; }
 
 private:
     void init_activity();
@@ -70,6 +84,18 @@ private:
         std::string ipc;
     };
     ChipMetrics chip_metrics_;
+
+    // --counters full: logical key, CUPTI name, and whether it adds up
+    // across an operation's launches. Resolved against the chip once.
+    struct ExtraMetric {
+        std::string key;
+        std::string cupti_name;
+        bool additive = false;
+    };
+    void resolve_full_metrics();
+    std::vector<ExtraMetric> full_metrics_;
+    bool full_metrics_resolved_ = false;
+    int last_num_passes_ = 0;
 
     bool activity_initialized_ = false;
     bool range_profiler_initialized_ = false;

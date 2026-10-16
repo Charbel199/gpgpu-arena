@@ -9,13 +9,10 @@ namespace arena {
 
 // Note: Profiler (CUPTI) will not run if nsys or ncu used (They will reserve CUPTI context before the arena app)
 
-struct KernelActivityData {
-    uint64_t duration_ns = 0;
-    int registers_per_thread = 0;
-    int shared_memory = 0;
-};
-
-static std::unordered_map<std::string, KernelActivityData> s_activity_results;
+// One record per launch. Keyed by name this used to overwrite: an operation
+// that launched the same kernel twice reported one launch with the second
+// one's duration, and the map lost the order the launches ran in.
+static std::vector<KernelLaunchRecord> s_activity_records;
 
 static void CUPTIAPI activity_buffer_requested(
     uint8_t** buffer, size_t* size, size_t* maxNumRecords)
@@ -33,10 +30,13 @@ static void CUPTIAPI activity_buffer_completed(
     while (cuptiActivityGetNextRecord(buffer, validSize, &record) == CUPTI_SUCCESS) {
         if (record->kind == CUPTI_ACTIVITY_KIND_KERNEL) {
             auto* kernel = (CUpti_ActivityKernel4*)record;
-            auto& data = s_activity_results[kernel->name];
-            data.duration_ns = kernel->end - kernel->start;
-            data.registers_per_thread = kernel->registersPerThread;
-            data.shared_memory = kernel->staticSharedMemory + kernel->dynamicSharedMemory;
+            KernelLaunchRecord r;
+            r.name = kernel->name ? kernel->name : "";
+            r.start_ns = kernel->start;
+            r.end_ns = kernel->end;
+            r.registers_per_thread = kernel->registersPerThread;
+            r.shared_memory = kernel->staticSharedMemory + kernel->dynamicSharedMemory;
+            s_activity_records.push_back(std::move(r));
         }
     }
     free(buffer);
@@ -123,6 +123,7 @@ void Profiler::cleanup_range_profiler() {
 }
 
 CUpti_Profiler_Host_Object* Profiler::create_host_object() {
+    destroy_host_object();   // one left by a call that threw
     CUpti_Profiler_Host_Initialize_Params hostInitParams = {
         CUpti_Profiler_Host_Initialize_Params_STRUCT_SIZE};
     hostInitParams.profilerType = CUPTI_PROFILER_TYPE_RANGE_PROFILER;
@@ -145,10 +146,97 @@ void Profiler::destroy_host_object() {
 }
 
 
-Profiler::ProfileResult Profiler::collect_activity(KernelLaunchFn launch_fn) {
-    ProfileResult result;
+// Candidate CUPTI names per logical metric, first match wins. Pipe names
+// differ between generations (gb202 has no sm__pipe_lsu_cycles_active or
+// fp16 pipe, for example), so the instruction-issue form is the fallback.
+namespace {
+struct FullMetricSpec {
+    std::string key;
+    std::vector<std::string> candidates;
+    bool additive;
+};
 
-    s_activity_results.clear();
+std::vector<FullMetricSpec> full_metric_specs() {
+    const std::string pct = ".avg.pct_of_peak_sustained_active";
+    auto pipe = [&](const std::string& name, std::vector<std::string> bases) {
+        std::vector<std::string> c;
+        for (const auto& b : bases) c.push_back(b + pct);
+        return FullMetricSpec{std::string(metric::PIPE_PREFIX) + name, c, false};
+    };
+
+    std::vector<FullMetricSpec> specs = {
+        {metric::ISSUE_ACTIVE,   {"smsp__issue_active" + pct}, false},
+        {metric::ELIGIBLE_WARPS, {"smsp__warps_eligible.avg.per_cycle_active"}, false},
+        pipe("fma",    {"sm__pipe_fma_cycles_active", "sm__inst_executed_pipe_fma"}),
+        pipe("alu",    {"sm__pipe_alu_cycles_active", "sm__inst_executed_pipe_alu"}),
+        pipe("lsu",    {"sm__pipe_lsu_cycles_active", "sm__inst_executed_pipe_lsu"}),
+        pipe("fp16",   {"sm__pipe_fp16_cycles_active", "sm__inst_executed_pipe_fp16",
+                        "sm__inst_executed_pipe_fma_type_fp16"}),
+        pipe("tensor", {"sm__pipe_tensor_cycles_active", "sm__pipe_tensor_op_hmma_cycles_active",
+                        "sm__inst_executed_pipe_tensor"}),
+        pipe("xu",     {"sm__pipe_xu_cycles_active", "sm__inst_executed_pipe_xu"}),
+        {metric::SHARED_WAVEFRONTS, {"l1tex__data_pipe_lsu_wavefronts_mem_shared.sum"}, true},
+        {metric::SHARED_BANK_CONFLICTS, {"l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum"}, true},
+        {metric::L2_SECTORS, {"lts__t_sectors.sum"}, true},
+        {metric::GPU_TIME_NS, {"gpu__time_duration.sum"}, true},
+    };
+
+    for (const char* reason : {"barrier", "branch_resolving", "dispatch_stall", "drain",
+                               "imc_miss", "lg_throttle", "long_scoreboard",
+                               "math_pipe_throttle", "membar", "mio_throttle", "misc",
+                               "no_instruction", "not_selected", "selected",
+                               "short_scoreboard", "sleeping", "tex_throttle", "wait"}) {
+        specs.push_back({std::string(metric::STALL_PREFIX) + reason,
+            {std::string("smsp__average_warps_issue_stalled_") + reason +
+             "_per_issue_active.ratio"}, false});
+    }
+    return specs;
+}
+}
+
+void Profiler::resolve_full_metrics() {
+    if (full_metrics_resolved_) return;
+    auto log = spdlog::get("profiler");
+    full_metrics_.clear();   // a probe that threw part way is redone
+
+    // Each candidate is tried on its own in a scratch host object: one
+    // unknown name fails the whole config, so the set has to be filtered
+    // before it is used. A failed add gets a fresh object in case it left
+    // the old one in a bad state.
+    bool need_fresh = true;
+    for (const auto& spec : full_metric_specs()) {
+        bool found = false;
+        for (const auto& name : spec.candidates) {
+            if (need_fresh) {
+                destroy_host_object();
+                create_host_object();
+                need_fresh = false;
+            }
+            const char* cname = name.c_str();
+            CUpti_Profiler_Host_ConfigAddMetrics_Params p = {
+                CUpti_Profiler_Host_ConfigAddMetrics_Params_STRUCT_SIZE};
+            p.pHostObject = host_object_;
+            p.ppMetricNames = &cname;
+            p.numMetrics = 1;
+            if (cuptiProfilerHostConfigAddMetrics(&p) == CUPTI_SUCCESS) {
+                full_metrics_.push_back({spec.key, name, spec.additive});
+                found = true;
+                break;
+            }
+            need_fresh = true;
+            log->debug("counters full: {} not available on {}", name, chip_name_);
+        }
+        if (!found) log->debug("counters full: dropping {}", spec.key);
+    }
+    destroy_host_object();
+
+    full_metrics_resolved_ = true;
+    log->info("counters full: {} extra metrics available on {}",
+        full_metrics_.size(), chip_name_);
+}
+
+Profiler::ProfileResult Profiler::collect_activity(KernelLaunchFn launch_fn) {
+    s_activity_records.clear();
     cuptiActivityEnable(CUPTI_ACTIVITY_KIND_KERNEL);
 
     launch_fn();
@@ -157,31 +245,17 @@ Profiler::ProfileResult Profiler::collect_activity(KernelLaunchFn launch_fn) {
     cuptiActivityFlushAll(0);
     cuptiActivityDisable(CUPTI_ACTIVITY_KIND_KERNEL);
 
-    if (!s_activity_results.empty()) {
-        auto log = spdlog::get("profiler");
+    auto result = summarize_launches(s_activity_records);
 
-        // sum durations across all kernels (handles multi-kernel ops like CUB or e.g. two-stage kernels)
-        uint64_t total_ns = 0;
-        for (const auto& [name, data] : s_activity_results) {
-            total_ns += data.duration_ns;
-            result.sub_kernels.push_back({name, data.duration_ns / 1e6f,
-                data.registers_per_thread, data.shared_memory});
-            log->debug("  GPU kernel: {} | {:.3f} ms | {} regs | {} B shmem",
-                name, data.duration_ns / 1e6f, data.registers_per_thread, data.shared_memory);
-        }
-        result.kernel_time_ms = total_ns / 1e6f;
-
-        // take metadata from the longest-running kernel (the "main" one) TODO: Will need to change that
-        auto longest = std::max_element(s_activity_results.begin(), s_activity_results.end(),
-            [](const auto& a, const auto& b) { return a.second.duration_ns < b.second.duration_ns; });
-        result.registers_per_thread = longest->second.registers_per_thread;
-        result.shared_memory_per_block = longest->second.shared_memory;
-
-        if (s_activity_results.size() > 1) {
-            log->debug("  GPU total: {:.3f} ms ({} kernels)", result.kernel_time_ms, s_activity_results.size());
-        }
+    auto log = spdlog::get("profiler");
+    for (const auto& sk : result.sub_kernels) {
+        log->debug("  GPU kernel: {} | {:.3f} ms | {} regs | {} B shmem",
+            sk.name, sk.duration_ms, sk.registers, sk.shared_memory);
     }
-
+    if (result.sub_kernels.size() > 1) {
+        log->debug("  GPU total: {:.3f} ms ({} launches)",
+            result.kernel_time_ms, result.sub_kernels.size());
+    }
     return result;
 }
 
@@ -194,10 +268,12 @@ Profiler::ProfileResult Profiler::collect_activity(KernelLaunchFn launch_fn) {
 static constexpr int kCounterWarmupLaunches = 12;
 
 std::map<std::string, double> Profiler::collect_counters(
-    KernelLaunchFn launch_fn, KernelLaunchFn reset_fn)
+    KernelLaunchFn launch_fn, KernelLaunchFn reset_fn, int launches_per_op, bool full)
 {
     auto log = spdlog::get("profiler");
     std::map<std::string, double> result;
+    if (launches_per_op < 1) launches_per_op = 1;
+    const int max_ranges = kCounterWarmupLaunches * launches_per_op;
 
     init_range_profiler();
 
@@ -207,10 +283,26 @@ std::map<std::string, double> Profiler::collect_counters(
         chip_metrics_.occupancy, chip_metrics_.ipc
     };
     // Corresponding logical keys returned to caller
-    std::vector<const char*> logical_keys = {
+    std::vector<std::string> logical_keys = {
         metric::DRAM_READ, metric::DRAM_WRITE,
         metric::OCCUPANCY, metric::IPC
     };
+    // Bytes add up across an operation's launches, rates do not. DRAM read
+    // stays first: select_counter_op keys on metric 0.
+    std::vector<bool> additive = {true, true, false, false};
+    // Rates come from the operation's longest launch when its duration is
+    // measured, otherwise from the one with the most DRAM reads.
+    size_t dominant_metric = 0;
+
+    if (full) {
+        resolve_full_metrics();
+        for (const auto& m : full_metrics_) {
+            if (m.key == metric::GPU_TIME_NS) dominant_metric = cupti_names.size();
+            cupti_names.push_back(m.cupti_name);
+            logical_keys.push_back(m.key);
+            additive.push_back(m.additive);
+        }
+    }
 
     // create a fresh host object per call (ConfigAddMetrics accumulates state)
     auto* hostObj = create_host_object();
@@ -227,6 +319,23 @@ std::map<std::string, double> Profiler::collect_counters(
     enableParams.ctx = cuContext;
     check_cupti(cuptiRangeProfilerEnable(&enableParams), "cuptiRangeProfilerEnable");
     auto* rpObject = enableParams.pRangeProfilerObject;
+
+    // On an early exit (a CUPTI error, a failed launch, no complete
+    // operation) the profiler is disabled here, or the next call's enable
+    // fails on this context and every later kernel loses its counters.
+    struct EnabledGuard {
+        Profiler* self;
+        decltype(rpObject) rp;
+        bool armed = true;
+        ~EnabledGuard() {
+            if (!armed) return;
+            CUpti_RangeProfiler_Disable_Params p = {
+                CUpti_RangeProfiler_Disable_Params_STRUCT_SIZE};
+            p.pRangeProfilerObject = rp;
+            cuptiRangeProfilerDisable(&p);
+            self->destroy_host_object();
+        }
+    } guard{this, rpObject};
 
     // configure metrics
     CUpti_Profiler_Host_ConfigAddMetrics_Params addMetricsParams = {
@@ -261,6 +370,7 @@ std::map<std::string, double> Profiler::collect_counters(
     numPassesParams.configImageSize = configImage.size();
     check_cupti(cuptiProfilerHostGetNumOfPasses(&numPassesParams),
         "cuptiProfilerHostGetNumOfPasses");
+    last_num_passes_ = static_cast<int>(numPassesParams.numOfPasses);
     log->debug("Range Profiler: {} passes for {} metrics",
         numPassesParams.numOfPasses, cupti_names.size());
 
@@ -270,8 +380,8 @@ std::map<std::string, double> Profiler::collect_counters(
     counterDataSizeParams.pRangeProfilerObject = rpObject;
     counterDataSizeParams.pMetricNames = metric_cstrs.data();
     counterDataSizeParams.numMetrics = metric_cstrs.size();
-    counterDataSizeParams.maxNumOfRanges = kCounterWarmupLaunches;
-    counterDataSizeParams.maxNumRangeTreeNodes = kCounterWarmupLaunches;
+    counterDataSizeParams.maxNumOfRanges = max_ranges;
+    counterDataSizeParams.maxNumRangeTreeNodes = max_ranges;
     check_cupti(cuptiRangeProfilerGetCounterDataSize(&counterDataSizeParams),
         "cuptiRangeProfilerGetCounterDataSize");
 
@@ -293,7 +403,7 @@ std::map<std::string, double> Profiler::collect_counters(
     setConfigParams.configSize = configImage.size();
     setConfigParams.pCounterDataImage = counterDataImage.data();
     setConfigParams.counterDataImageSize = counterDataImage.size();
-    setConfigParams.maxRangesPerPass = kCounterWarmupLaunches;
+    setConfigParams.maxRangesPerPass = max_ranges;
     setConfigParams.numNestingLevels = 1;
     setConfigParams.minNestingLevel = 1;
     setConfigParams.passIndex = 0;
@@ -339,17 +449,16 @@ std::map<std::string, double> Profiler::collect_counters(
         "cuptiRangeProfilerDecodeData");
 
     // evaluate
-    // Ranges are read individually and the smallest is kept. The profiler
-    // re-cools L2 every few ranges, so the last one is warm or cold depending
-    // on where it lands in that cycle: a 12-range trace of one kernel read
-    // 86, 4.7, 0.07, 0.05, 0.00, 86, 4.0, 2.4, 0.001, 85, 4.1, 0.05 MB.
-    // Instrumentation can only add DRAM traffic, by evicting data the kernel
-    // would otherwise have found in cache, so the minimum is the closest
-    // available estimate of what the untouched timed loop does. Range 0 is
-    // always cold and is skipped.
-    std::vector<double> metricValues(cupti_names.size(), 0.0);
-    bool have_values = false;
-    for (int ri = 1; ri < kCounterWarmupLaunches; ri++) {
+    // Every range is read, then grouped back into operations by
+    // select_counter_op. The profiler re-cools L2 every few ranges, so a given
+    // launch is warm or cold depending on where it lands in that cycle: a
+    // 12-range trace of one kernel read 86, 4.7, 0.07, 0.05, 0.00, 86, 4.0,
+    // 2.4, 0.001, 85, 4.1, 0.05 MB. Instrumentation can only add DRAM traffic,
+    // so the operation with the least is the closest estimate of the
+    // untouched timed loop. Bytes add up across an operation's launches;
+    // occupancy and IPC come from its dominant launch.
+    std::vector<std::vector<double>> ranges;
+    for (int ri = 0; ri < max_ranges; ri++) {
         std::vector<double> v(cupti_names.size(), 0.0);
         CUpti_Profiler_Host_EvaluateToGpuValues_Params ep = {
             CUpti_Profiler_Host_EvaluateToGpuValues_Params_STRUCT_SIZE};
@@ -360,28 +469,15 @@ std::map<std::string, double> Profiler::collect_counters(
         ep.numMetrics = metric_cstrs.size();
         ep.rangeIndex = ri;
         ep.pMetricValues = v.data();
-        if (cuptiProfilerHostEvaluateToGpuValues(&ep) != CUPTI_SUCCESS) continue;
-
-        // Keyed on DRAM read: the whole point is to find the launch that hit
-        // cache, and the other metrics are taken from that same launch so they
-        // describe one consistent execution.
-        if (!have_values || v[0] < metricValues[0]) {
-            metricValues = v;
-            have_values = true;
-        }
+        if (cuptiProfilerHostEvaluateToGpuValues(&ep) != CUPTI_SUCCESS) break;
+        ranges.push_back(std::move(v));
     }
-    if (!have_values) {
-        CUpti_Profiler_Host_EvaluateToGpuValues_Params ep = {
-            CUpti_Profiler_Host_EvaluateToGpuValues_Params_STRUCT_SIZE};
-        ep.pHostObject = hostObj;
-        ep.pCounterDataImage = counterDataImage.data();
-        ep.counterDataImageSize = counterDataImage.size();
-        ep.ppMetricNames = metric_cstrs.data();
-        ep.numMetrics = metric_cstrs.size();
-        ep.rangeIndex = 0;
-        ep.pMetricValues = metricValues.data();
-        check_cupti(cuptiProfilerHostEvaluateToGpuValues(&ep),
-            "cuptiProfilerHostEvaluateToGpuValues");
+    log->debug("Range Profiler: {} ranges, {} launches per operation",
+        ranges.size(), launches_per_op);
+
+    auto metricValues = select_counter_op(ranges, launches_per_op, additive, dominant_metric);
+    if (metricValues.empty()) {
+        throw std::runtime_error("Range Profiler returned no complete operation");
     }
 
     for (size_t i = 0; i < cupti_names.size(); i++) {
@@ -390,6 +486,7 @@ std::map<std::string, double> Profiler::collect_counters(
     }
 
     // disable
+    guard.armed = false;
     CUpti_RangeProfiler_Disable_Params disableParams = {
         CUpti_RangeProfiler_Disable_Params_STRUCT_SIZE};
     disableParams.pRangeProfilerObject = rpObject;

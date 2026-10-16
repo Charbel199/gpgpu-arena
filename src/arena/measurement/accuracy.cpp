@@ -1,5 +1,6 @@
 #include "arena/measurement/accuracy.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -26,6 +27,23 @@ void ErrorAccumulator::add(double got, double expected_quantized, double expecte
     if (t > max_total_) max_total_ = t;
     sum_total_ += t;
 
+    count_++;
+}
+
+void ErrorAccumulator::add_scaled(double got, double expected, double scale) {
+    double e;
+    if (std::isnan(got) || std::isnan(expected)) {
+        e = std::numeric_limits<double>::infinity();
+    } else if (got == expected) {
+        e = 0.0;
+    } else {
+        const double s = std::max(std::abs(scale), std::abs(expected));
+        e = s < 1e-30 ? std::abs(got - expected) : std::abs(got - expected) / s;
+    }
+    if (e > max_) max_ = e;
+    sum_ += e;
+    if (e > max_total_) max_total_ = e;
+    sum_total_ += e;
     count_++;
 }
 
