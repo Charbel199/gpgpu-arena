@@ -12,6 +12,21 @@ namespace arena {
 
 namespace fs = std::filesystem;
 
+namespace {
+const char* kSidecarExtensions[] = {".ptx", ".ttgir", ".warp_gen.cu"};
+}
+
+std::vector<std::string> KernelCompiler::sidecars(const std::string& source_path,
+                                                  const CompileDefines& defines) const {
+    std::vector<std::string> out;
+    const auto base = cache_dir_ + "/" + derive_output_name(source_path) + defines_suffix(defines);
+    for (const char* ext : kSidecarExtensions) {
+        const fs::path p = base + ext;
+        if (fs::exists(p)) out.push_back(fs::absolute(p).string());
+    }
+    return out;
+}
+
 std::string defines_suffix(const CompileDefines& defines) {
     // Sorted, because std::map is, so the same set of knobs always names the
     // same cubin no matter what order they were set in.
@@ -28,6 +43,15 @@ KernelCompiler::KernelCompiler(const std::string& cache_dir)
 void KernelCompiler::register_compiler(const std::string& extension,
                                         std::unique_ptr<CompilerBackend> compiler) {
     compilers_[extension] = std::move(compiler);
+}
+
+std::string KernelCompiler::missing_toolchain(const std::string& source_path) {
+    try {
+        const std::string id = backend_for(source_path).toolchain_id();
+        if (id.find(" missing ") != std::string::npos) return id.substr(0, id.find(' '));
+    } catch (...) {
+    }
+    return "";
 }
 
 CompilerBackend& KernelCompiler::backend_for(const std::string& source_path) {
@@ -93,10 +117,10 @@ CompileResult KernelCompiler::compile(const std::string& source_path,
         return result;
     }
 
-    // A PTX sidecar from an earlier build would otherwise survive next to a
-    // fresh cubin and describe a different program.
+    // Sidecars from an earlier build would otherwise survive next to a fresh
+    // cubin and describe a different program.
     std::error_code ec;
-    fs::remove(cache_dir_ + "/" + output_name + ".ptx", ec);
+    for (const char* ext : kSidecarExtensions) fs::remove(cache_dir_ + "/" + output_name + ext, ec);
 
     log->info("{}: compiling ({} compiler) ...", source_path, get_extension(source_path));
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -128,7 +152,7 @@ void KernelCompiler::clear_cache() {
         int removed = 0;
         for (auto& entry : fs::directory_iterator(cache_dir_)) {
             auto ext = entry.path().extension().string();
-            if (ext == ".cubin" || ext == ".json" || ext == ".ptx") {
+            if (ext == ".cubin" || ext == ".json" || ext == ".ptx" || ext == ".ttgir" || ext == ".cu") {
                 fs::remove(entry.path());
                 removed++;
             }

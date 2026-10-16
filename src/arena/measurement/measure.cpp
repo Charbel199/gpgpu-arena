@@ -134,6 +134,7 @@ TimingResult time_operation(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
     }
 
     out.median_ms = median(out.all_times_ms);
+    out.trimmed_ms = trimmed_mean(out.all_times_ms);
     return out;
 }
 

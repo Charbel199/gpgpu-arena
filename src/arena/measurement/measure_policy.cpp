@@ -13,6 +13,17 @@ float median(std::vector<float> v) {
     return 0.5f * (v[n / 2 - 1] + v[n / 2]);
 }
 
+float trimmed_mean(std::vector<float> v) {
+    if (v.empty()) return 0.0f;
+    std::sort(v.begin(), v.end());
+    const size_t n = v.size();
+    size_t lo = n / 4, hi = n - n / 4;
+    if (hi <= lo) { lo = 0; hi = n; }
+    double s = 0.0;
+    for (size_t i = lo; i < hi; i++) s += v[i];
+    return static_cast<float>(s / (hi - lo));
+}
+
 DriftCheck check_drift(const std::vector<float>& history, int window, float threshold) {
     DriftCheck out;
     if (window <= 0) return out;

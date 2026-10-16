@@ -71,6 +71,17 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             result.invoke_ms  = cr.invoke_ms;
             result.compile_options = desc.compile_options();
             desc.set_compile_result(cr);
+
+            std::map<std::string, CompileResult> extra;
+            for (const auto& src : desc.extra_sources()) {
+                auto ecr = compiler_.compile(src);
+                result.compile_ms += ecr.compile_ms;
+                result.import_ms  += ecr.import_ms;
+                result.invoke_ms  += ecr.invoke_ms;
+                result.cache_hit   = result.cache_hit && ecr.cache_hit;
+                extra[src] = ecr;
+            }
+            if (!extra.empty()) desc.set_extra_compile_results(extra);
         }
 
         // --- Tier 2: module load ---
@@ -146,6 +157,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         nvtxRangePop();
 
         result.op_ms = bench_result.median_ms;
+        result.op_ms_trimmed = bench_result.trimmed_ms;
         result.all_times_ms = bench_result.all_times_ms;
 
         // --- Tier 1: SASS breakdown ---

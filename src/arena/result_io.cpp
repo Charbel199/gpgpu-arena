@@ -1,5 +1,7 @@
 #include "arena/result_io.hpp"
 
+#include "arena/measurement/launch_floor.hpp"
+
 #include <cuda.h>
 #include <sstream>
 
@@ -48,6 +50,7 @@ json to_json(const RunResult& r) {
     // Tier 1: per-invocation. These are the only figures comparable as ms/op.
     j["timing"] = {
         {"op_ms",        r.op_ms},
+        {"op_ms_trimmed", r.op_ms_trimmed},
         {"gpu_ms",       r.gpu_ms},
         {"overhead_ms",  r.overhead_ms},
         {"launch_count", r.launch_count},
@@ -151,6 +154,11 @@ json environment_json(const Context& ctx, const PowerMonitor& power) {
     j["repo_root"]           = ARENA_SOURCE_DIR;
     j["peak_dram_gbps"]      = ctx.peak_dram_gbps();
     j["peak_fp32_gflops"]    = ctx.peak_fp32_gflops();
+    // Measured once per process, on first use.
+    static const float launch_floor = measure_launch_floor_ms();
+    static const float roundtrip_floor = measure_roundtrip_floor_ms();
+    j["launch_floor_ms"]     = launch_floor;
+    j["roundtrip_floor_ms"]  = roundtrip_floor;
     j["driver_version"]      = driver_version;
     j["cuda_toolkit_version"] = CUDA_VERSION;
     j["nvml_available"]      = power.available();

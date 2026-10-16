@@ -21,6 +21,26 @@ TEST_CASE("median") {
     }
 }
 
+TEST_CASE("trimmed_mean") {
+    SUBCASE("drops the outer quarters") {
+        // sorted: 1 2 3 4 5 6 7 100 -> middle half 3 4 5 6
+        CHECK(trimmed_mean({100, 1, 2, 3, 4, 5, 6, 7}) == doctest::Approx(4.5f));
+    }
+    SUBCASE("moves smoothly across clustered values where the median jumps") {
+        // half the runs at 4.096, half at 6.144: the median sits on a cluster
+        // edge, the trimmed mean between them
+        std::vector<float> v;
+        for (int i = 0; i < 10; i++) v.push_back(4.096f);
+        for (int i = 0; i < 10; i++) v.push_back(6.144f);
+        CHECK(trimmed_mean(v) == doctest::Approx(5.12f));
+    }
+    SUBCASE("small inputs") {
+        CHECK(trimmed_mean({}) == doctest::Approx(0.0f));
+        CHECK(trimmed_mean({3.0f}) == doctest::Approx(3.0f));
+        CHECK(trimmed_mean({1.0f, 3.0f}) == doctest::Approx(2.0f));
+    }
+}
+
 TEST_CASE("check_drift") {
     SUBCASE("monotonic ramp does not converge") {
         // A GPU boosting its clock produces steadily falling times. Each

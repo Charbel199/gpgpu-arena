@@ -40,6 +40,7 @@ struct RunResult {
 
     // --- Tier 1: per-invocation ---
     float op_ms        = 0.0f;   // event-bracketed whole operation, median
+    float op_ms_trimmed = 0.0f;  // same, interquartile mean: steadier for short ops
     float gpu_ms       = 0.0f;   // sum of SASS durations (CUPTI Activity)
     float overhead_ms  = 0.0f;   // max(0, op_ms - gpu_ms)
     int   launch_count = 0;

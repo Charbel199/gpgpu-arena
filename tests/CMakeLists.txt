@@ -7,9 +7,11 @@ add_executable(arena_tests
     test_launch_summary.cpp
     test_compiler_cache.cpp
     test_manifest.cpp
+    test_paths.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/measurement/measure_policy.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/measurement/launch_summary.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/cli_args.cpp
+    ${CMAKE_SOURCE_DIR}/src/arena/paths.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/dtype.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/distribution.cpp
     ${CMAKE_SOURCE_DIR}/src/arena/measurement/accuracy.cpp

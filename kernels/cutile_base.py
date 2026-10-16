@@ -37,7 +37,7 @@ _DTYPES = {
 }
 
 
-def _constraint(arg, is_constant):
+def _constraint(arg, is_constant, hints=None):
     """Turn one example argument into the constraint describing it.
 
     Returns (constraint, launch slots it occupies). Whether a scalar is baked
@@ -58,13 +58,24 @@ def _constraint(arg, is_constant):
         raise TypeError(f"unsupported dtype {name}; add it to _DTYPES")
 
     # stride_lower_bound_incl=0 because negative strides are rejected outright.
-    c = ArrayConstraint(
-        _DTYPES[name], arg.ndim,
-        index_dtype=ct.int32,
+    #
+    # Every arena buffer is a contiguous, row-major cuMemAlloc allocation, so
+    # the last dimension has stride 1 and the base is at least 256-byte
+    # aligned. Saying so is what lets cuTile emit vector loads and TMA instead
+    # of scalar accesses; without it the compiler must assume any stride.
+    # `hints` adds or overrides constraint fields for this array, e.g.
+    # {"stride_divisible_by": [4, 1]} when a row length is known to be a
+    # multiple of 4. A false hint gives wrong results, which verification
+    # catches. Strides stay launch parameters either way.
+    fields = dict(
         stride_lower_bound_incl=0,
         alias_groups=[],
         may_alias_internally=False,
+        stride_constant=[None] * (arg.ndim - 1) + [1],
+        base_addr_divisible_by=16,
     )
+    fields.update(hints or {})
+    c = ArrayConstraint(_DTYPES[name], arg.ndim, index_dtype=ct.int32, **fields)
     # One pointer, then a shape and a stride per dimension.
     return c, 1 + 2 * arg.ndim
 
@@ -96,16 +107,22 @@ def apply_defines(example_args, params, defines):
     return out
 
 
-def compile_kernel(kernel_fn, example_args, defines=None):
+def compile_kernel(kernel_fn, example_args, defines=None, array_hints=None):
     fn = getattr(kernel_fn, "_pyfunc", kernel_fn)
 
     params = list(inspect.signature(fn).parameters.values())
     example_args = apply_defines(example_args, params, defines)
+    unknown = set(array_hints or {}) - {p.name for p in params}
+    if unknown:
+        raise ValueError(f"array_hints names unknown parameters: {sorted(unknown)}")
 
     constraints, slots = [], 0
     for a, p in zip(example_args, params):
         is_const = "Constant" in str(p.annotation)
-        c, n = _constraint(a, is_const)
+        hints = (array_hints or {}).get(p.name)
+        # Two-argument call when there are no hints, so a kernel file that
+        # wrapped _constraint itself keeps working.
+        c, n = _constraint(a, is_const, hints) if hints else _constraint(a, is_const)
         constraints.append(c)
         slots += n
 
@@ -141,7 +158,10 @@ def query_block_dim(cubin_path, kernel_name):
     return 128
 
 
-def main(kernel_fn, dummy_args, constants=None):
+def main(kernel_fn, dummy_args, constants=None, array_hints=None):
+    """array_hints maps an array parameter's name to extra ArrayConstraint
+    fields, on top of the contiguous, 16-byte-aligned default; see
+    _constraint()."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default=".")
     parser.add_argument("--output-name", type=str, required=True)
@@ -161,7 +181,7 @@ def main(kernel_fn, dummy_args, constants=None):
     try:
         print(f"[cutile] Compiling {args.output_name} ...", file=sys.stderr)
         t0 = time.perf_counter()
-        kernel_name, cubin, num_params = compile_kernel(kernel_fn, dummy_args, defines)
+        kernel_name, cubin, num_params = compile_kernel(kernel_fn, dummy_args, defines, array_hints)
         compile_ms = (time.perf_counter() - t0) * 1000.0
     except Exception as e:
         print(f"[cutile] Compilation failed: {e}", file=sys.stderr)

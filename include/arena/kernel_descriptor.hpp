@@ -187,6 +187,12 @@ public:
     virtual std::string source_path() const { return ""; }
     void set_compile_result(const CompileResult& result) { compile_result_ = result; }
 
+    // Further sources a kernel launches from, besides source_path(): a
+    // manifest whose launches name different files. The runner compiles each
+    // and hands the results back keyed by the same path.
+    virtual std::vector<std::string> extra_sources() const { return {}; }
+    virtual void set_extra_compile_results(const std::map<std::string, CompileResult>&) {}
+
     // Runs a different source file in this kernel's slot: same descriptor,
     // same launch config, same buffers, same verification. This is how a
     // candidate gets measured without writing a descriptor or rebuilding.

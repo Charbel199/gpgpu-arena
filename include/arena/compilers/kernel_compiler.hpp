@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
+#include <vector>
 
 namespace arena {
 
@@ -32,6 +33,17 @@ public:
     // first if needed, so the PTX always matches the cubin.
     std::string emit_ptx(const std::string& source_path,
                          const CompileDefines& defines = {});
+
+    // Files a compiler wrote next to the cubin for this build, absolute: PTX
+    // (Triton), TTGIR (Triton), the CUDA C++ Warp generated. Only those that
+    // exist; CUDA PTX comes from emit_ptx() instead.
+    std::vector<std::string> sidecars(const std::string& source_path,
+                                      const CompileDefines& defines = {}) const;
+
+    // The package a source's DSL needs but this environment lacks ("triton"),
+    // or "" when it can be compiled here. A native build usually has CUDA but
+    // not the Python DSLs, which only Docker installs.
+    std::string missing_toolchain(const std::string& source_path);
 
     // clear all cached cubins and metadata (forces recompilation)
     void clear_cache();

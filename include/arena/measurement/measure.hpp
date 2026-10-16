@@ -39,6 +39,7 @@ WarmupResult warmup(const LaunchFn& launch_fn, const LaunchFn& reset_fn,
 
 struct TimingResult {
     float median_ms = 0.0f;
+    float trimmed_ms = 0.0f;   // interquartile mean, see trimmed_mean()
     std::vector<float> all_times_ms;
 };
 

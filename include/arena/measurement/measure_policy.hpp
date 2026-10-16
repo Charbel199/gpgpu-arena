@@ -11,6 +11,12 @@ namespace arena::measure {
 // Empty input returns 0.
 float median(std::vector<float> v);
 
+// Mean of the middle half (25th to 75th percentile). Short kernels' event
+// timings cluster near multiples of about 2 us on some GPUs, so the median
+// snaps from one cluster to the next while this moves smoothly, and outliers
+// still cannot drag it the way they drag a plain mean.
+float trimmed_mean(std::vector<float> v);
+
 struct DriftCheck {
     bool  converged  = false;
     float rel_change = 0.0f;

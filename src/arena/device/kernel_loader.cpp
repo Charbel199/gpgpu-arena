@@ -41,8 +41,13 @@ KernelLoader::LaunchResult KernelLoader::launch(
     const LaunchConfig& config,
     void** args
 ) {
-    // opt into dynamic shared memory >48KB (required for large tile sizes)
-    if (config.shared_mem_bytes > 48 * 1024) {
+    // A launch may use at most 48 KB of shared memory unless the function
+    // opts in to more. The limit counts static and dynamic together, so the
+    // check has to as well: 48 KB dynamic plus a few static bytes used to
+    // fail with "invalid argument" because only the dynamic part was tested.
+    int static_bytes = 0;
+    cuFuncGetAttribute(&static_bytes, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, func);
+    if (config.shared_mem_bytes + static_cast<unsigned>(static_bytes) > 48 * 1024) {
         cuFuncSetAttribute(func,
             CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
             config.shared_mem_bytes);
