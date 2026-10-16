@@ -1,4 +1,7 @@
 #include "frontend/gui.hpp"
+#include "arena/manifest/manifest_kernel.hpp"
+#include "arena/paths.hpp"
+#include <filesystem>
 #include "arena/cli_args.hpp"
 #include "arena/result_io.hpp"
 
@@ -117,7 +120,7 @@ namespace Layout {
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
-Gui::Gui(arena::Runner& runner)
+Gui::Gui(arena::Runner& runner, const std::vector<std::string>& dirs)
     : runner_(runner) {
     config_.params["M"] = 1024;
     config_.params["K"] = 1024;
@@ -125,6 +128,9 @@ Gui::Gui(arena::Runner& runner)
     config_.params["n"] = 1000000;
     config_.params["rows"] = 1024;
     config_.params["cols"] = 1024;
+    config_.params["BH"] = 16;
+    config_.params["S"] = 1024;
+    config_.params["D"] = 64;
     config_.warmup_runs = 10;
     config_.number_of_runs = 10;
 
@@ -133,7 +139,9 @@ Gui::Gui(arena::Runner& runner)
     peak_fp32_gflops_ = (float)ctx.peak_fp32_gflops();
     peak_mem_bw_gbs_  = (float)ctx.peak_dram_gbps();
 
-    refresh_kernels();
+    builtin_ = runner_.get_all_kernels();
+    if (!dirs.empty()) open_folders(dirs);
+    if (view_dirs_.empty()) open_folders({arena::resolve_user_path("kernels", ARENA_SOURCE_DIR)});
 }
 
 Gui::~Gui() {
@@ -355,6 +363,8 @@ void Gui::drain_pending_results() {
                 problem_size = pr.params.count("M") ? pr.params.at("M") : 0;
             else if (pr.category == "softmax")
                 problem_size = pr.params.count("rows") ? pr.params.at("rows") : 0;
+            else if (pr.category == "attention")
+                problem_size = pr.params.count("S") ? pr.params.at("S") : 0;
             else
                 problem_size = pr.params.count("n") ? pr.params.at("n") : 0;
 
@@ -497,7 +507,9 @@ std::string Gui::read_kernel_source(const std::string& rel_path) {
     auto it = source_cache_.find(rel_path);
     if (it != source_cache_.end()) return it->second;
 
-    std::string full_path = std::string(ARENA_KERNEL_DIR) + "/" + rel_path;
+    // Manifest kernels carry absolute source paths.
+    std::string full_path = (!rel_path.empty() && rel_path[0] == '/')
+        ? rel_path : std::string(ARENA_KERNEL_DIR) + "/" + rel_path;
     std::ifstream f(full_path);
     if (!f.is_open()) return "// Could not read " + full_path;
 
@@ -650,9 +662,66 @@ void Gui::render_header_bar() {
     float btn_w = 52 * s;
     float gap = ImGui::GetStyle().ItemSpacing.x;
 
-    // 3 buttons pinned to right edge (always same position)
-    float btns_start = right_edge - btn_w * 3 - gap * 2;
+    // 4 buttons pinned to right edge (always same position)
+    float btns_start = right_edge - btn_w * 4 - gap * 3;
     ImGui::SameLine(btns_start);
+
+    ImGui::BeginDisabled(benchmark_running_);
+    if (ImGui::Button("Open", {btn_w, 0})) {
+        ImGui::OpenPopup("open_folder");
+        // The built-in kernels, every PGAIO run together, then each run,
+        // newest first, so a folder can be picked instead of typed.
+        open_folder_choices_ = {"kernels"};
+        std::error_code ec;
+        const std::filesystem::path runs = arena::resolve_user_path("pgaio/runs", ARENA_SOURCE_DIR);
+        std::vector<std::pair<std::filesystem::file_time_type, std::string>> found;
+        for (const auto& e : std::filesystem::directory_iterator(runs, ec)) {
+            if (e.is_directory(ec)) found.push_back({e.last_write_time(ec), e.path().filename().string()});
+        }
+        std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        if (!found.empty()) open_folder_choices_.push_back("pgaio/runs");
+        for (auto& f : found) open_folder_choices_.push_back("pgaio/runs/" + f.second);
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Showing: %s\nOpen another folder of kernels, such as a PGAIO run",
+                          view_label().c_str());
+    }
+    if (ImGui::BeginPopup("open_folder")) {
+        std::string pick;
+        ImGui::TextDisabled("Showing: %s", view_label().c_str());
+        ImGui::Spacing();
+        const float row = ImGui::GetTextLineHeightWithSpacing();
+        ImGui::BeginChild("##folders", {420 * s, std::min<float>(open_folder_choices_.size(), 12) * row + 8 * s},
+                          ImGuiChildFlags_None);
+        for (const auto& c : open_folder_choices_) {
+            std::error_code ec;
+            const std::string key = std::filesystem::weakly_canonical(
+                arena::resolve_user_path(c, ARENA_SOURCE_DIR), ec).string();
+            const bool on = view_dirs_.size() == 1 && view_dirs_[0] == key;
+            std::string label = c;
+            if (c == "kernels") label += "  (built in)";
+            else if (c == "pgaio/runs") label += "  (all runs)";
+            else label = "  " + c.substr(std::string("pgaio/runs/").size());
+            if (ImGui::Selectable(label.c_str(), on, ImGuiSelectableFlags_DontClosePopups)) pick = c;
+        }
+        ImGui::EndChild();
+        ImGui::Spacing();
+        ImGui::TextDisabled("Other folder (absolute, or from the current directory or the repo):");
+        ImGui::SetNextItemWidth(360 * s);
+        const bool enter = ImGui::InputText("##folder", open_folder_buf_, sizeof(open_folder_buf_),
+                                            ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        if ((ImGui::Button("Open##go") || enter) && open_folder_buf_[0]) {
+            pick = arena::trim_path(open_folder_buf_);
+        }
+        if (!pick.empty()) {
+            open_folder(arena::resolve_user_path(pick, ARENA_SOURCE_DIR));
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::SameLine();
 
     ImGui::BeginDisabled(benchmark_running_);
     if (ImGui::Button("Export", {btn_w, 0})) {
@@ -709,17 +778,11 @@ void Gui::render_header_bar() {
     ImGui::Separator();
 
     std::string size_str;
-    for (const auto& name : {"n", "M", "K", "N", "rows", "cols"}) {
+    for (const auto& name : params_of(current_category_)) {
         auto it = config_.params.find(name);
         if (it == config_.params.end()) continue;
-        if (current_category_ == "matmul" && std::string(name) == "n") continue;
-        if (current_category_ != "matmul" &&
-            (std::string(name) == "M" || std::string(name) == "K" ||
-             std::string(name) == "N")) continue;
-        if (current_category_ != "softmax" &&
-            (std::string(name) == "rows" || std::string(name) == "cols")) continue;
         if (!size_str.empty()) size_str += " ";
-        size_str += std::string(name) + "=" + std::to_string(it->second);
+        size_str += name + "=" + std::to_string(it->second);
     }
 
     int sel_n = 0, pinned_n = 0;
@@ -746,7 +809,9 @@ void Gui::render_header_bar() {
         return;   // inside the header child, so nothing to close here
     }
 
-    ImGui::TextColored(UITheme::TEXT_DIM, "%s | %s | %s seed=%llu | %d selected",
+    ImGui::TextColored(UITheme::ACCENT, "%s", view_label().c_str());
+    ImGui::SameLine();
+    ImGui::TextColored(UITheme::TEXT_DIM, "| %s | %s | %s seed=%llu | %d selected",
         current_category_.empty() ? "no category" : current_category_.c_str(),
         size_str.empty() ? "default size" : size_str.c_str(),
         arena::distribution_name(config_.input_distribution),
@@ -772,22 +837,26 @@ void Gui::render_header_bar() {
 void Gui::render_kernel_sidebar() {
     float s = ui_scale_;
 
-    // ---- Category tabs ----
+    // ---- Category tabs, wrapping onto more lines when the sidebar is narrow ----
+    const float right = ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x;
     for (size_t ci = 0; ci < categories_.size(); ci++) {
         const auto& cat = categories_[ci];
         bool active = (cat == current_category_);
 
-        if (active) ImGui::PushStyleColor(ImGuiCol_Button, UITheme::ACCENT_DIM);
-
         std::string label = cat;
         if (!label.empty()) label[0] = (char)std::toupper(label[0]);
 
+        if (ci > 0) {
+            const float w = ImGui::CalcTextSize(label.c_str()).x + ImGui::GetStyle().FramePadding.x * 2;
+            const float x = ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x;
+            if (x + w <= right) ImGui::SameLine();
+        }
+
+        if (active) ImGui::PushStyleColor(ImGuiCol_Button, UITheme::ACCENT_DIM);
         if (ImGui::SmallButton(label.c_str())) {
             select_category(cat);
         }
         if (active) ImGui::PopStyleColor();
-
-        if (ci < categories_.size() - 1) ImGui::SameLine();
     }
 
     ImGui::Separator();
@@ -800,7 +869,7 @@ void Gui::render_kernel_sidebar() {
     }
 
     // ---- Select All / None ----
-    if (ImGui::SmallButton("All")) { for (auto& k : *kernels) k.selected = true; }
+    if (ImGui::SmallButton("All")) { for (auto& k : *kernels) k.selected = k.missing.empty(); }
     ImGui::SameLine();
     if (ImGui::SmallButton("None")) { for (auto& k : *kernels) k.selected = false; }
     ImGui::Separator();
@@ -867,9 +936,18 @@ void Gui::render_kernel_sidebar() {
         }
         ImGui::Indent(8.0f * s);
 
-        // Checkbox for benchmark selection
+        // Checkbox for benchmark selection. A kernel whose DSL this build
+        // cannot compile is listed, greyed out, but cannot be selected.
+        ImGui::BeginDisabled(!k.missing.empty());
         ImGui::Checkbox("##chk", &k.selected);
+        ImGui::EndDisabled();
+        if (!k.missing.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Needs %s, which this build cannot find.\n"
+                              "The Docker GUI has every DSL:\n"
+                              "  docker compose run --rm gui --gui --open <folder>", k.missing.c_str());
+        }
         ImGui::SameLine();
+        if (!k.missing.empty()) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f);
 
         // Compact DSL badge (colored 2-letter code)
         DSLType dsl = detect_dsl_type(k.descriptor);
@@ -908,10 +986,15 @@ void Gui::render_kernel_sidebar() {
                 current_category_ = k.descriptor->category();
             }
         }
+        if (!k.missing.empty()) ImGui::PopStyleVar();
         if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
             ImGui::PushTextWrapPos(300.0f * s);
             ImGui::TextUnformatted(k.descriptor->description().c_str());
+            if (!k.missing.empty()) {
+                ImGui::Separator();
+                ImGui::TextColored(UITheme::WARN_YELLOW, "needs %s, not found by this build", k.missing.c_str());
+            }
             ImGui::Separator();
             ImGui::TextDisabled("in %s, out %s",
                 arena::dtype_name(k.descriptor->input_dtype()),
@@ -1017,6 +1100,17 @@ void Gui::render_problem_config() {
         if (changed) { config_.params["rows"] = rows; config_.params["cols"] = cols; }
         float mb = (2.0f * rows * cols * sizeof(float)) / (1024.0f * 1024.0f);
         ImGui::Text("%d x %d (%.1f MB)", rows, cols, mb);
+    } else if (current_category_ == "attention") {
+        int bh = config_.params["BH"];
+        int seq = config_.params["S"];
+        int d = config_.params["D"];
+        bool changed = false;
+        changed |= ImGui::SliderInt("Batch x Heads", &bh, 1, 64);
+        changed |= ImGui::SliderInt("Seq Length", &seq, 64, 8192);
+        changed |= ImGui::SliderInt("Head Dim", &d, 16, 128);
+        if (changed) { config_.params["BH"] = bh; config_.params["S"] = seq; config_.params["D"] = d; }
+        const float mb = (4.0f * bh * seq * d * sizeof(float)) / (1024.0f * 1024.0f);
+        ImGui::Text("[%d, %d, %d] (%.1f MB)", bh, seq, d, mb);
     } else if (current_category_ == "reduce" || current_category_ == "scan") {
         int n = config_.params["n"];
         if (ImGui::SliderInt("Elements", &n, 100000, 100000000, "%d",
@@ -1459,12 +1553,12 @@ void Gui::render_benchmark_panel() {
             for (const auto& k : *kernels) {
                 if (k.has_run && k.result.success) {
                     label_strings.push_back(k.result.kernel_name);
-                    values.push_back(is_matmul() ? k.result.gflops : k.result.bandwidth_gbps);
+                    values.push_back(shows_gflops() ? k.result.gflops : k.result.bandwidth_gbps);
                 }
             }
 
             if (!values.empty()) {
-                const char* y_label = is_matmul() ? "GFLOPS" : "GB/s";
+                const char* y_label = shows_gflops() ? "GFLOPS" : "GB/s";
                 ImGui::TextColored(UITheme::HEADER_TEXT, "Throughput (%s)", y_label);
 
                 // Sort descending
@@ -1480,7 +1574,7 @@ void Gui::render_benchmark_panel() {
                     sorted_values[i] = values[order[i]];
                 }
 
-                double peak = is_matmul() ? (double)peak_fp32_gflops_ : (double)peak_mem_bw_gbs_;
+                double peak = shows_gflops() ? (double)peak_fp32_gflops_ : (double)peak_mem_bw_gbs_;
 
                 float plot_h = plot_height(0.34f, 200);
                 if (ImPlot::BeginPlot("##Performance", {-1, plot_h})) {
@@ -1562,11 +1656,12 @@ void Gui::render_benchmark_panel() {
                     }
 
                     const char* x_label = is_matmul() ? "Matrix Size" :
-                        (current_category_ == "softmax") ? "Rows" : "Elements";
+                        (current_category_ == "softmax") ? "Rows" :
+                        (current_category_ == "attention") ? "Sequence Length" : "Elements";
                     const char* y_label;
                     switch (scaling_metric_) {
                         case ScalingMetric::Performance:
-                            y_label = is_matmul() ? "GFLOPS" : "GB/s"; break;
+                            y_label = shows_gflops() ? "GFLOPS" : "GB/s"; break;
                         case ScalingMetric::OpTime:
                             y_label = "Op Time (ms)"; break;
                         case ScalingMetric::GpuTime:
@@ -1586,7 +1681,7 @@ void Gui::render_benchmark_panel() {
                                 xs.push_back((double)entry.problem_size);
                                 switch (scaling_metric_) {
                                     case ScalingMetric::Performance:
-                                        ys.push_back(is_matmul() ? entry.result.gflops
+                                        ys.push_back(shows_gflops() ? entry.result.gflops
                                                                  : entry.result.bandwidth_gbps);
                                         break;
                                     case ScalingMetric::OpTime:
@@ -2067,8 +2162,8 @@ void Gui::render_tuning_section() {
                     ImGui::Text("%.4f ms", e.result.op_ms);
                     ImGui::TableSetColumnIndex(3);
                     ImGui::TextColored(UITheme::TEXT_DIM, "%.1f %s",
-                        is_matmul() ? e.result.gflops : e.result.bandwidth_gbps,
-                        is_matmul() ? "GFLOPS" : "GB/s");
+                        shows_gflops() ? e.result.gflops : e.result.bandwidth_gbps,
+                        shows_gflops() ? "GFLOPS" : "GB/s");
                     // What this config costs against the best one, which is
                     // the number that says whether the choice matters.
                     ImGui::TableSetColumnIndex(4);
@@ -2303,7 +2398,7 @@ void Gui::render_results_table(const std::vector<TableRow>& rows,
         }
     }
 
-    bool show_gflops = is_matmul();
+    bool show_gflops = shows_gflops();
     bool has_profiling = false;
     for (const auto& r : rows) {
         if (r.result.counters.regs_per_thread > 0) { has_profiling = true; break; }
@@ -3377,7 +3472,7 @@ void Gui::run_selected_kernels() {
     // A pinned config, if tuning found one, is what this kernel now runs at.
     std::vector<BenchWork> work;
     for (auto& k : it->second) {
-        if (k.selected && k.descriptor) {
+        if (k.selected && k.descriptor && k.missing.empty()) {
             work.push_back({current_category_, k.descriptor,
                             k.has_pinned ? k.pinned : arena::cli::TuningVariant{}});
         }
@@ -3405,7 +3500,7 @@ void Gui::run_sweep() {
     // A pinned config, if tuning found one, is what this kernel now runs at.
     std::vector<BenchWork> work;
     for (auto& k : it->second) {
-        if (k.selected && k.descriptor) {
+        if (k.selected && k.descriptor && k.missing.empty()) {
             work.push_back({current_category_, k.descriptor,
                             k.has_pinned ? k.pinned : arena::cli::TuningVariant{}});
         }
@@ -3439,7 +3534,7 @@ void Gui::run_tuning() {
     std::vector<BenchWork> work;
     int total = 0;
     for (auto& k : it->second) {
-        if (!k.selected || !k.descriptor) continue;
+        if (!k.selected || !k.descriptor || !k.missing.empty()) continue;
         work.push_back({current_category_, k.descriptor, {}});
         total += (int)tuning_variants(*k.descriptor).size();
     }
@@ -3524,10 +3619,8 @@ void Gui::commit_snapshot() {
     for (const auto& [key, val] : snap.params) {
         // Only the parameters this category actually uses; the map carries
         // defaults for all of them.
-        const bool relevant =
-            (snap.category == "matmul"  && (key == "M" || key == "K" || key == "N")) ||
-            (snap.category == "softmax" && (key == "rows" || key == "cols")) ||
-            (snap.category != "matmul" && snap.category != "softmax" && key == "n");
+        const auto names = params_of(snap.category);
+        const bool relevant = std::find(names.begin(), names.end(), key) != names.end();
         if (!relevant) continue;
         if (!size_str.empty()) size_str += " ";
         size_str += key + "=" + std::to_string(val);
@@ -3672,34 +3765,174 @@ void Gui::reset_results() {
         " (" + std::to_string(ids.size()) + " run(s) dropped)");
 }
 
-void Gui::refresh_kernels() {
-    categories_ = runner_.get_categories();
-    kernels_by_category_.clear();
+std::string Gui::missing_dsl(arena::KernelDescriptor* k) {
+    if (!k->needs_compilation()) return "";
+    std::vector<std::string> sources{k->source_path()};
+    for (const auto& x : k->extra_sources()) sources.push_back(x);
+    for (const auto& src : sources) {
+        const std::string m = runner_.compiler().missing_toolchain(src);
+        if (!m.empty()) return m;
+    }
+    return "";
+}
 
-    for (const auto& cat : categories_) {
-        auto descriptors = runner_.get_kernels_by_category(cat);
-        std::vector<KernelState> states;
-        for (auto* desc : descriptors) {
-            KernelState state;
-            state.descriptor = desc;
-            state.selected = true;
-            state.has_run = false;
-            states.push_back(state);
+std::vector<arena::KernelDescriptor*> Gui::load_folder(const std::string& dir) {
+    auto hit = loaded_.find(dir);
+    if (hit != loaded_.end()) return hit->second;
+
+    std::vector<std::string> taken;
+    for (auto* k : runner_.get_all_kernels()) taken.push_back(k->name());
+    auto scan = arena::scan_manifests(dir, taken);
+    for (const auto& e : scan.errors) log(LogEntry::WARN, "open: " + e);
+
+    // A manifest already loaded through another folder (a run, then the
+    // folder of all runs) is the same kernel, not a second one.
+    std::vector<arena::KernelDescriptor*> out;
+    for (auto& k : scan.kernels) {
+        auto* info = dynamic_cast<arena::ManifestInfo*>(k.get());
+        const std::string path = info ? info->manifest_path() : k->descriptor_file();
+        auto known = by_manifest_.find(path);
+        if (known != by_manifest_.end()) {
+            out.push_back(known->second);
+            continue;
         }
-        kernels_by_category_[cat] = std::move(states);
+        auto* raw = k.get();
+        const std::string file = raw->descriptor_file();
+        arena::KernelRegistry::instance().register_kernel(std::move(k), file.c_str());
+        by_manifest_[path] = raw;
+        out.push_back(raw);
+    }
+    loaded_[dir] = out;
+    return out;
+}
+
+static bool path_under(const std::string& file, const std::string& dir) {
+    if (file.size() < dir.size() || file.compare(0, dir.size(), dir) != 0) return false;
+    return file.size() == dir.size() || file[dir.size()] == '/' || dir.back() == '/';
+}
+
+void Gui::open_folders(const std::vector<std::string>& dirs) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> keys;
+    for (const auto& d : dirs) {
+        std::error_code ec;
+        const std::string key = fs::weakly_canonical(d, ec).string();
+        if (!fs::is_directory(key, ec)) {
+            log(LogEntry::WARN, "open: \"" + d + "\": no such folder");
+            continue;
+        }
+        if (std::find(keys.begin(), keys.end(), key) == keys.end()) keys.push_back(key);
+    }
+    if (keys.empty()) return;   // keep the current view
+
+    std::vector<arena::KernelDescriptor*> shown;
+    const auto add = [&](arena::KernelDescriptor* k) {
+        if (std::find(shown.begin(), shown.end(), k) == shown.end()) shown.push_back(k);
+    };
+    for (const auto& key : keys) {
+        for (auto* k : builtin_) {
+            if (path_under(k->descriptor_file(), key)) add(k);
+        }
+        // A PGAIO run is compared against its baseline, which is built in.
+        std::error_code ec;
+        for (auto it = fs::recursive_directory_iterator(key, fs::directory_options::skip_permission_denied, ec);
+             !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (it.depth() >= 1) it.disable_recursion_pending();   // the folder and its children only
+            if (it->path().filename() != "run.json") continue;
+            try {
+                std::ifstream f(it->path());
+                const auto cfg = nlohmann::json::parse(f);
+                const std::string base = cfg.value("kernel", "");
+                for (auto* k : builtin_) {
+                    if (k->name() == base) add(k);
+                }
+            } catch (...) {
+            }
+        }
+        for (auto* k : load_folder(key)) add(k);
     }
 
-    if (!categories_.empty() && current_category_.empty()) {
-        current_category_ = categories_[0];
+    // Keep what each listed kernel has measured before replacing the list.
+    for (auto& [cat, list] : kernels_by_category_) {
+        for (auto& k : list) saved_states_[k.descriptor->name()] = k;
     }
+    view_dirs_ = keys;
+    categories_.clear();
+    kernels_by_category_.clear();
+    for (auto* k : shown) {
+        const std::string cat = k->category();
+        if (!kernels_by_category_.count(cat)) categories_.push_back(cat);
+        auto saved = saved_states_.find(k->name());
+        KernelState state;
+        if (saved != saved_states_.end() && saved->second.descriptor == k) {
+            state = saved->second;
+        } else {
+            state.descriptor = k;
+            state.missing = missing_dsl(k);
+            state.selected = state.missing.empty();
+        }
+        kernels_by_category_[cat].push_back(state);
+    }
+    std::sort(categories_.begin(), categories_.end());
+    if (std::find(categories_.begin(), categories_.end(), current_category_) == categories_.end()) {
+        current_category_ = categories_.empty() ? "" : categories_[0];
+    }
+    // Opening a folder of one category's kernels goes straight to them.
+    if (dirs.size() == 1 && categories_.size() >= 1 && !builtin_.empty()) {
+        std::map<std::string, int> manifests_per_cat;
+        for (auto* k : shown) {
+            if (dynamic_cast<arena::ManifestInfo*>(k)) manifests_per_cat[k->category()]++;
+        }
+        if (manifests_per_cat.size() == 1) current_category_ = manifests_per_cat.begin()->first;
+    }
+
+    int missing = 0;
+    std::set<std::string> packages;
+    for (auto& [cat, list] : kernels_by_category_) {
+        for (auto& k : list) {
+            if (!k.missing.empty()) { missing++; packages.insert(k.missing); }
+        }
+    }
+    log(shown.empty() ? LogEntry::WARN : LogEntry::INFO,
+        "showing " + std::to_string(shown.size()) + " kernel(s) from " + view_label());
+    if (missing) {
+        std::string names;
+        for (const auto& p : packages) names += (names.empty() ? "" : ", ") + p;
+        log(LogEntry::WARN, std::to_string(missing) + " kernel(s) need " + names +
+            ", which this build cannot find; they are listed but not run. "
+            "The Docker GUI has every DSL: docker compose run --rm gui --gui --open <folder>");
+    }
+}
+
+std::string Gui::view_label() const {
+    std::string out;
+    const std::string root = std::filesystem::weakly_canonical(ARENA_SOURCE_DIR).string();
+    std::error_code ec;
+    const std::string here = std::filesystem::current_path(ec).string();
+    for (const auto& d : view_dirs_) {
+        std::string shown = d;
+        for (const auto& base : {here, root}) {
+            if (path_under(d, base) && d.size() > base.size()) {
+                shown = d.substr(base.size() + 1);
+                break;
+            }
+        }
+        out += (out.empty() ? "" : ", ") + shown;
+    }
+    return out;
+}
+
+std::vector<std::string> Gui::params_of(const std::string& category) const {
+    for (auto* k : runner_.get_kernels_by_category(category)) return k->get_parameter_names();
+    return {};
 }
 
 void Gui::select_category(const std::string& category) {
     current_category_ = category;
 }
 
-int run_gui(arena::Runner& runner) {
-    Gui gui(runner);
+int run_gui(arena::Runner& runner, const std::vector<std::string>& open_dirs) {
+    Gui gui(runner, open_dirs);
     gui.run();
     return 0;
 }

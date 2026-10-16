@@ -49,6 +49,18 @@ std::vector<TuningVariant> tuning_variants_for(
     return {{requested_block, requested_defines}};
 }
 
+std::optional<std::map<std::string, int>> parse_shape(const std::string& spec) {
+    std::map<std::string, int> out;
+    const auto items = split_csv(spec);
+    if (items.empty()) return std::nullopt;
+    for (const auto& item : items) {
+        auto kv = parse_param(item);
+        if (!kv || out.count(kv->first)) return std::nullopt;
+        out[kv->first] = kv->second;
+    }
+    return out;
+}
+
 std::vector<std::string> split_csv(const std::string& s) {
     std::vector<std::string> out;
     size_t start = 0;

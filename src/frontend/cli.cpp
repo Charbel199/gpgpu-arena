@@ -1,6 +1,7 @@
 #include "frontend/cli.hpp"
 
 #include "arena/cli_args.hpp"
+#include "arena/paths.hpp"
 #include "arena/distribution.hpp"
 #include "arena/result_io.hpp"
 #include "arena/logger.hpp"
@@ -34,11 +35,13 @@ struct CliOptions {
     // Every combination of these runs, so one invocation can cover several
     // sizes, input distributions and seeds. A single value is the usual case.
     std::map<std::string, std::vector<int>> param_lists;
+    std::vector<std::map<std::string, int>> shapes;   // explicit --shape list
     std::vector<arena::Distribution> dists = {arena::Distribution::Uniform};
     std::vector<uint64_t> seeds = {42};
 
     std::string source_override;      // as given; resolved in run_cli
     std::string manifest;             // a kernel described by JSON instead of C++
+    std::string artifacts_dir;        // --inspect copies compiler sidecars here
     std::string output = "-";         // "-" = stdout
     std::string format = "json";      // json | csv
     arena::RunConfig config;
@@ -79,6 +82,21 @@ CliOptions parse_args(int argc, char** argv) {
             o.inspect = arg_is(flag, "--inspect") ? CliOptions::Inspect::Summary
                       : arg_is(flag, "--sass")    ? CliOptions::Inspect::Sass
                                                   : CliOptions::Inspect::Ptx;
+        } else if (arg_is(a, "--shape")) {
+            if (!take_value(argc, argv, i, "--shape", v, o)) return o;
+            auto shape = arena::cli::parse_shape(v);
+            if (!shape) {
+                o.ok = false;
+                o.error = "malformed --shape '" + v + "' (expected key=n,key=n)";
+                return o;
+            }
+            o.shapes.push_back(*shape);
+        } else if (arg_is(a, "--open")) {
+            // handled by main: registers the folder's manifests as kernels
+            if (!take_value(argc, argv, i, "--open", v, o)) return o;
+        } else if (arg_is(a, "--artifacts-dir")) {
+            if (!take_value(argc, argv, i, "--artifacts-dir", v, o)) return o;
+            o.artifacts_dir = v;
         } else if (arg_is(a, "--manifest")) {
             if (!take_value(argc, argv, i, "--manifest", v, o)) return o;
             o.manifest = v;
@@ -221,8 +239,7 @@ bool apply_source_override(const std::vector<arena::KernelDescriptor*>& kernels,
         return false;
     }
 
-    fs::path p(given);
-    if (p.is_relative()) p = fs::path(ARENA_SOURCE_DIR) / p;
+    fs::path p(arena::resolve_user_path(given, ARENA_SOURCE_DIR));
     std::error_code ec;
     p = fs::weakly_canonical(p, ec);
     if (!fs::exists(p)) {
@@ -278,6 +295,9 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
         arena::CompileResult cr;
         const bool compiled = k.needs_compilation() && !k.source_path().empty();
         if (compiled) cr = runner.compiler().compile(k.effective_source_path(), o.config.compile_options);
+        std::map<std::string, arena::CompileResult> extra_cr;
+        for (const auto& src : k.extra_sources()) extra_cr[src] = runner.compiler().compile(src);
+        if (!extra_cr.empty()) k.set_extra_compile_results(extra_cr);
 
         // Entry point as the runner would look it up. DSL descriptors read it
         // from the compile result, so it has to be set first.
@@ -301,16 +321,32 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
             return static_cast<int>(CliExit::Ok);
         }
 
+        // Dumps per source: a multi-source manifest keeps its entry points in
+        // several cubins, and two files may use the same kernel name.
+        std::map<std::string, std::pair<std::string, std::string>> dumps;   // source -> (sass, res)
         std::string sass_dump, res_dump;
         if (compiled) {
-            const auto cubin = arena::shell_quote(cr.module_path);
-            sass_dump = arena::run_command("cuobjdump -sass " + cubin + " 2>&1", "cuobjdump -sass");
-            res_dump  = arena::run_command("cuobjdump -res-usage " + cubin + " 2>&1", "cuobjdump -res-usage");
+            std::map<std::string, std::string> cubins = {{k.effective_source_path(), cr.module_path}};
+            for (const auto& [src, ecr] : extra_cr) cubins[src] = ecr.module_path;
+            for (const auto& [src, c] : cubins) {
+                const auto q = arena::shell_quote(c);
+                auto s = arena::run_command("cuobjdump -sass " + q + " 2>&1", "cuobjdump -sass");
+                auto r = arena::run_command("cuobjdump -res-usage " + q + " 2>&1", "cuobjdump -res-usage");
+                sass_dump += s;
+                res_dump += r;
+                dumps[src] = {std::move(s), std::move(r)};
+            }
         }
+        std::vector<std::string> entry_srcs(entries.size(), k.effective_source_path());
+        if (minfo && compiled) entry_srcs = minfo->entry_sources();
+        auto dump_for = [&](size_t i) -> const std::pair<std::string, std::string>& {
+            auto it = dumps.find(entry_srcs[i]);
+            return it != dumps.end() ? it->second : dumps.begin()->second;
+        };
         std::string fn_sass;
-        for (const auto& e : entries) {
-            const auto t = arena::sass::function_text(sass_dump, e);
-            if (entries.size() > 1 && t == sass_dump) continue;   // entry not found
+        for (size_t i = 0; i < entries.size() && !dumps.empty(); i++) {
+            const auto& d = dump_for(i).first;
+            const auto t = arena::sass::function_text(d, entries[i]);
             if (fn_sass.find(t) == std::string::npos) fn_sass += t;
         }
 
@@ -345,7 +381,31 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
             for (const auto& [op, n] : hist) total += n;
 
             j["entry_point"] = entry;
-            j["cubin"] = cr.module_path;
+            j["cubin"] = std::filesystem::absolute(cr.module_path).string();
+            auto artifacts = runner.compiler().sidecars(k.effective_source_path(),
+                                                        o.config.compile_options);
+            if (!o.artifacts_dir.empty()) {
+                namespace fs = std::filesystem;
+                fs::path dir(arena::resolve_user_path(o.artifacts_dir, ARENA_SOURCE_DIR));
+                fs::create_directories(dir);
+                // CUDA has no sidecar; its PTX is a separate nvcc pass.
+                if (dsl == "cuda") {
+                    const auto ptx = runner.compiler().emit_ptx(k.effective_source_path(),
+                                                                o.config.compile_options);
+                    if (!ptx.empty()) artifacts.push_back(fs::absolute(ptx).string());
+                }
+                std::vector<std::string> copied;
+                for (const auto& a : artifacts) {
+                    const std::string name = fs::path(a).filename().string();
+                    const auto dot = name.find('.');
+                    const fs::path dest = dir / ("kernel" + (dot == std::string::npos ? "" : name.substr(dot)));
+                    std::error_code ec;
+                    fs::copy_file(a, dest, fs::copy_options::overwrite_existing, ec);
+                    if (!ec) copied.push_back(dest.string());
+                }
+                j["artifacts_copied"] = copied;
+            }
+            j["artifacts"] = artifacts;
             j["build"] = {
                 {"cache_hit", cr.cache_hit},
                 {"options",   o.config.compile_options},
@@ -363,9 +423,11 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
             };
             if (entries.size() > 1) {
                 j["entries"] = json::array();
-                for (const auto& e : entries) {
-                    const auto h = arena::sass::opcode_histogram(arena::sass::function_text(sass_dump, e));
-                    const auto r = arena::sass::parse_resource_usage(res_dump, e);
+                for (size_t i = 0; i < entries.size(); i++) {
+                    const auto& e = entries[i];
+                    const auto& d = dump_for(i);
+                    const auto h = arena::sass::opcode_histogram(arena::sass::function_text(d.first, e));
+                    const auto r = arena::sass::parse_resource_usage(d.second, e);
                     int n = 0;
                     for (const auto& [op, c] : h) n += c;
                     j["entries"].push_back({{"entry", e}, {"registers", r.registers},
@@ -424,14 +486,24 @@ void print_cli_usage(const char* program) {
         "                            descriptor, registers, spills, SASS instruction mix\n"
         "  --sass <kernel>           Compile and print the kernel's SASS\n"
         "  --ptx <kernel>            Compile and print PTX (CUDA and Triton only)\n"
+        "  --open <dir>              Load every kernel manifest under dir (recursively) as\n"
+        "                            a kernel, for --list, --run and the GUI; repeatable.\n"
+        "                            Relative paths here and below are from the current\n"
+        "                            directory, or else the repo root\n"
         "  --manifest <file.json>    Run, or with --inspect/--sass/--ptx describe, a kernel\n"
         "                            defined by a JSON manifest instead of a C++\n"
-        "                            descriptor; relative paths are from the repo root\n"
+        "                            descriptor\n"
+        "  --artifacts-dir <dir>     With --inspect: copy PTX, Triton IR and Warp's\n"
+        "                            generated CUDA into dir, since the compile cache may\n"
+        "                            not be visible outside Docker\n"
         "  --source-override <file>  Use this source in the kernel's slot instead of its\n"
-        "                            own; relative paths are from the repo root. Needs a\n"
-        "                            single kernel and the same file type as the slot\n"
+        "                            own. Needs a single kernel and the same file type\n"
+        "                            as the slot\n"
         "  --param k=v, -p k=v       Problem size, repeatable (e.g. -p n=1000000);\n"
         "                            k=v1,v2 runs each value\n"
+        "  --shape k=v,k=v           One explicit problem shape, repeatable (e.g.\n"
+        "                            --shape rows=64,cols=1024 --shape rows=16384,cols=4096);\n"
+        "                            an alternative to -p for sizes that are not a grid\n"
         "  --runs <n>                Timed runs per kernel (default 10)\n"
         "  --l2 <cold|warm>          Evict L2 before every timed launch, or not\n"
         "                            (default warm)\n"
@@ -513,8 +585,7 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
                          "--source-override\n";
             return static_cast<int>(CliExit::UsageError);
         }
-        std::filesystem::path mp(o.manifest);
-        if (mp.is_relative()) mp = std::filesystem::path(ARENA_SOURCE_DIR) / mp;
+        std::filesystem::path mp(arena::resolve_user_path(o.manifest, ARENA_SOURCE_DIR));
         try {
             manifest_kernel = arena::load_manifest(mp.string());
         } catch (const std::exception& e) {
@@ -553,7 +624,11 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
         return run_inspect(runner, *kernels.front(), o, to_stdout);
     }
 
-    const auto param_sets = arena::cli::expand_grid(o.param_lists);
+    if (!o.shapes.empty() && !o.param_lists.empty()) {
+        std::cerr << "Error: use either --shape or -p, not both\n";
+        return static_cast<int>(CliExit::UsageError);
+    }
+    const auto param_sets = o.shapes.empty() ? arena::cli::expand_grid(o.param_lists) : o.shapes;
 
     std::vector<arena::RunResult> results;
     std::vector<arena::KernelDescriptor*> ran;   // parallel to results, for the dsl column

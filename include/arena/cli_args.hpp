@@ -48,6 +48,11 @@ std::optional<std::pair<std::string, std::vector<int>>> parse_param_list(const s
 // Applies a list spec onto a map of lists. Returns false on a malformed spec.
 bool apply_param_list(const std::string& spec, std::map<std::string, std::vector<int>>& out);
 
+// "rows=64,cols=1024" -> {{"rows", 64}, {"cols", 1024}}: one explicit problem
+// shape, for size ladders that are not a cartesian grid. nullopt if any item
+// is malformed or a key repeats.
+std::optional<std::map<std::string, int>> parse_shape(const std::string& spec);
+
 // "a,b,,c" -> {"a", "b", "c"}. Empty items are dropped.
 std::vector<std::string> split_csv(const std::string& s);
 

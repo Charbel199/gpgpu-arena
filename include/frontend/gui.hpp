@@ -7,6 +7,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <set>
 #include <deque>
 #include <thread>
 #include <mutex>
@@ -29,6 +30,10 @@ struct KernelState {
     arena::RunResult result;
     bool selected = true;
     bool has_run = false;
+
+    // The DSL package this kernel needs and this build cannot find
+    // ("triton"), or "". Such kernels are listed but not run.
+    std::string missing;
 
     // Which config produced `result`, so a row in the table can say what it
     // was measured at rather than leaving it to be inferred.
@@ -128,7 +133,15 @@ struct UIState {
 
 class Gui {
 public:
-    Gui(arena::Runner& runner);
+    // Shows the kernels found under these folders, replacing what is listed:
+    // built-in kernels whose descriptor lives there, kernel manifests (a
+    // PGAIO run, or any folder of them), and the baseline of each PGAIO run
+    // found. Results already measured stay with their kernels, so switching
+    // back finds them again. The default view is the kernels/ folder.
+    void open_folders(const std::vector<std::string>& dirs);
+    void open_folder(const std::string& dir) { open_folders({dir}); }
+    // Lists the kernels under `dirs`, or under kernels/ when empty.
+    Gui(arena::Runner& runner, const std::vector<std::string>& dirs = {});
     ~Gui();
     void run();
 
@@ -178,8 +191,18 @@ private:
     std::vector<TableRow> rows_for(const RunSnapshot* snap);
     const RunSnapshot* compare_snapshot() const;
     void reset_results();
-    void refresh_kernels();
     void select_category(const std::string& category);
+
+    char open_folder_buf_[1024] = {};
+    std::vector<std::string> open_folder_choices_;   // kernels, pgaio/runs and each run
+    std::vector<std::string> view_dirs_;             // folders listed now, canonical
+    std::vector<arena::KernelDescriptor*> builtin_;  // compiled into the binary
+    std::map<std::string, std::vector<arena::KernelDescriptor*>> loaded_;   // folder -> its manifests
+    std::map<std::string, arena::KernelDescriptor*> by_manifest_;           // manifest path -> kernel
+    std::map<std::string, KernelState> saved_states_;                       // by kernel name
+    std::string view_label() const;
+    std::vector<arena::KernelDescriptor*> load_folder(const std::string& dir);
+    std::string missing_dsl(arena::KernelDescriptor* k);
     void log(LogEntry::Level level, const std::string& msg);
 
     // Threading
@@ -191,6 +214,10 @@ private:
     void render_tuning_section();
     void drain_pending_results();
     bool is_matmul() const { return current_category_ == "matmul"; }
+    // Compute-bound categories are charted in GFLOPS, the rest in GB/s.
+    bool shows_gflops() const { return current_category_ == "matmul" || current_category_ == "attention"; }
+    // The problem-size parameters a category's kernels take, in their order.
+    std::vector<std::string> params_of(const std::string& category) const;
     std::vector<KernelState>* current_kernels();
 
     // Core state
@@ -268,6 +295,7 @@ private:
     static constexpr size_t MAX_SNAPSHOTS = 50;
 };
 
-int run_gui(arena::Runner& runner);
+// open_dirs: folders of kernel manifests to load at startup (--open).
+int run_gui(arena::Runner& runner, const std::vector<std::string>& open_dirs = {});
 
 }

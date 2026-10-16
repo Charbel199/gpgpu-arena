@@ -211,3 +211,16 @@ TEST_CASE("expand_grid") {
         CHECK(expand_grid({{"n", {}}}).empty());
     }
 }
+
+TEST_CASE("parse_shape") {
+    auto s = parse_shape("rows=64,cols=1024");
+    REQUIRE(s.has_value());
+    CHECK(s->size() == 2);
+    CHECK(s->at("rows") == 64);
+    CHECK(s->at("cols") == 1024);
+    CHECK(parse_shape("n=7")->at("n") == 7);
+    CHECK_FALSE(parse_shape("").has_value());
+    CHECK_FALSE(parse_shape("rows=64,rows=8").has_value());
+    CHECK_FALSE(parse_shape("rows=64,cols").has_value());
+    CHECK_FALSE(parse_shape("rows=-1").has_value());
+}
