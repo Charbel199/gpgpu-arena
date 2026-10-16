@@ -29,6 +29,7 @@ in Docker.
 
 import argparse
 import datetime as _dt
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -57,21 +58,74 @@ PROTECTED = [
 # Build products that land under protected roots and are not sources.
 UNPROTECTED_SUFFIXES = (".cubin", ".ptx", ".json", ".pyc", ".log")
 
-# Per-category sizes. "train" is what gets timed and scored. "check" is where
-# correctness is gated: odd sizes catch missing bounds checks, tiny ones catch
-# grid math, and the train size is always included. Sizes the baseline itself
-# fails on are dropped at init, so the gate never demands more than the slot
-# could ever deliver.
+# Correctness is gated on "check" shapes (a grid): odd sizes catch missing
+# bounds checks, tiny ones catch grid math. Every timed shape is checked too.
+# Checks the baseline itself fails are dropped at init, so the gate never
+# demands more than the reference kernel delivers.
 CATEGORIES = {
-    "reduce":  {"train": {"n": [67108864]},
-                "check": {"n": [1, 1000, 1000003, 16777217]}},
-    "scan":    {"train": {"n": [67108864]},
-                "check": {"n": [1, 1000, 1000003, 16777217]}},
-    "softmax": {"train": {"rows": [4096], "cols": [4096]},
-                "check": {"rows": [1, 333], "cols": [1000, 4097]}},
-    "matmul":  {"train": {"M": [4096], "N": [4096], "K": [4096]},
-                "check": {"M": [129], "N": [257], "K": [63, 512]}},
+    "reduce":    {"check": {"n": [1, 1000, 1000003, 16777217]}},
+    "scan":      {"check": {"n": [1, 1000, 1000003, 16777217]}},
+    "softmax":   {"check": {"rows": [1, 333], "cols": [1000, 4097]}},
+    "matmul":    {"check": {"M": [129], "N": [257], "K": [63, 512]}},
+    "attention": {"check": {"BH": [1, 3], "S": [1, 100, 257], "D": [64]}},
 }
+
+# Timed shapes per size regime. "small" runs from a few KB to around L2 size,
+# where launch latency and parallelism dominate; "large" is several times a
+# 128 MB L2, where DRAM bandwidth (or FLOPs) does and a kernel cannot score
+# by leaving its output in cache. "all" is both, the default when the user
+# does not say which sizes matter.
+SIZE_LADDERS = {
+    "reduce": {
+        "small": [{"n": 4096}, {"n": 262144}, {"n": 4194304}],
+        "large": [{"n": 67108864}, {"n": 134217728}],
+    },
+    "scan": {
+        "small": [{"n": 4096}, {"n": 262144}, {"n": 4194304}],
+        "large": [{"n": 67108864}],
+    },
+    "softmax": {
+        "small": [{"rows": 64, "cols": 1024}, {"rows": 1024, "cols": 1024}, {"rows": 4096, "cols": 512}],
+        "large": [{"rows": 16384, "cols": 4096}, {"rows": 4096, "cols": 16384}],
+    },
+    "matmul": {
+        "small": [{"M": 256, "N": 256, "K": 256}, {"M": 1024, "N": 1024, "K": 1024}],
+        "large": [{"M": 4096, "N": 4096, "K": 4096}],
+    },
+    "attention": {
+        "small": [{"BH": 8, "S": 128, "D": 64}, {"BH": 32, "S": 512, "D": 64}],
+        "large": [{"BH": 32, "S": 2048, "D": 64}, {"BH": 8, "S": 4096, "D": 64}],
+    },
+}
+
+
+def train_shapes(category, regime):
+    ladder = SIZE_LADDERS.get(category, {})
+    if regime == "all":
+        return list(ladder.get("small", [])) + list(ladder.get("large", []))
+    return list(ladder.get(regime, []))
+
+
+def expand_grid(lists):
+    """{"M": [1, 2], "N": [3]} -> [{"M": 1, "N": 3}, {"M": 2, "N": 3}]"""
+    out = [{}]
+    for k in sorted(lists):
+        out = [{**o, k: v} for o in out for v in lists[k]]
+    return out
+
+
+def shape_args(shapes):
+    """[{"rows": 64, "cols": 1024}] -> ["--shape", "cols=1024,rows=64"]"""
+    out = []
+    for sh in shapes:
+        out += ["--shape", ",".join(f"{k}={v}" for k, v in sorted(sh.items()))]
+    return out
+
+
+def shape_label(params):
+    return " ".join(f"{k}={v}" for k, v in params.items()) if params else "-"
+
+
 CHECK_DISTS = ["uniform", "normal", "adversarial"]
 SOL_THRESHOLDS = [0.5, 0.7, 0.8, 0.9]
 
@@ -82,9 +136,10 @@ CATEGORY_BASELINE = {
     "scan": "scan_multiblock",
     "softmax": "softmax_naive",
     "matmul": "matmul_naive",
+    "attention": "attention_naive",
 }
 DSL_EXT = {".cu": "cuda", ".triton.py": "triton", ".cutile.py": "cutile", ".warp.py": "warp"}
-DSLS = ["cuda", "triton", "cutile", "warp"]
+DSLS = ["cuda", "triton", "cutile", "warp", "mixed"]
 
 
 # --------------------------------------------------------------------------
@@ -130,6 +185,60 @@ def sol(result, env):
         out.update(bound="memory", achieved=gbps, roof=peak_bw, unit="GB/s",
                    fraction=gbps / peak_bw)
     return out
+
+
+def size_sol(result, env):
+    """SOL at one shape, against the slowest of three floors: moving the
+    ideal bytes at peak DRAM bandwidth, doing the FLOPs at peak FP32, and the
+    latency floor (an empty launch plus one cold DRAM read and one write).
+    The last is what makes small shapes scorable: at a few KB no kernel can
+    beat that latency, so it is the roof, not bandwidth. At large shapes this
+    equals the plain roofline SOL."""
+    tp = result.get("throughput", {})
+    t = result.get("timing", {})
+    median = float(t.get("op_ms") or 0.0)
+    # Interquartile mean when arena reports it: steadier than the median for
+    # microsecond kernels, whose timings cluster. Throughput is reported on
+    # the median, so bytes and FLOPs are recovered with it.
+    op = float(t.get("op_ms_trimmed") or median)
+    gbps = float(tp.get("bandwidth_gbps") or 0.0)
+    gflops = float(tp.get("gflops") or 0.0)
+    nbytes = gbps * 1e6 * median        # GB/s x ms
+    flops = gflops * 1e6 * median
+    peak_bw = float(env.get("peak_dram_gbps") or 0.0)
+    peak_fl = float(env.get("peak_fp32_gflops") or 0.0)
+    # The latency roof is the round trip (launch, one cold DRAM read, one
+    # write) when arena measured it, otherwise the empty launch.
+    latency = float(env.get("roundtrip_floor_ms") or 0.0) or float(env.get("launch_floor_ms") or 0.0)
+    floors = {
+        "memory": nbytes / (peak_bw * 1e6) if peak_bw > 0 else 0.0,
+        "compute": flops / (peak_fl * 1e6) if peak_fl > 0 else 0.0,
+        "latency": latency,
+    }
+    bound = max(floors, key=floors.get)
+    roof = floors[bound]
+    return {
+        "params": result.get("input", {}).get("params", {}),
+        "op_ms": op,
+        "gpu_ms": result.get("timing", {}).get("gpu_ms"),
+        "fraction": (roof / op) if op > 0 and roof > 0 else 0.0,
+        "bound": bound,
+        "roof_ms": roof,
+        "ideal_bytes": nbytes,
+        "flops": flops,
+    }
+
+
+def geomean(values):
+    """Geometric mean, so one shape far from its roof pulls the score down
+    instead of being averaged away. A zero counts as a tiny positive value."""
+    vals = [max(v, 1e-6) for v in values]
+    if not vals:
+        return 0.0
+    prod = 1.0
+    for v in vals:
+        prod *= v
+    return prod ** (1.0 / len(vals))
 
 
 def classify_attempt(check_results, timing_results, check_exit, timing_exit,
@@ -270,9 +379,10 @@ def diagnose(obs):
         out.append(f"achieved occupancy {c['occupancy']:.0%}: too few warps to hide latency "
                    "(grid too small, or registers/shared memory limit residency).")
 
-    if r.get("local", 0) > 0 or b.get("local_mem", 0) > 0:
-        out.append(f"{r.get('local', 0)} B of local memory per thread: register spills or a "
-                   "local array. Both go through L1/L2 and cost bandwidth.")
+    if r.get("local", 0) > 0 or r.get("stack", 0) > 0 or b.get("local_mem", 0) > 0:
+        out.append(f"{b.get('local_mem', 0)} local-memory instructions (LDL/STL) in SASS, "
+                   f"{r.get('stack', 0)} B stack: register spills or a local array. Both go through "
+                   "L1/L2 and cost bandwidth; shrink the per-thread working set.")
 
     if s.get("bound") == "memory" and frac < 0.7 and 0 < b.get("mean_global_load_bytes", 0) < 8:
         out.append(f"global loads average {b['mean_global_load_bytes']:.0f} B "
@@ -284,6 +394,14 @@ def diagnose(obs):
 
     if obs.get("category") == "matmul" and b.get("tensor", 0) == 0:
         out.append("no tensor core instructions in SASS.")
+
+    small = [p for p in obs.get("sizes", []) if p.get("bound") in ("latency", "launch")
+             and p.get("fraction", 1) < 0.5]
+    if small:
+        worst = min(small, key=lambda p: p["fraction"])
+        out.append(f"at {shape_label(worst['params'])} the kernel takes {1 / max(worst['fraction'], 1e-6):.1f}x "
+                   f"the latency floor ({worst['op_ms'] * 1000:.1f} vs {worst['roof_ms'] * 1000:.1f} us): small "
+                   "shapes pay for extra launches, block-wide syncs, idle threads and fixed setup, not bandwidth.")
 
     if frac >= 0.85:
         out.append("within 15% of the roof: further gains will be small.")
@@ -413,7 +531,9 @@ def group_key(row):
     """"cuda/isolated", or "cuda/isolated+docs" when documentation tools were
     available. Runs are only comparable within one group."""
     key = f"{row['dsl']}/{row.get('mode', 'isolated')}"
-    return key + "+docs" if row.get("docs") else key
+    key = key + "+docs" if row.get("docs") else key
+    # Iterations-to-SOL only compares within one problem.
+    return f"{row['category']}: {key}" if row.get("category") else key
 
 
 def aggregate(rows):
@@ -522,6 +642,12 @@ def render_html(runs):
                 f'<td><i class="dot" style="background:{DSL_COLORS.get(a.get("dsl"), "#888")}"></i>{_esc(a.get("dsl") or "")}</td>'
                 f'<td>{_esc(a.get("verdict"))}</td><td class="num">{sc}</td><td class="num">{op}</td>'
                 f'<td>{_esc(a.get("hypothesis", ""))}</td><td class="mono">{_esc(delta)}</td></tr>')
+            body = a.get("diff") or a.get("code")
+            if body:
+                label = (f"diff against iteration {a['diff_against']}" if a.get("diff")
+                         else f"source {_esc(Path(a.get('source_file', '')).name)}")
+                rows.append(f'<tr class="code"><td></td><td colspan="6"><details><summary>{label}</summary>'
+                            f'<pre>{_esc(body)}</pre></details></td></tr>')
         what = cfg["category"] if cfg.get("kind") == "problem" else cfg.get("kernel")
         sections.append(f"""
 <section>
@@ -568,6 +694,10 @@ th {{ color:var(--muted); font-weight:500; }}
 tr.best td {{ background:var(--best); }}
 .num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 .mono {{ font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; color:var(--muted); }}
+tr.code td {{ border-bottom:1px solid var(--line); padding-top:0; }}
+summary {{ cursor:pointer; color:var(--muted); font-size:12px; }}
+pre {{ margin:6px 0 0; padding:10px; background:var(--bg); border:1px solid var(--line); border-radius:6px;
+  font:12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x:auto; max-height:480px; }}
 </style></head>
 <body><main>
 <h1>PGAIO progression</h1>
@@ -677,24 +807,64 @@ def target_args(cfg, rel_source=None, manifest=None):
     return ["--run", cfg["kernel"]] + ovr, [cfg["kernel"]] + ovr
 
 
-def inspect_static(cfg, rel_source=None, manifest=None):
+def inspect_static(cfg, rel_source=None, manifest=None, artifacts_dir=None):
     """Compile only: the --inspect summary and the SASS text. No launch, no
-    timing, so this is free to call on any draft."""
+    timing, so this is free to call on any draft. With artifacts_dir (a path
+    under the repo), arena also copies PTX, Triton IR and Warp's generated
+    CUDA there as kernel.ptx, kernel.ttgir, kernel.warp_gen.cu."""
     _, insp_args = target_args(cfg, rel_source, manifest)
-    code, insp, _, err = arena(cfg["arena_cmd"], ["--inspect"] + insp_args)
+    extra = ["--artifacts-dir", str(Path(artifacts_dir).relative_to(REPO))] if artifacts_dir else []
+    code, insp, _, err = arena(cfg["arena_cmd"], ["--inspect"] + insp_args + extra)
     if code != 0:
         return None, "", (err or "").strip()[-3000:]
     code, _, sass_text, err = arena(cfg["arena_cmd"], ["--sass"] + insp_args)
     return insp, (sass_text if code == 0 else ""), ""
 
 
-def measure(cfg, label, rel_source=None, manifest=None):
+def copied_artifacts(insp):
+    """File names arena copied for --artifacts-dir."""
+    return [Path(x).name for x in (insp or {}).get("artifacts_copied", [])]
+
+
+def top_opcodes(insp, limit=14):
+    """The most frequent full mnemonics, e.g. LDG.E.128.CONSTANT x8."""
+    ops = (insp or {}).get("sass", {}).get("opcodes", {})
+    return sorted(ops.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+
+
+def show_lines(sass_text, prefixes, limit=80):
+    """SASS lines whose mnemonic starts with one of prefixes, in program
+    order with their addresses: where loads, barriers and stores sit relative
+    to each other, without reading the whole listing."""
+    pat = re.compile(r"/\*([0-9a-f]{4,})\*/\s+((?:@!?U?P[T0-9]+\s+)?([A-Z][A-Z0-9_.]*)[^;]*;)")
+    out = []
+    for line in sass_text.splitlines():
+        m = pat.search(line)
+        if m and any(m.group(3).startswith(p) for p in prefixes):
+            out.append(f"{m.group(1)}  {m.group(2).strip()}")
+            if len(out) >= limit:
+                out.append("...")
+                break
+    return out
+
+
+def run_shapes(cfg):
+    """(timed shapes, checked shapes), also for runs started before shapes."""
+    if "train_shapes" in cfg:
+        return cfg["train_shapes"], cfg["check_shapes"]
+    train = expand_grid(cfg.get("train_params", {}))
+    check = expand_grid(cfg.get("check_params", {}))
+    return train, check + [t for t in train if t not in check]
+
+
+def measure(cfg, label, rel_source=None, manifest=None, artifacts_dir=None):
     """Correctness gate, cold-L2 timing and SASS inspection for one candidate."""
     cmd = cfg["arena_cmd"]
     run_args, _ = target_args(cfg, rel_source, manifest)
 
     # 1. correctness over held-out sizes, distributions and seeds
-    chk_args = (run_args + params_args(cfg["check_params"]) +
+    train, check = run_shapes(cfg)
+    chk_args = (run_args + shape_args(check) +
                 ["--dist", ",".join(cfg["check_dists"]),
                  "--seed", ",".join(str(s) for s in cfg["check_seeds"]),
                  "--runs", "1", "--warmup", "1"])
@@ -706,7 +876,7 @@ def measure(cfg, label, rel_source=None, manifest=None):
     tim_results, tim_exit, env, tim_err = [], None, (chk or {}).get("environment", {}), ""
     verdict_so_far = classify_attempt(chk_results, [], chk_exit, 0, [], required)
     if verdict_so_far == "ok":
-        tim_args = (run_args + params_args(cfg["train_params"]) +
+        tim_args = (run_args + shape_args(train) +
                     ["--l2", "cold", "--runs", str(cfg.get("runs", 30))])
         if cfg.get("profile"):
             tim_args.append("--profile")
@@ -717,7 +887,7 @@ def measure(cfg, label, rel_source=None, manifest=None):
     # 3. static view of what the compiler made of it
     insp, sass_text = None, ""
     if verdict_so_far == "ok":
-        insp, sass_text, _ = inspect_static(cfg, rel_source, manifest)
+        insp, sass_text, _ = inspect_static(cfg, rel_source, manifest, artifacts_dir)
 
     return {
         "label": label,
@@ -752,11 +922,21 @@ def observe(cfg, m, guard):
         return obs
 
     rs = m["timing_results"]
-    sols = [sol(r, m["environment"]) for r in rs]
-    i = min(range(len(sols)), key=lambda k: sols[k]["fraction"])   # worst train size scores
-    r, s = rs[i], sols[i]
-    obs["score"] = s["fraction"]
-    obs["sol"] = s
+    env = dict(m["environment"])
+    # One set of floors for the whole run, recorded at init, so an
+    # iteration's score cannot move because a floor was measured a little
+    # differently.
+    for key in ("launch_floor_ms", "roundtrip_floor_ms"):
+        if cfg.get(key):
+            env[key] = cfg[key]
+    per = [size_sol(r, env) for r in rs]
+    obs["sizes"] = per
+    obs["score"] = geomean([p["fraction"] for p in per])
+    # Counters and the diagnosis describe the largest timed shape: that is
+    # where bandwidth or FLOPs are the limit and the counters say most.
+    i = max(range(len(rs)), key=lambda k: per[k]["ideal_bytes"] + per[k]["flops"])
+    r = rs[i]
+    obs["sol"] = sol(r, env)
     obs["timing"] = {k: r["timing"].get(k) for k in ("op_ms", "gpu_ms", "overhead_ms", "launch_count")}
     obs["throughput"] = r.get("throughput", {})
     obs["counters"] = r.get("counters", {})
@@ -793,6 +973,12 @@ def render(obs, it, cfg, best, baseline):
         return "\n".join(lines)
 
     t, s = obs["timing"], obs["sol"]
+    if obs.get("sizes") and len(obs["sizes"]) > 1:
+        lines.append(f"score: {obs['score']:.1%} (geometric mean of SOL over {len(obs['sizes'])} shapes)")
+        for p in obs["sizes"]:
+            lines.append(f"  {shape_label(p['params']):>16}: {p['op_ms']:.4f} ms, "
+                         f"{p['fraction']:6.1%} of the {p['bound']} roof ({p['roof_ms']:.4f} ms)")
+        lines.append("largest shape:")
     line = f"time: op {t['op_ms']:.4f} ms, gpu {t['gpu_ms']:.4f} ms, {t['launch_count']} launch(es)"
     if baseline and baseline.get("timing"):
         line += f"  | {baseline['timing']['op_ms'] / t['op_ms']:.2f}x vs baseline"
@@ -867,15 +1053,27 @@ def cmd_init(a):
         sys.exit(f"baseline {kernel} is a {category} kernel, not {a.category}")
     if not problem and not slot_source:
         sys.exit(f"{kernel} has no source slot (it is compiled into the binary)")
-    defaults = CATEGORIES.get(category, {"train": {}, "check": {}})
+    defaults = CATEGORIES.get(category, {"check": {}})
 
-    train = parse_sizes(a.train, defaults["train"])
+    if a.train:
+        train = []
+        for spec in a.train:
+            shape = {}
+            for item in spec.split(","):
+                k, _, v = item.partition("=")
+                shape[k.strip()] = int(v)
+            train.append(shape)
+        regime = "custom"
+    else:
+        train = train_shapes(category, a.sizes)
+        regime = a.sizes
+    if not train:
+        sys.exit(f"no timed shapes for category {category}; pass --train")
     check = parse_sizes(a.check, defaults["check"])
-    for k, vs in train.items():   # the train size is always checked too
-        check.setdefault(k, [])
-        for v in vs:
-            if v not in check[k]:
-                check[k].append(v)
+    check_shapes = expand_grid(check)
+    for sh in train:   # every timed shape is checked too
+        if sh not in check_shapes:
+            check_shapes.append(sh)
 
     dsls = [d.strip() for d in (a.dsls or ",".join(DSLS)).split(",") if d.strip()]
     for d in dsls:
@@ -906,7 +1104,7 @@ def cmd_init(a):
         "budget": budget, "budget_per_dsl": per_dsl,
         "target": a.target, "runs": a.runs, "mode": a.mode,
         "docs": a.docs == "on",
-        "train_params": train, "check_params": check,
+        "sizes": regime, "train_shapes": train, "check_params": check, "check_shapes": check_shapes,
         "check_dists": CHECK_DISTS,
         "check_seeds": [seed_base % 100000 + i for i in range(a.seeds)],
         "defines": {k: int(v) for k, v in (kv.split("=") for kv in (a.define or []))},
@@ -949,6 +1147,10 @@ def cmd_init(a):
     dropped = sorted({combo_key(r) for r in m["check_results"]} - {combo_key(r) for r in passing})
     cfg["required_checks"] = sorted({combo_key(r) for r in passing})
     cfg["device"] = m["environment"].get("device_name", "")
+    cfg["launch_floor_ms"] = m["environment"].get("launch_floor_ms", 0.0)
+    cfg["roundtrip_floor_ms"] = m["environment"].get("roundtrip_floor_ms", 0.0)
+    cfg["environment"] = {k: m["environment"].get(k) for k in
+                          ("peak_dram_gbps", "peak_fp32_gflops", "l2_cache_bytes", "arch", "device_name")}
     cfg["dropped_checks"] = dropped
     if not passing:
         shutil.rmtree(run_dir)
@@ -967,7 +1169,16 @@ def cmd_init(a):
     record(run_dir, cfg, 0, base_copy, f"baseline: {kernel} as it is in the repo"
            if problem else "baseline: the slot's own source", obs, m, insp.get("dsl"))
 
+    update_journal(run_dir, cfg)
+    l2 = m["environment"].get("l2_cache_bytes") or 0
+    ideal = obs.get("ideal_bytes") or 0
+    if l2 and ideal and ideal < 2 * l2:
+        print(f"WARNING: the timed working set is {ideal / 1e6:.0f} MB against a "
+              f"{l2 / 1e6:.0f} MB L2. Output can stay in cache through the timed loop and "
+              f"flatter SOL; pass a larger --train size.")
     print(f"run: {run_dir.relative_to(REPO)}  (draft candidates in {(run_dir / 'work').relative_to(REPO)}/)")
+    print(f"journal: {(run_dir / 'journal.md').relative_to(REPO)}  "
+          f"progression: {(run_dir / 'progress.html').relative_to(REPO)} (both update after every eval)")
     if problem:
         print(f"problem: {category}, DSLs {', '.join(dsls)}, baseline {kernel} "
               f"({cfg['start_source']}); candidates are manifests (see the arena-optimize skill)")
@@ -1014,10 +1225,29 @@ def resolve_candidate(path):
     return src.resolve()
 
 
-def snapshot_manifest(manifest_path, dest_dir):
+def manifest_dsl(manifest_path):
+    """The DSL a manifest counts against: its source's, or "mixed" when its
+    launches use sources in different DSLs."""
+    try:
+        spec = json.loads(Path(manifest_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    used = {dsl_of(spec.get("source", ""))}
+    for launch in spec.get("launches", []):
+        if "source" in launch:
+            used.add(dsl_of(launch["source"]))
+    used.discard(None)
+    if len(used) > 1:
+        return "mixed"
+    return used.pop() if used else None
+
+
+def snapshot_manifest(manifest_path, dest_dir, name=None, description=None):
     """Copies a manifest and the source it names into dest_dir, with the
     copy's "source" pointing at the copied file, so the snapshot is
     self-contained and later edits to the draft cannot change history.
+    `name` and `description`, when given, replace the draft's, so the
+    snapshot lists as "<run>/<iteration>-<file>" wherever it is opened.
     Returns (manifest copy, dsl)."""
     try:
         spec = json.loads(manifest_path.read_text())
@@ -1036,9 +1266,47 @@ def snapshot_manifest(manifest_path, dest_dir):
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest_dir / src.name)
     spec["source"] = src.name
+    if name:
+        spec["name"] = name
+    if description:
+        spec["description"] = description
+    dsls_used = {dsl}
+    # Launches may name their own sources (several DSL kernels, or dispatch
+    # across DSLs); those are copied too, so the snapshot is self-contained.
+    for launch in spec.get("launches", []):
+        if "source" not in launch:
+            continue
+        ls = Path(launch["source"])
+        if not ls.is_absolute():
+            ls = manifest_path.parent / ls
+        if not ls.exists():
+            sys.exit(f"launch source not found: {ls} (this did not count as an iteration)")
+        shutil.copy2(ls, dest_dir / ls.name)
+        launch["source"] = ls.name
+        dsls_used.add(dsl_of(ls.name))
+    # A candidate that dispatches across DSLs is its own kind, with its own
+    # budget, rather than being charged to whichever file is listed first.
+    if len(dsls_used) > 1:
+        dsl = "mixed"
     out = dest_dir / manifest_path.name
     out.write_text(json.dumps(spec, indent=2))
     return out, dsl
+
+
+def candidate_name(run_dir, it, manifest):
+    """How a measured candidate is listed in arena (--open, the GUI)."""
+    return f"{run_dir.name}/{it:03d}-{Path(manifest).stem}"
+
+
+def describe_snapshot(snap, it, dsl, hypothesis, obs):
+    """Puts the iteration's outcome in the snapshot's description, which the
+    GUI shows when hovering the kernel."""
+    spec = json.loads(snap.read_text())
+    outcome = obs.get("verdict", "?")
+    if obs.get("score") is not None:
+        outcome += f", score {obs['score']:.1%} of SOL"
+    spec["description"] = f"PGAIO iteration {it} ({dsl}): {outcome}. {hypothesis}"
+    snap.write_text(json.dumps(spec, indent=2))
 
 
 def best_of(run_dir, attempts, dsl=None):
@@ -1061,7 +1329,7 @@ def cmd_eval(a):
         if not src.name.endswith(".json"):
             sys.exit("a problem run evaluates manifests: pass the .json that names the source "
                      "(this did not count as an iteration)")
-        dsl = dsl_of(json.loads(src.read_text()).get("source", "")) if src.exists() else None
+        dsl = manifest_dsl(src)
     else:
         dsl = cfg["dsl"]
         want = candidate_ext(cfg["slot_source"])
@@ -1074,7 +1342,9 @@ def cmd_eval(a):
 
     slug = f"{it:03d}_{slugify(a.hypothesis)}"
     if problem:
-        snap, dsl = snapshot_manifest(src, run_dir / "candidates" / slug)
+        snap, dsl = snapshot_manifest(src, run_dir / "candidates" / slug,
+                                      name=candidate_name(run_dir, it, src),
+                                      description=a.hypothesis)
         target = {"manifest": str(snap.relative_to(REPO))}
     else:
         snap = run_dir / "candidates" / f"{slug}{candidate_ext(src.name)}"
@@ -1088,7 +1358,8 @@ def cmd_eval(a):
         m.update(check_exit=None, timing_exit=None, check_stderr="", timing_stderr="",
                  environment={}, sass_text="")
     else:
-        m = measure(cfg, f"iter {it}", **target)
+        (run_dir / "obs" / f"{it:03d}").mkdir(parents=True, exist_ok=True)
+        m = measure(cfg, f"iter {it}", artifacts_dir=run_dir / "obs" / f"{it:03d}", **target)
     obs = observe(cfg, m, guard)
     obs["iteration"] = it
     obs["dsl"] = dsl
@@ -1103,6 +1374,9 @@ def cmd_eval(a):
             obs["best_dsl"] = best_att.get("dsl")
 
     record(run_dir, cfg, it, snap, a.hypothesis, obs, m, dsl)
+    if problem:
+        describe_snapshot(snap, it, dsl, a.hypothesis, obs)
+    update_journal(run_dir, cfg)
     print(render(obs, it, cfg, best_obs, base_obs))
     attempts.append({"iteration": it, "dsl": dsl})
     used = len([x for x in attempts if x.get("iteration", 0) > 0])
@@ -1115,41 +1389,56 @@ def cmd_eval(a):
     print(f"\n{left}" + ("; target reached, you may stop" if reached else ""))
     print(f"snapshot: {snap.relative_to(REPO)}   full observation: "
           f"{(run_dir / 'obs' / f'{it:03d}.json').relative_to(REPO)}")
+    print(f"journal: {(run_dir / 'journal.md').relative_to(REPO)}   "
+          f"progression: {(run_dir / 'progress.html').relative_to(REPO)}")
 
 
 def cmd_sass(a):
     """Free: how a draft compiled, against the best so far. Never timed."""
     run_dir, cfg = load_run(a.run)
     src = resolve_candidate(a.candidate)
+    n = sum(1 for d in (run_dir / "inspections").iterdir() if d.is_dir())
+    out = run_dir / "inspections" / f"{n:03d}_{src.stem}"
+    # Created here, not by arena: inside Docker arena runs as root, and files
+    # in a root-owned folder could not be cleaned up from the host.
+    out.mkdir(parents=True, exist_ok=True)
     if cfg.get("kind") == "problem":
-        n = sum(1 for d in (run_dir / "inspections").iterdir() if d.is_dir())
-        snap, dsl = snapshot_manifest(src, run_dir / "inspections" / f"{n:03d}_{src.stem}")
-        insp, sass_text, err = inspect_static(cfg, manifest=str(snap.relative_to(REPO)))
+        snap, dsl = snapshot_manifest(src, out)
+        insp, sass_text, err = inspect_static(cfg, manifest=str(snap.relative_to(REPO)), artifacts_dir=out)
     else:
-        n = sum(1 for d in (run_dir / "inspections").iterdir() if d.is_dir())
         dsl = cfg["dsl"]
         rel = str(src.relative_to(REPO)) if src.is_relative_to(REPO) else str(src)
-        insp, sass_text, err = inspect_static(cfg, rel_source=rel)
+        insp, sass_text, err = inspect_static(cfg, rel_source=rel, artifacts_dir=out)
     if insp is None:
         print(f"did not compile:\n{err}")
         sys.exit(2)
-    out = run_dir / "inspections" / f"{n:03d}_{src.stem}"
     out.mkdir(parents=True, exist_ok=True)
     (out / "inspect.json").write_text(json.dumps(insp, indent=1))
     (out / "kernel.sass").write_text(sass_text)
+    extra = copied_artifacts(insp)
     append_jsonl(run_dir / "inspections.jsonl", {"time": now(), "draft": str(src), "dsl": dsl,
                                                  "sass": sass_brief(insp)})
 
     brief = sass_brief(insp)
     r = insp.get("resources", {})
     print(f"{dsl} draft {src.name}: compiled (not timed, not counted)")
-    print(f"resources: {r.get('registers')} regs, {r.get('shared')} B shared, {r.get('local')} B local")
+    print(f"resources: {r.get('registers')} regs, {r.get('shared')} B shared, {r.get('local')} B local, "
+          f"{r.get('stack')} B stack")
+    if brief["local_mem"]:
+        print(f"SPILLS: {brief['local_mem']} local-memory instructions (LDL/STL) in SASS: registers are "
+              "spilling; shrink the tile or raise num_warps before measuring")
     print(f"SASS: {brief['instructions']} instr, {brief['global_loads']} global loads (mean "
           f"{brief['mean_global_load_bytes']:.0f} B), {brief['global_atomic']} global atomics, "
           f"{brief['warp_shuffle']} shuffles, {brief['warp_reduce']} warp reduces, "
           f"{brief['shared_mem']} shared ops, {brief['sync']} syncs, {brief['tensor']} tensor")
     for e in insp.get("entries", []):
         print(f"  entry {e['entry']}: {e['instructions']} instr, {e['registers']} regs")
+    print("top opcodes: " + ", ".join(f"{op} x{c}" for op, c in top_opcodes(insp)))
+    if a.show:
+        prefixes = [x.strip().upper() for x in a.show.split(",") if x.strip()]
+        print(f"SASS lines starting with {', '.join(prefixes)}, in program order:")
+        for line in show_lines(sass_text, prefixes):
+            print("  " + line)
     best_att, best_obs = best_of(run_dir, load_attempts(run_dir))
     if best_obs:
         d = sass_delta(brief, best_obs.get("sass"))
@@ -1157,7 +1446,216 @@ def cmd_sass(a):
               (", ".join(f"{k} {v:+d}" for k, v in d.items()) or "same instruction mix"))
         best_sass = run_dir / "obs" / f"{best_att['iteration']:03d}.sass"
         print(f"diff the SASS: diff {best_sass.relative_to(REPO)} {(out / 'kernel.sass').relative_to(REPO)}")
-    print(f"saved: {out.relative_to(REPO)}/")
+    print(f"saved: {out.relative_to(REPO)}/ (kernel.sass, inspect.json"
+          + "".join(", " + x for x in extra) + ")")
+
+
+API_LOOKUP = r"""
+import importlib, inspect, sys
+dsl, name = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
+roots = {"triton": ["triton.language", "triton"], "cutile": ["cuda.tile"], "warp": ["warp"]}[dsl]
+mods = [importlib.import_module(r) for r in roots]
+if not name:
+    names = sorted({n for m in mods for n in dir(m) if not n.startswith("_")})
+    print(" ".join(names))
+    sys.exit(0)
+obj = None
+for m in mods:
+    o = m
+    try:
+        for part in name.split("."):
+            o = getattr(o, part)
+        obj = o
+        break
+    except AttributeError:
+        continue
+doc = ""
+if dsl == "warp":
+    for path in ("warp._src.context", "warp.context"):
+        try:
+            b = importlib.import_module(path).builtin_functions
+            if name in b:
+                f = b[name]
+                doc = getattr(f, "doc", "") or ""
+                for ov in getattr(f, "overloads", [])[:6]:
+                    print("overload:", name, getattr(ov, "input_types", ""))
+            break
+        except Exception:
+            pass
+if obj is None and not doc:
+    print(f"{name}: not found in {', '.join(roots)}")
+    sys.exit(1)
+if obj is not None:
+    try:
+        print(f"{name}{inspect.signature(obj)}")
+    except (TypeError, ValueError):
+        print(name)
+    doc = doc or inspect.getdoc(obj) or ""
+print(doc[:6000] if doc else "(no docstring)")
+"""
+
+
+def cmd_api(a):
+    """Free: a DSL's own signature and docstring, from the installed version
+    inside the arena environment, so the answer matches what will compile."""
+    arena_cmd = a.arena or os.environ.get("ARENA_CMD") or DEFAULT_ARENA_CMD
+    if "docker compose" in arena_cmd:
+        base = ["docker", "compose", "run", "--rm", "-T", "--entrypoint", "python3",
+                "-e", "PYTHONPATH=/workspace/gpgpu-arena/kernels", "cli"]
+    else:
+        base = [sys.executable]
+    args = base + ["-c", API_LOOKUP, a.dsl] + ([a.name] if a.name else [])
+    p = subprocess.run(args, cwd=REPO, capture_output=True, text=True, timeout=600)
+    noise = ("Container ", "Warp ", "   CUDA Toolkit", "   Devices", '     "cpu"', '     "cuda:0"',
+             "   Kernel cache", "   CUDA")
+    out = "\n".join(l for l in p.stdout.splitlines() if not l.startswith(noise))
+    print(out.strip() or p.stderr.strip()[-2000:])
+    sys.exit(p.returncode)
+
+
+def candidate_source(run_dir, attempt):
+    """The kernel source behind an attempt: the candidate file in a slot run,
+    the non-manifest file of the candidate folder in a problem run."""
+    p = REPO / attempt.get("candidate", "")
+    if p.is_file() and not p.name.endswith(".json"):
+        return p
+    folder = p if p.is_dir() else p.parent
+    if folder.is_dir():
+        for f in sorted(folder.iterdir()):
+            if f.is_file() and not f.name.endswith(".json") and dsl_of(f.name):
+                return f
+    return None
+
+
+def source_diff(old_text, new_text, old_name, new_name, limit=200):
+    lines = list(difflib.unified_diff(old_text.splitlines(), new_text.splitlines(),
+                                      old_name, new_name, lineterm="", n=2))
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"... {len(lines) - limit} more lines"]
+    return "\n".join(lines)
+
+
+def annotate_code(run_dir, attempts):
+    """Adds "code" and "diff" to each attempt: its source, and the change
+    against the previous attempt in the same DSL (the baseline for the first
+    CUDA attempt), which is what reading the run as a progression needs."""
+    last = {}
+    out = []
+    for a in attempts:
+        a = dict(a)
+        src = candidate_source(run_dir, a)
+        text = src.read_text(errors="replace") if src else ""
+        a["code"] = text
+        a["source_file"] = str(src.relative_to(REPO)) if src else ""
+        prev = last.get(a.get("dsl"))
+        if prev is not None and text:
+            a["diff"] = source_diff(prev[1], text, prev[0], a["source_file"])
+            a["diff_against"] = prev[2]
+        if text:
+            last[a.get("dsl")] = (a["source_file"], text, a["iteration"])
+        out.append(a)
+    return out
+
+
+def update_journal(run_dir, cfg):
+    """Rewrites journal.md and progress.html from the attempt log, so both
+    are always complete and can be watched while a run is going."""
+    attempts = annotate_code(run_dir, load_attempts(run_dir))
+    insp = []
+    p = run_dir / "inspections.jsonl"
+    if p.exists():
+        insp = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+
+    what = cfg["category"] if cfg.get("kind") == "problem" else cfg["kernel"]
+    curve = best_so_far(attempts)
+    lines = [f"# PGAIO journal: {what}", "",
+             f"Run `{cfg['name']}` on {cfg.get('device', '')}. Mode {cfg.get('mode', 'isolated')}, "
+             f"docs {'on' if cfg.get('docs') else 'off'}, target {cfg['target']:.0%} SOL. "
+             f"Best so far {curve[-1]:.1%} after {len(attempts) - 1} iteration(s), "
+             f"{len(insp)} free SASS inspection(s). Live view: [progress.html](progress.html).", ""]
+    for hc in cfg.get("harness_changes", []):
+        lines.append(f"> Harness changed after iteration {hc['after_iteration']}: {hc['reason']} "
+                     f"({', '.join(hc['files'])})")
+        lines.append("")
+    times = [a.get("time", "") for a in attempts]
+    for i, a in enumerate(attempts):
+        sc = f"{a['score']:.1%}" if a.get("score") is not None else "-"
+        best = " (new best)" if a.get("new_best") else ""
+        lines.append(f"## {a['iteration']}. {a.get('dsl') or ''}: {a['verdict']}, SOL {sc}{best}")
+        lines.append("")
+        lines.append(a.get("hypothesis", ""))
+        lines.append("")
+        if a.get("op_ms"):
+            lines.append(f"op {a['op_ms']:.4f} ms, gpu {a.get('gpu_ms') or 0:.4f} ms.")
+        if a.get("error"):
+            lines.append(f"Error: `{a['error'][:200]}`")
+        if a.get("source_file"):
+            rel = os.path.relpath(REPO / a["source_file"], run_dir)
+            lines.append(f"Source: [{Path(a['source_file']).name}]({rel}). "
+                         f"Observation: [obs/{a['iteration']:03d}.json](obs/{a['iteration']:03d}.json).")
+        # drafts inspected between the previous eval and this one
+        lo = times[i - 1] if i > 0 else ""
+        drafts = [Path(x["draft"]).name for x in insp if lo < x.get("time", "") <= times[i]]
+        if drafts:
+            lines.append(f"Inspected before this eval: {', '.join(drafts)}.")
+        if a.get("diff"):
+            lines += ["", f"<details><summary>diff against iteration {a['diff_against']}</summary>",
+                      "", "```diff", a["diff"], "```", "", "</details>"]
+        lines.append("")
+    (run_dir / "journal.md").write_text("\n".join(lines))
+    (run_dir / "progress.html").write_text(render_html([(cfg, attempts)]))
+
+
+def cmd_rehash(a):
+    """Accepts the current harness for this run after a deliberate change to
+    arena or pgaio by its maintainer. Recorded in run.json and the journal,
+    so it is never silent. Not for an optimizing agent: a candidate that
+    needs a harness change has to say so instead."""
+    run_dir, cfg = load_run(a.run)
+    now_hashes = hash_protected()
+    changed = guard_violations(cfg["protected_hashes"], now_hashes)
+    if not changed:
+        print("nothing changed")
+        return
+    cfg["protected_hashes"] = now_hashes
+    cfg.setdefault("harness_changes", []).append(
+        {"time": now(), "after_iteration": len(load_attempts(run_dir)) - 1,
+         "reason": a.reason, "files": changed})
+    (run_dir / "run.json").write_text(json.dumps(cfg, indent=2))
+    update_journal(run_dir, cfg)
+    print(f"accepted {len(changed)} harness change(s): {', '.join(changed)}")
+
+
+def cmd_rescore(a):
+    """Recomputes every iteration's score from its stored raw timings with the
+    run's current scoring settings, e.g. after fixing the launch floor."""
+    run_dir, cfg = load_run(a.run)
+    if a.launch_floor:
+        cfg["launch_floor_ms"] = a.launch_floor
+        (run_dir / "run.json").write_text(json.dumps(cfg, indent=2))
+    attempts = load_attempts(run_dir)
+    best = None
+    for att in attempts:
+        p = run_dir / "obs" / f"{att['iteration']:03d}.json"
+        if not p.exists() or att.get("verdict") != "ok":
+            continue
+        obs = json.loads(p.read_text())
+        raw = obs.get("raw", {}).get("timing_results", [])
+        if not raw:
+            continue
+        env = {**cfg.get("environment", {}), "launch_floor_ms": cfg.get("launch_floor_ms", 0.0),
+               "roundtrip_floor_ms": cfg.get("roundtrip_floor_ms", 0.0)}
+        per = [size_sol(r, env) for r in raw]
+        old = att.get("score")
+        att["score"] = obs["score"] = geomean([x["fraction"] for x in per])
+        obs["sizes"] = per
+        p.write_text(json.dumps(obs, indent=1))
+        att["new_best"] = best is None or att["score"] > best
+        best = att["score"] if att["new_best"] else best
+        print(f"iteration {att['iteration']}: {old:.1%} -> {att['score']:.1%}" if old is not None
+              else f"iteration {att['iteration']}: {att['score']:.1%}")
+    (run_dir / "attempts.jsonl").write_text("".join(json.dumps(x) + "\n" for x in attempts))
+    update_journal(run_dir, cfg)
 
 
 def cmd_compare(a):
@@ -1308,7 +1806,7 @@ def cmd_report(a):
             cfg = json.loads(cfg_path.read_text())
             attempts = load_attempts(cfg_path.parent)
             if attempts:
-                runs.append((cfg, attempts))
+                runs.append((cfg, annotate_code(cfg_path.parent, attempts)))
         Path(a.html).write_text(render_html(runs))
         print(f"\nprogression page written to {a.html}")
 
@@ -1330,9 +1828,14 @@ def main(argv=None):
                    help="total iterations after the baseline (default: per-DSL budget x DSLs, "
                         "or 20 for a slot run)")
     i.add_argument("--target", type=float, default=0.9, help="SOL fraction to aim for")
-    i.add_argument("--runs", type=int, default=30, help="timed runs per measurement")
+    i.add_argument("--runs", type=int, default=100,
+                   help="timed runs per shape; many, because microsecond timings are noisy")
     i.add_argument("--seeds", type=int, default=2, help="held-out seeds per check")
-    i.add_argument("--train", action="append", help="timed size, e.g. n=67108864 (repeatable)")
+    i.add_argument("--sizes", choices=["small", "large", "all"], default="all",
+                   help="which sizes to optimize for: small (latency and parallelism), large "
+                        "(several times L2: bandwidth or FLOPs) or all (default)")
+    i.add_argument("--train", action="append",
+                   help="an explicit timed shape instead of --sizes, e.g. rows=64,cols=1024 (repeatable)")
     i.add_argument("--check", action="append", help="checked sizes, e.g. n=1,1000003")
     i.add_argument("--define", action="append", help="compile define KEY=n for the slot")
     i.add_argument("--start", help="source to start from instead of the slot's own "
@@ -1357,7 +1860,25 @@ def main(argv=None):
     x = sub.add_parser("sass", help="compile a draft and show its SASS mix; free, never timed")
     x.add_argument("run")
     x.add_argument("candidate", help="a manifest (problem run) or a source (slot run)")
+    x.add_argument("--show", help="also list SASS lines whose mnemonic starts with these, "
+                   "comma separated, e.g. LDG,STG,BAR")
     x.set_defaults(fn=cmd_sass)
+
+    ap = sub.add_parser("api", help="look up a DSL's Python API inside the arena container; free")
+    ap.add_argument("dsl", choices=["triton", "cutile", "warp"])
+    ap.add_argument("name", nargs="?", help="e.g. load, tile_load, language.max; omit to list names")
+    ap.add_argument("--arena", help="command that runs arena, as for init")
+    ap.set_defaults(fn=cmd_api)
+
+    rh = sub.add_parser("rehash", help="accept a deliberate harness change for a run (maintainers only, recorded)")
+    rh.add_argument("run")
+    rh.add_argument("--reason", required=True)
+    rh.set_defaults(fn=cmd_rehash)
+
+    rs = sub.add_parser("rescore", help="recompute scores from stored timings (e.g. after fixing the launch floor)")
+    rs.add_argument("run")
+    rs.add_argument("--launch-floor", type=float, help="launch floor in ms to use from now on")
+    rs.set_defaults(fn=cmd_rescore)
 
     c = sub.add_parser("compare", help="two measured iterations side by side; free")
     c.add_argument("run")
