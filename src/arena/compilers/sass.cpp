@@ -85,7 +85,8 @@ const char* class_of(const std::string& op) {
         b == "BSYNC" || b == "DEPBAR") return "sync";
     if (b == "HMMA" || b == "IMMA" || b == "QMMA" || b == "OMMA" || b == "DMMA" ||
         b == "HGMMA" || b == "UTCHMMA" || b == "UTCQMMA" || b == "UTCOMMA" ||
-        b == "UTCIMMA" || b == "UTCMMA") return "tensor";
+        b == "UTCIMMA" || b == "UTCMMA" || b == "BMMA" || b == "IGMMA" ||
+        b == "QGMMA" || b == "BGMMA") return "tensor";
     if (b == "FFMA" || b == "FADD" || b == "FMUL" || b == "FMNMX" || b == "FSETP" ||
         b == "FFMA2" || b == "FADD2" || b == "FMUL2" || b == "MUFU" || b == "FSEL" ||
         b == "FCHK" || b == "FRND") return "fp32";

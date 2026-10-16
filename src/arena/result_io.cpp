@@ -32,6 +32,7 @@ json to_json(const RunResult& r) {
     j["description"] = r.description;
     j["source"]      = r.source;
     j["uses_module"] = r.uses_module;
+    j["reference"]   = r.reference;
 
     j["input"] = {
         {"params",       r.params},
@@ -45,6 +46,7 @@ json to_json(const RunResult& r) {
         {"block", {r.block_x, r.block_y, r.block_z}},
         {"grid",  {r.grid_x,  r.grid_y,  r.grid_z}},
         {"shared_mem_bytes", r.shared_mem_bytes},
+        {"scratch_policy", r.scratch_policy},
     };
 
     // Tier 1: per-invocation. These are the only figures comparable as ms/op.
@@ -87,7 +89,12 @@ json to_json(const RunResult& r) {
         {"dram_read_gbps",  r.counters.dram_read_gbps},
         {"dram_write_gbps", r.counters.dram_write_gbps},
         {"ipc",             r.counters.ipc},
+        {"counters_level",  r.counters.level},
     };
+    // --counters full. Each key is present only if the chip measured it.
+    for (const auto& [key, value] : r.counters.extra) j["counters"][key] = value;
+    if (!r.counters.pipes.empty())  j["counters"]["pipes"]  = r.counters.pipes;
+    if (!r.counters.stalls.empty()) j["counters"]["stalls"] = r.counters.stalls;
 
     j["energy"] = {
         {"available",  r.energy.available},
@@ -117,6 +124,13 @@ json to_json(const RunResult& r) {
         {"warmup_stop",        r.warmup_stop},
         {"sm_clock_start_mhz", r.sm_clock_start_mhz},
         {"sm_clock_end_mhz",   r.sm_clock_end_mhz},
+        // Sampled across the timed runs only.
+        {"sm_clock_mean_mhz",  r.sm_clock_mean_mhz},
+        {"sm_clock_min_mhz",   r.sm_clock_min_mhz},
+        {"sm_clock_max_mhz",   r.sm_clock_max_mhz},
+        {"power_mean_w",       r.power_mean_w},
+        {"power_max_w",        r.power_max_w},
+        {"clock_samples",      r.clock_samples},
     };
 
     j["sub_kernels"] = json::array();
@@ -127,6 +141,17 @@ json to_json(const RunResult& r) {
             {"start_offset_ms", sk.start_offset_ms},
             {"registers",   sk.registers},
             {"shared_mem",  sk.shared_memory},
+        });
+    }
+
+    // The same launches grouped by kernel, so a library call shows which
+    // kernels it dispatched and where the time went.
+    j["launched_kernels"] = json::array();
+    for (const auto& lk : r.launched_kernels) {
+        j["launched_kernels"].push_back({
+            {"name",         lk.name},
+            {"count_per_op", lk.count_per_op},
+            {"gpu_ms",       lk.gpu_ms},
         });
     }
 
@@ -154,6 +179,10 @@ json environment_json(const Context& ctx, const PowerMonitor& power) {
     j["repo_root"]           = ARENA_SOURCE_DIR;
     j["peak_dram_gbps"]      = ctx.peak_dram_gbps();
     j["peak_fp32_gflops"]    = ctx.peak_fp32_gflops();
+    // The clock peak_fp32_gflops assumes, next to the highest the board can
+    // reach, so a run at a locked or boosted clock can be rescaled.
+    j["peak_fp32_gflops_at_mhz"] = ctx.clock_rate_khz() / 1000;
+    j["max_sm_clock_mhz"]    = power.max_sm_clock_mhz();
     // Measured once per process, on first use.
     static const float launch_floor = measure_launch_floor_ms();
     static const float roundtrip_floor = measure_roundtrip_floor_ms();
@@ -163,6 +192,14 @@ json environment_json(const Context& ctx, const PowerMonitor& power) {
     j["cuda_toolkit_version"] = CUDA_VERSION;
     j["nvml_available"]      = power.available();
     j["sm_clock_now_mhz"]    = power.sm_clock_mhz();
+    const auto& lock = power.clock_lock();
+    if (lock.requested) {
+        j["clock_lock"] = {
+            {"requested_mhz", lock.requested_mhz},
+            {"applied",       lock.applied},
+            {"error",         lock.error},
+        };
+    }
     return j;
 }
 

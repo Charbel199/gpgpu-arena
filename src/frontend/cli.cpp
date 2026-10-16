@@ -31,6 +31,8 @@ struct CliOptions {
     // Inspection modes: compile one kernel and describe it instead of running.
     enum class Inspect { None, Summary, Sass, Ptx };
     Inspect inspect = Inspect::None;
+    bool run = false;
+    bool plan = false;                // resolve a manifest's launches, no GPU work
 
     // Every combination of these runs, so one invocation can cover several
     // sizes, input distributions and seeds. A single value is the usual case.
@@ -75,6 +77,7 @@ CliOptions parse_args(int argc, char** argv) {
         } else if (arg_is(a, "--run")) {
             if (!take_value(argc, argv, i, "--run", v, o)) return o;
             o.selector = v;
+            o.run = true;
         } else if (arg_is(a, "--inspect") || arg_is(a, "--sass") || arg_is(a, "--ptx")) {
             const char* flag = a;
             // The kernel name is optional here, for use with --manifest.
@@ -82,6 +85,17 @@ CliOptions parse_args(int argc, char** argv) {
             o.inspect = arg_is(flag, "--inspect") ? CliOptions::Inspect::Summary
                       : arg_is(flag, "--sass")    ? CliOptions::Inspect::Sass
                                                   : CliOptions::Inspect::Ptx;
+        } else if (arg_is(a, "--plan")) {
+            o.plan = true;
+        } else if (arg_is(a, "--scratch-policy")) {
+            if (!take_value(argc, argv, i, "--scratch-policy", v, o)) return o;
+            auto p = arena::cli::parse_scratch_policy(v);
+            if (!p) {
+                o.ok = false;
+                o.error = "unknown --scratch-policy '" + v + "' (expected legacy or declared)";
+                return o;
+            }
+            o.config.scratch_policy = *p;
         } else if (arg_is(a, "--shape")) {
             if (!take_value(argc, argv, i, "--shape", v, o)) return o;
             auto shape = arena::cli::parse_shape(v);
@@ -184,6 +198,25 @@ CliOptions parse_args(int argc, char** argv) {
             o.config.sweep_factor = std::atof(v.c_str());
         } else if (arg_is(a, "--profile")) {
             o.config.collect_metrics = true;
+        } else if (arg_is(a, "--counters")) {
+            if (!take_value(argc, argv, i, "--counters", v, o)) return o;
+            if (v != "basic" && v != "full") {
+                o.ok = false;
+                o.error = "unknown --counters '" + v + "' (expected basic or full)";
+                return o;
+            }
+            o.config.counter_level = (v == "full")
+                ? arena::RunConfig::CounterLevel::Full
+                : arena::RunConfig::CounterLevel::Basic;
+            if (v == "full") o.config.collect_metrics = true;
+        } else if (arg_is(a, "--lock-clocks")) {
+            // applied by main, right after NVML comes up
+            if (!take_value(argc, argv, i, "--lock-clocks", v, o)) return o;
+            if (!arena::cli::parse_lock_clocks(v)) {
+                o.ok = false;
+                o.error = "malformed --lock-clocks '" + v + "' (expected MHz or auto)";
+                return o;
+            }
         } else if (arg_is(a, "--energy")) {
             o.config.collect_energy = true;
         } else if (arg_is(a, "--runs")) {
@@ -203,6 +236,11 @@ CliOptions parse_args(int argc, char** argv) {
             o.error = std::string("unknown option '") + a + "'";
             return o;
         }
+    }
+    if (o.plan) {
+        o.error = arena::cli::plan_args_error(!o.manifest.empty(), o.run, o.list,
+                                              o.inspect != CliOptions::Inspect::None);
+        o.ok = o.error.empty();
     }
     return o;
 }
@@ -363,7 +401,8 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
         j["category"]        = k.category();
         j["description"]     = k.description();
         j["dsl"]             = dsl;
-        j["source"]          = abs_kernel_source(k);
+        j["reference"]       = k.reference();
+        j["source"]        = abs_kernel_source(k);
         j["slot_source"]     = k.source_path().empty() ? "" : arena::resolve_source(ARENA_KERNEL_DIR, k.source_path());
         j["descriptor_file"] = k.descriptor_file();
         j["source_override"] = k.source_override();
@@ -450,13 +489,58 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
     }
 }
 
+// --plan: compiles the manifest's sources, then for each problem shape
+// resolves every launch the way a run would, without allocating or
+// launching. Exit 0 if every shape resolved, 1 if any has an error, 2 if a
+// source does not compile.
+int run_plan(arena::Runner& runner, arena::KernelDescriptor& k, const CliOptions& o,
+             const std::vector<std::map<std::string, int>>& param_sets, bool to_stdout) {
+    auto* minfo = dynamic_cast<arena::ManifestInfo*>(&k);
+    if (!minfo) {
+        std::cerr << "Error: --plan needs a manifest kernel\n";
+        return static_cast<int>(CliExit::UsageError);
+    }
+    try {
+        k.set_compile_options(o.config.compile_options);
+        k.set_compile_result(runner.compiler().compile(k.effective_source_path(), k.compile_options()));
+        std::map<std::string, arena::CompileResult> extra;
+        for (const auto& src : k.extra_sources()) extra[src] = runner.compiler().compile(src);
+        if (!extra.empty()) k.set_extra_compile_results(extra);
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return static_cast<int>(CliExit::RunError);
+    }
+
+    json j = {{"plans", json::array()}, {"ok", true}};
+    for (const auto& params : param_sets) {
+        k.set_problem_size(params);
+        auto p = minfo->plan(runner.mutable_context());
+        if (!p["error"].get<std::string>().empty()) j["ok"] = false;
+        j["plans"].push_back(std::move(p));
+    }
+
+    std::ostream* out = &std::cout;
+    std::ofstream file;
+    if (!to_stdout) {
+        file.open(o.output);
+        if (!file) {
+            std::cerr << "Error: cannot write " << o.output << "\n";
+            return static_cast<int>(CliExit::UsageError);
+        }
+        out = &file;
+    }
+    *out << j.dump(2) << std::endl;
+    return j["ok"].get<bool>() ? 0 : 1;
+}
+
 }   // namespace
 
 bool wants_cli(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (arg_is(argv[i], "--list") || arg_is(argv[i], "--run") ||
             arg_is(argv[i], "--inspect") || arg_is(argv[i], "--sass") ||
-            arg_is(argv[i], "--ptx") || arg_is(argv[i], "--manifest")) return true;
+            arg_is(argv[i], "--ptx") || arg_is(argv[i], "--manifest") ||
+            arg_is(argv[i], "--plan")) return true;
     }
     return false;
 }
@@ -478,7 +562,8 @@ void print_cli_usage(const char* program) {
         "Headless mode:\n"
         "  " << program << " --list\n"
         "  " << program << " --run <kernel|category|all> [options]\n"
-        "  " << program << " --inspect|--sass|--ptx <kernel> [options]\n\n"
+        "  " << program << " --inspect|--sass|--ptx <kernel> [options]\n"
+        "  " << program << " --plan --manifest <file.json> [--shape k=v,...]\n\n"
         "Options:\n"
         "  --list                    List kernels and categories as JSON, then exit\n"
         "  --run <selector>          Kernel name, category name, or 'all'\n"
@@ -493,6 +578,15 @@ void print_cli_usage(const char* program) {
         "  --manifest <file.json>    Run, or with --inspect/--sass/--ptx describe, a kernel\n"
         "                            defined by a JSON manifest instead of a C++\n"
         "                            descriptor\n"
+        "  --plan                    With --manifest: compile, then print as JSON what\n"
+        "                            each --shape would launch (scratch sizes, grid,\n"
+        "                            block, shared memory, arguments) without allocating\n"
+        "                            or launching. Exit 0 if every shape resolves, 1 if\n"
+        "                            any has an error\n"
+        "  --scratch-policy <p>      legacy (default): manifest scratch is zeroed before\n"
+        "                            every launch, untimed. declared: scratch marked\n"
+        "                            \"zero\": true is zeroed inside the timed op, the\n"
+        "                            rest is filled with 0xFF bytes\n"
         "  --artifacts-dir <dir>     With --inspect: copy PTX, Triton IR and Warp's\n"
         "                            generated CUDA into dir, since the compile cache may\n"
         "                            not be visible outside Docker\n"
@@ -517,6 +611,16 @@ void print_cli_usage(const char* program) {
         "  --define <KEY=n>          Compile-time knob for DSL kernels (e.g. BLOCK_SIZE=512)\n"
         "  --warmup <n>              Fixed warmup count (default: auto steady-state)\n"
         "  --profile                 Collect hardware counters (needs perf access)\n"
+        "  --counters <basic|full>   Counter set for --profile (default basic: DRAM bytes,\n"
+        "                            occupancy, IPC). full adds pipe utilisation, stall\n"
+        "                            reasons, shared memory and L2 traffic, in many more\n"
+        "                            replay passes; it implies --profile\n"
+        "  --lock-clocks <MHz|auto>  Lock the SM clock for the whole process and release\n"
+        "                            it on exit. Needs root, and in Docker also\n"
+        "                            --cap-add SYS_ADMIN; without them the run goes on\n"
+        "                            unlocked. auto picks the lower of\n"
+        "                            the board's default application clock and 85% of the\n"
+        "                            max SM clock\n"
         "  --energy                  Collect NVML energy (adds a sustained pass)\n"
         "  --energy-window <ms>      Energy window (default 500)\n"
         "  --format <json|csv>       Output format (default json)\n"
@@ -559,6 +663,7 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
                 {"category",    k->category()},
                 {"description", k->description()},
                 {"dsl",         arena::result_io::detect_dsl(k)},
+                {"reference",   k->reference()},
                 {"parameters",  k->get_parameter_names()},
                 {"source",      k->source_path()},
             });
@@ -629,6 +734,8 @@ int run_cli(arena::Runner& runner, int argc, char** argv) {
         return static_cast<int>(CliExit::UsageError);
     }
     const auto param_sets = o.shapes.empty() ? arena::cli::expand_grid(o.param_lists) : o.shapes;
+
+    if (o.plan) return run_plan(runner, *kernels.front(), o, param_sets, to_stdout);
 
     std::vector<arena::RunResult> results;
     std::vector<arena::KernelDescriptor*> ran;   // parallel to results, for the dsl column

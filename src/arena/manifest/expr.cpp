@@ -14,7 +14,7 @@ public:
     Parser(const std::string& s, const Vars& vars) : s_(s), vars_(vars) {}
 
     int64_t parse() {
-        const int64_t v = logical_or();
+        const int64_t v = conditional();
         skip_ws();
         if (pos_ != s_.size()) fail("unexpected '" + std::string(1, s_[pos_]) + "'");
         return v;
@@ -35,21 +35,55 @@ private:
         return false;
     }
 
+    // Division by zero in a branch that is not taken is not an error, so
+    // "M > 0 ? N / M : 0" works at M = 0. Syntax errors and unknown names
+    // still are, wherever they are.
     static int64_t div_checked(int64_t a, int64_t b, const Parser& p) {
-        if (b == 0) p.fail("division by zero");
+        if (b == 0) {
+            if (p.skip_) return 0;
+            p.fail("division by zero");
+        }
         return a / b;
     }
 
-    // Comparisons and logic give 1 or 0, for a launch's "when".
+    // Parses an operand without letting it fail on arithmetic, for the side
+    // of ?:, && or || that the condition rules out.
+    template <typename F>
+    int64_t operand(bool taken, F f) {
+        if (taken) return f();
+        skip_++;
+        f();
+        skip_--;
+        return 0;
+    }
+
+    // c ? a : b, lowest precedence and right-associative, as in C.
+    int64_t conditional() {
+        const int64_t c = logical_or();
+        if (!eat('?')) return c;
+        const int64_t a = operand(c != 0, [&] { return conditional(); });
+        if (!eat(':')) fail("missing ':' after the '?' branch");
+        const int64_t b = operand(c == 0, [&] { return conditional(); });
+        return c ? a : b;
+    }
+
+    // Comparisons and logic give 1 or 0, for a launch's "when". && and ||
+    // short-circuit like C.
     int64_t logical_or() {
         int64_t v = logical_and();
-        while (eat2("||")) { const int64_t r = logical_and(); v = (v || r) ? 1 : 0; }
+        while (eat2("||")) {
+            const int64_t r = operand(v == 0, [&] { return logical_and(); });
+            v = (v || r) ? 1 : 0;
+        }
         return v;
     }
 
     int64_t logical_and() {
         int64_t v = comparison();
-        while (eat2("&&")) { const int64_t r = comparison(); v = (v && r) ? 1 : 0; }
+        while (eat2("&&")) {
+            const int64_t r = operand(v != 0, [&] { return comparison(); });
+            v = (v && r) ? 1 : 0;
+        }
         return v;
     }
 
@@ -94,8 +128,12 @@ private:
             else if (eat('/')) v = div_checked(v, unary(), *this);
             else if (eat('%')) {
                 const int64_t d = unary();
-                if (d == 0) fail("modulo by zero");
-                v %= d;
+                if (d == 0) {
+                    if (!skip_) fail("modulo by zero");
+                    v = 0;
+                } else {
+                    v %= d;
+                }
             }
             else return v;
         }
@@ -114,7 +152,7 @@ private:
     int64_t primary() {
         skip_ws();
         if (eat('(')) {
-            const int64_t v = logical_or();
+            const int64_t v = conditional();
             if (!eat(')')) fail("missing ')'");
             return v;
         }
@@ -142,12 +180,15 @@ private:
     int64_t call(const std::string& name) {
         std::vector<int64_t> args;
         if (!eat(')')) {
-            do { args.push_back(logical_or()); } while (eat(','));
+            do { args.push_back(conditional()); } while (eat(','));
             if (!eat(')')) fail("missing ')' after arguments of " + name);
         }
         if (name == "cdiv") {
             if (args.size() != 2) fail("cdiv takes 2 arguments");
-            if (args[1] == 0) fail("division by zero");
+            if (args[1] == 0) {
+                if (skip_) return 0;
+                fail("division by zero");
+            }
             return (args[0] + args[1] - 1) / args[1];
         }
         if (name == "min" || name == "max") {
@@ -162,6 +203,7 @@ private:
     const std::string& s_;
     const Vars& vars_;
     size_t pos_ = 0;
+    int skip_ = 0;   // > 0 inside an operand whose value is not used
 };
 
 }

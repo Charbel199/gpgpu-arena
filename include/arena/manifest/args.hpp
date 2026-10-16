@@ -72,6 +72,13 @@ private:
 };
 
 // Throws std::runtime_error naming the offending entry.
-PackedArgs pack_args(const nlohmann::json& args, const ArgContext& ctx);
+//
+// If `described` is given, it receives one object per manifest entry saying
+// what was passed, for --plan: {"buffer": name} for a pointer,
+// {"name", "type", "value"} for a named size, {"type", "expr", "value"} for
+// an explicit scalar, {"null": true}, {"padding": count} for "...", and the
+// resolved shape and strides for cutile_array and warp_array.
+PackedArgs pack_args(const nlohmann::json& args, const ArgContext& ctx,
+                     nlohmann::json* described = nullptr);
 
 }

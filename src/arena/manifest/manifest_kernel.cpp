@@ -28,6 +28,7 @@ namespace {
 struct ScratchSpec {
     std::string name;
     json bytes;          // expression
+    bool zero = false;   // under ScratchPolicy::Declared, cleared inside the timed op
     CUdeviceptr ptr = 0;
     size_t size = 0;
 };
@@ -39,7 +40,7 @@ public:
         : spec_(std::move(spec)), path_(std::move(path)),
           source_(std::move(source)), name_(std::move(name)) {
         for (const auto& s : spec_.value("scratch", json::array())) {
-            scratch_.push_back({s.at("name").get<std::string>(), s.at("bytes")});
+            scratch_.push_back({s.at("name").get<std::string>(), s.at("bytes"), s.value("zero", false)});
         }
     }
 
@@ -92,72 +93,78 @@ public:
         extra_results_ = r;
     }
 
+    void set_scratch_policy(ScratchPolicy p) override { policy_ = p; }
+
     void allocate(Context& ctx) override {
         Base::allocate(ctx);
-        auto vars = variables();
-        for (auto& s : scratch_) {
-            const int64_t b = manifest::eval_json(s.bytes, vars);
-            if (b <= 0) throw std::runtime_error("scratch '" + s.name + "' has size " + std::to_string(b));
-            s.size = static_cast<size_t>(b);
-            s.ptr = ctx.allocate(s.size);
-            vars[s.name + "_bytes"] = b;
+        std::vector<int64_t> sizes;
+        resolve_scratch(sizes);
+        for (size_t i = 0; i < scratch_.size(); i++) {
+            scratch_[i].size = static_cast<size_t>(sizes[i]);
+            scratch_[i].ptr = ctx.allocate(scratch_[i].size);
         }
 
-        module_ = loader_.load_module(module_path());
-        std::map<std::string, CUmodule> modules = {{source_, module_}};
-        for (const auto& [src, cr] : extra_results_) modules[src] = loader_.load_module(cr.module_path);
-        const auto entries = entry_points();
-        const auto& launches = spec_.at("launches");
-        for (size_t i = 0; i < launches.size(); i++) {
-            const auto& l = launches[i];
-            // "when": launch only if the expression is non-zero for this
-            // problem size, so one manifest can dispatch small and large
-            // inputs to different kernels.
-            if (l.contains("when")) {
-                int64_t on = 0;
-                try {
-                    on = manifest::eval_json(l.at("when"), variables_for(result_for(l)));
-                } catch (const std::exception& e) {
-                    throw std::runtime_error("manifest launch " + std::to_string(i) + " \"when\": " + e.what());
-                }
-                if (!on) continue;
-            }
-            Launch launch;
-            const std::string src = launch_source(l);
-            launch.fn = loader_.get_function(modules.at(src), entries[i]);
-            // Expressions see the constants of the source this launch uses.
-            auto lvars = variables_for(result_for(l));
-            for (const auto& s : scratch_) lvars[s.name + "_bytes"] = (int64_t)s.size;
-
-            manifest::ArgContext actx;
-            for (const auto& [k, v] : this->named_buffers()) actx.buffers[k] = v;
-            for (const auto& s : scratch_) actx.buffers[s.name] = s.ptr;
-            actx.vars = lvars;
-            actx.param_sizes = param_sizes(launch.fn);
-
-            try {
-                launch.cfg = launch_config(l, lvars);
-                launch.args = manifest::pack_args(l.at("args"), actx);
-            } catch (const std::exception& e) {
-                throw std::runtime_error("manifest launch " + std::to_string(i) + " (" +
-                                         entries[i] + "): " + e.what());
-            }
-            launches_.push_back(std::move(launch));
+        auto buffers = this->named_buffers();
+        for (const auto& s : scratch_) buffers[s.name] = s.ptr;
+        std::vector<Resolved> resolved;
+        resolve_launches(buffers, sizes, load_modules(), resolved);
+        for (auto& r : resolved) {
+            if (r.applies) launches_.push_back({r.fn, r.cfg, std::move(r.args)});
         }
-        if (launches_.empty()) {
-            throw std::runtime_error("no manifest launch applies at this size (every \"when\" is 0)");
-        }
+        if (launches_.empty()) throw std::runtime_error(kNoLaunchApplies);
     }
 
+    json plan(Context& ctx) override {
+        this->capture_device_props(ctx);   // sm_count, which Base::allocate would set
+        json out = {{"params", this->problem_values()}, {"scratch", json::array()},
+                    {"launches", json::array()}, {"error", ""}};
+        std::vector<int64_t> sizes;
+        std::vector<Resolved> resolved;
+        try {
+            resolve_scratch(sizes);
+            auto buffers = this->named_buffers();   // null until allocate(), reported by name
+            for (const auto& s : scratch_) buffers[s.name] = 0;
+            resolve_launches(buffers, sizes, load_modules(), resolved);
+            if (std::none_of(resolved.begin(), resolved.end(), [](const Resolved& r) { return r.applies; }))
+                throw std::runtime_error(kNoLaunchApplies);
+        } catch (const std::exception& e) {
+            out["error"] = e.what();
+        }
+        loader_.unload_all();
+        module_ = nullptr;
+
+        for (size_t i = 0; i < sizes.size(); i++)
+            out["scratch"].push_back({{"name", scratch_[i].name}, {"bytes", sizes[i]}});
+        // Canonical like the sources, so a symlinked folder still gives "v1.cu"
+        const fs::path dir = fs::weakly_canonical(fs::path(path_).parent_path());
+        for (const auto& r : resolved) {
+            json l = {{"index", r.index}, {"entry", r.entry},
+                      {"source", fs::path(r.source).lexically_relative(dir).generic_string()},
+                      {"applies", r.applies}};
+            if (r.applies) {
+                l["grid"]  = {r.cfg.grid_x, r.cfg.grid_y, r.cfg.grid_z};
+                l["block"] = {r.cfg.block_x, r.cfg.block_y, r.cfg.block_z};
+                l["shared_mem_bytes"] = r.cfg.shared_mem_bytes;
+                l["args"] = r.args_described;
+            }
+            out["launches"].push_back(std::move(l));
+        }
+        return out;
+    }
+
+    // Legacy: every scratch buffer starts at zero on every launch, outside
+    // the timed op, as the base resets its output. Declared: buffers marked
+    // "zero" are cleared by execute(), inside the timed op, and the rest are
+    // filled with 0xFF here so a kernel cannot rely on zeros it did not
+    // declare.
     void initialize(Context& ctx) override {
         Base::initialize(ctx);
-        zero_scratch(ctx);
+        prepare_scratch(ctx);
     }
 
-    // Scratch starts at zero on every launch, as the base resets its output.
     void reset(Context& ctx) override {
         Base::reset(ctx);
-        zero_scratch(ctx);
+        prepare_scratch(ctx);
     }
 
     void cleanup(Context& ctx) override {
@@ -172,6 +179,15 @@ public:
     }
 
     void execute(Context&) override {
+        // On the stream the launches and the timing events use, so the
+        // memset is part of the op's time. It is not a kernel, so it is not
+        // in launch_count or gpu_ms.
+        if (policy_ == ScratchPolicy::Declared) {
+            for (const auto& s : scratch_) {
+                if (s.zero && s.ptr)
+                    check_cuda(cuMemsetD8Async(s.ptr, 0, s.size, nullptr), "cuMemsetD8Async (scratch)");
+            }
+        }
         for (auto& l : launches_) {
             const auto r = loader_.launch(l.fn, l.cfg, l.args.pointers().data());
             if (r.result != CUDA_SUCCESS) {
@@ -194,6 +210,98 @@ private:
         KernelLoader::LaunchConfig cfg;
         manifest::PackedArgs args;
     };
+
+    // One manifest launch worked out at the current problem size.
+    struct Resolved {
+        size_t index = 0;
+        std::string entry, source;
+        bool applies = true;
+        CUfunction fn = nullptr;
+        KernelLoader::LaunchConfig cfg;
+        manifest::PackedArgs args;
+        json args_described;
+    };
+
+    static constexpr const char* kNoLaunchApplies =
+        "no manifest launch applies at this size (every \"when\" is 0)";
+
+    // Scratch sizes in bytes, in declaration order; each may use the sizes
+    // declared before it. Appends as it goes, so a caller that catches still
+    // has the ones that resolved.
+    void resolve_scratch(std::vector<int64_t>& sizes) const {
+        auto vars = variables();
+        for (const auto& s : scratch_) {
+            int64_t b = 0;
+            try {
+                b = manifest::eval_json(s.bytes, vars);
+            } catch (const std::exception& e) {
+                throw std::runtime_error("scratch '" + s.name + "': " + e.what());
+            }
+            if (b <= 0) throw std::runtime_error("scratch '" + s.name + "' has size " + std::to_string(b));
+            vars[s.name + "_bytes"] = b;
+            sizes.push_back(b);
+        }
+    }
+
+    std::map<std::string, CUmodule> load_modules() {
+        module_ = loader_.load_module(module_path());
+        std::map<std::string, CUmodule> modules = {{source_, module_}};
+        for (const auto& [src, cr] : extra_results_) modules[src] = loader_.load_module(cr.module_path);
+        return modules;
+    }
+
+    // Works out every launch: whether its "when" applies and, if it does,
+    // its function, launch config and packed arguments. Shared by allocate()
+    // and plan() so the two cannot disagree. Appends to `out` as it goes and
+    // throws on the first error, naming the launch.
+    void resolve_launches(const std::map<std::string, CUdeviceptr>& buffers,
+                          const std::vector<int64_t>& scratch_bytes,
+                          const std::map<std::string, CUmodule>& modules,
+                          std::vector<Resolved>& out) {
+        const auto entries = entry_points();
+        const auto& launches = spec_.at("launches");
+        for (size_t i = 0; i < launches.size(); i++) {
+            const auto& l = launches[i];
+            Resolved r;
+            r.index = i;
+            r.entry = entries[i];
+            r.source = launch_source(l);
+            // "when": launch only if the expression is non-zero for this
+            // problem size, so one manifest can dispatch small and large
+            // inputs to different kernels.
+            if (l.contains("when")) {
+                int64_t on = 0;
+                try {
+                    on = manifest::eval_json(l.at("when"), variables_for(result_for(l)));
+                } catch (const std::exception& e) {
+                    throw std::runtime_error("manifest launch " + std::to_string(i) + " \"when\": " + e.what());
+                }
+                if (!on) {
+                    r.applies = false;
+                    out.push_back(std::move(r));
+                    continue;
+                }
+            }
+            r.fn = loader_.get_function(modules.at(r.source), r.entry);
+            // Expressions see the constants of the source this launch uses.
+            auto lvars = variables_for(result_for(l));
+            for (size_t s = 0; s < scratch_.size(); s++) lvars[scratch_[s].name + "_bytes"] = scratch_bytes[s];
+
+            manifest::ArgContext actx;
+            for (const auto& [k, v] : buffers) actx.buffers[k] = v;
+            actx.vars = lvars;
+            actx.param_sizes = param_sizes(r.fn);
+
+            try {
+                r.cfg = launch_config(l, lvars);
+                r.args = manifest::pack_args(l.at("args"), actx, &r.args_described);
+            } catch (const std::exception& e) {
+                throw std::runtime_error("manifest launch " + std::to_string(i) + " (" +
+                                         r.entry + "): " + e.what());
+            }
+            out.push_back(std::move(r));
+        }
+    }
 
     // Names an expression can use: problem sizes, the SM count, and what the
     // compiler reported for the launch's source, constants included.
@@ -262,8 +370,12 @@ private:
         return out;
     }
 
-    void zero_scratch(Context& ctx) {
-        for (auto& s : scratch_) if (s.ptr) ctx.zero_device(s.ptr, s.size);
+    void prepare_scratch(Context& ctx) {
+        for (auto& s : scratch_) {
+            if (!s.ptr) continue;
+            if (policy_ == ScratchPolicy::Legacy) ctx.zero_device(s.ptr, s.size);
+            else if (!s.zero) check_cuda(cuMemsetD8(s.ptr, 0xFF, s.size), "cuMemsetD8 (scratch fill)");
+        }
     }
 
     json spec_;
@@ -273,6 +385,7 @@ private:
     KernelLoader loader_;
     CUmodule module_ = nullptr;
     std::vector<Launch> launches_;
+    ScratchPolicy policy_ = ScratchPolicy::Legacy;
 };
 
 }
@@ -373,6 +486,12 @@ std::unique_ptr<KernelDescriptor> load_manifest_spec(const json& spec, const std
     src = fs::weakly_canonical(src);
     if (!fs::exists(src)) throw std::runtime_error("manifest source not found: " + src.string());
 
+    for (const auto& s : spec.value("scratch", json::array())) {
+        if (!s.is_object() || !s.contains("name") || !s.at("name").is_string() || !s.contains("bytes"))
+            throw std::runtime_error("manifest " + path + ": each scratch entry needs \"name\" and \"bytes\"");
+        if (s.contains("zero") && !s.at("zero").is_boolean())
+            throw std::runtime_error("manifest " + path + ": scratch \"zero\" must be true or false");
+    }
     for (const auto& l : spec.at("launches")) {
         if (!l.contains("source")) continue;
         fs::path ls = l.at("source").get<std::string>();

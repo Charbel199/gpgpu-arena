@@ -1,5 +1,7 @@
 #pragma once
 
+#include "arena/runner_config.hpp"
+
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -60,10 +62,22 @@ std::vector<std::string> split_csv(const std::string& s);
 // item is not a number.
 std::optional<std::vector<uint64_t>> parse_u64_list(const std::string& s);
 
+// --lock-clocks value: a clock in MHz, or "auto" which returns 0. nullopt if
+// it is neither a positive integer nor "auto".
+std::optional<unsigned> parse_lock_clocks(const std::string& s);
+
 // Cartesian product of per-parameter value lists, in key order, the last key
 // varying fastest. {"M":{1,2},"N":{3}} -> [{M:1,N:3},{M:2,N:3}]. An empty map
 // gives one empty combination, so a run with no -p still runs once.
 std::vector<std::map<std::string, int>> expand_grid(
     const std::map<std::string, std::vector<int>>& lists);
+
+// "legacy" or "declared". nullopt for anything else.
+std::optional<ScratchPolicy> parse_scratch_policy(const std::string& s);
+
+// --plan resolves a manifest's launches without running anything, so it
+// needs --manifest and does not mix with --run, --list or --inspect/--sass/
+// --ptx. Returns the usage error, or "" when the combination is fine.
+std::string plan_args_error(bool manifest, bool run, bool list, bool inspect);
 
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "arena/kernel_descriptor.hpp"
+#include <nlohmann/json.hpp>
 #include <memory>
 #include <string>
 #include <vector>
@@ -8,7 +9,8 @@
 // A kernel described by a JSON manifest instead of a compiled C++ descriptor.
 //
 // The manifest names a category, a source file in any DSL, optional scratch
-// buffers, and one or more launches, each with an entry point, grid, block,
+// buffers ({"name", "bytes", "zero"}, see ScratchPolicy), and one or more
+// launches, each with an entry point, grid, block,
 // shared memory and argument list (see manifest/args.hpp and expr.hpp):
 //
 //   {
@@ -38,6 +40,19 @@ public:
     virtual std::vector<std::string> entry_points() const = 0;
     // Source file of each entry point, in the same order.
     virtual std::vector<std::string> entry_sources() const = 0;
+
+    // What a run would launch at the current problem size, without
+    // allocating or launching anything: scratch sizes, and for each launch
+    // whether it applies, its grid, block, shared memory and arguments
+    // (buffers by name). Needs the compile results set and the modules
+    // loadable, since entry points and parameter sizes come from the cubin.
+    // Never throws for a manifest error: the first one goes in "error".
+    //
+    //   {"params": {...}, "scratch": [{"name", "bytes"}],
+    //    "launches": [{"index", "entry", "source", "applies",
+    //                  "grid", "block", "shared_mem_bytes", "args"}],
+    //    "error": ""}
+    virtual nlohmann::json plan(Context& ctx) = 0;
 };
 
 // Reads and validates a manifest. Relative "source" paths resolve against

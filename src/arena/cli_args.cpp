@@ -114,6 +114,15 @@ std::optional<std::vector<uint64_t>> parse_u64_list(const std::string& s) {
     return out;
 }
 
+std::optional<unsigned> parse_lock_clocks(const std::string& s) {
+    if (s == "auto") return 0u;
+    if (s.empty() || s[0] == '-') return std::nullopt;
+    char* end = nullptr;
+    const unsigned long v = std::strtoul(s.c_str(), &end, 10);
+    if (end == s.c_str() || *end != '\0' || v == 0 || v > 100000) return std::nullopt;
+    return static_cast<unsigned>(v);
+}
+
 std::vector<std::map<std::string, int>> expand_grid(
     const std::map<std::string, std::vector<int>>& lists) {
     std::vector<std::map<std::string, int>> out = {{}};
@@ -130,6 +139,18 @@ std::vector<std::map<std::string, int>> expand_grid(
         out = std::move(next);
     }
     return out;
+}
+
+std::optional<ScratchPolicy> parse_scratch_policy(const std::string& s) {
+    if (s == "legacy") return ScratchPolicy::Legacy;
+    if (s == "declared") return ScratchPolicy::Declared;
+    return std::nullopt;
+}
+
+std::string plan_args_error(bool manifest, bool run, bool list, bool inspect) {
+    if (run || list || inspect) return "--plan does not combine with --run, --list, --inspect, --sass or --ptx";
+    if (!manifest) return "--plan needs --manifest <file.json>";
+    return "";
 }
 
 }

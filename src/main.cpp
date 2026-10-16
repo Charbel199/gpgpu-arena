@@ -12,6 +12,7 @@
 #include "arena/measurement/profiler.hpp"
 #include "arena/measurement/power.hpp"
 #include "arena/runner.hpp"
+#include "arena/cli_args.hpp"
 #include "arena/logger.hpp"
 #include "frontend/cli.hpp"
 #include "arena/manifest/manifest_kernel.hpp"
@@ -91,6 +92,14 @@ int main(int argc, char** argv) {
 
         arena::Profiler profiler;
         arena::PowerMonitor power(0);
+
+        // Locked before anything runs; PowerMonitor releases it on every
+        // way out, including Ctrl-C.
+        for (int i = 1; i + 1 < argc; i++) {
+            if (strcmp(argv[i], "--lock-clocks") == 0) {
+                if (auto mhz = arena::cli::parse_lock_clocks(argv[i + 1])) power.lock_clocks(*mhz);
+            }
+        }
         arena::Runner runner(ctx, loader, compiler, profiler, power);
 
         if (cli_mode) {

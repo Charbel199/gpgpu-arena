@@ -67,6 +67,10 @@ public:
         input_seed_ = seed;
     }
 
+    // Pushed in by the runner before allocate(). Only manifest kernels have
+    // scratch buffers, so only they act on it.
+    virtual void set_scratch_policy(ScratchPolicy) {}
+
     // memory management (through the context class)
     virtual void allocate(Context& ctx) = 0;
     virtual void initialize(Context& ctx) = 0;
@@ -175,6 +179,10 @@ public:
         return r;
     }
 
+
+    // True for a vendor library baseline (cuBLAS and the like) rather than a
+    // kernel written here. It is there to be measured against, not optimized.
+    virtual bool reference() const { return false; }
 
     // run cubin or cpp code
     virtual bool uses_module() const { return true; }

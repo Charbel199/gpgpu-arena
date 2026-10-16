@@ -224,3 +224,31 @@ TEST_CASE("parse_shape") {
     CHECK_FALSE(parse_shape("rows=64,cols").has_value());
     CHECK_FALSE(parse_shape("rows=-1").has_value());
 }
+
+TEST_CASE("parse_scratch_policy") {
+    CHECK(parse_scratch_policy("legacy") == arena::ScratchPolicy::Legacy);
+    CHECK(parse_scratch_policy("declared") == arena::ScratchPolicy::Declared);
+    CHECK_FALSE(parse_scratch_policy("").has_value());
+    CHECK_FALSE(parse_scratch_policy("Declared").has_value());
+    CHECK_FALSE(parse_scratch_policy("zero").has_value());
+    CHECK(std::string(arena::scratch_policy_name(arena::ScratchPolicy::Declared)) == "declared");
+    CHECK(std::string(arena::scratch_policy_name(arena::RunConfig{}.scratch_policy)) == "legacy");
+}
+
+TEST_CASE("plan_args_error") {
+    CHECK(plan_args_error(true, false, false, false).empty());
+    CHECK(plan_args_error(false, false, false, false).find("--manifest") != std::string::npos);
+    CHECK_FALSE(plan_args_error(true, true, false, false).empty());
+    CHECK_FALSE(plan_args_error(true, false, true, false).empty());
+    CHECK_FALSE(plan_args_error(true, false, false, true).empty());
+}
+
+TEST_CASE("parse_lock_clocks") {
+    CHECK(parse_lock_clocks("2400") == 2400u);
+    CHECK(parse_lock_clocks("auto") == 0u);
+    CHECK_FALSE(parse_lock_clocks("").has_value());
+    CHECK_FALSE(parse_lock_clocks("0").has_value());
+    CHECK_FALSE(parse_lock_clocks("-5").has_value());
+    CHECK_FALSE(parse_lock_clocks("24x").has_value());
+    CHECK_FALSE(parse_lock_clocks("AUTO").has_value());
+}

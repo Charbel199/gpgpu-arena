@@ -22,6 +22,9 @@ cmake-build-*/
 # than build/kernels/ whenever the binary runs with the repo root as its
 # working directory, since KernelCompiler's cache path is relative.
 kernels/*.json
+# Everything else the compile cache writes there (Triton IR, Warp's generated
+# CUDA) for sources outside kernels/, such as PGAIO candidates.
+kernels/ext_*
 *.a
 *.so
 

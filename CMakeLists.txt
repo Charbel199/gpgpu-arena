@@ -161,7 +161,8 @@ else()
 endif()
 
 target_include_directories(arena PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::nvml CUDA::nvtx3 spdlog::spdlog nlohmann_json::nlohmann_json)
+# cuBLAS backs the matmul_cublas reference kernel
+target_link_libraries(arena PRIVATE CUDA::cuda_driver CUDA::cupti CUDA::cudart CUDA::cublas CUDA::nvml CUDA::nvtx3 spdlog::spdlog nlohmann_json::nlohmann_json)
 target_compile_definitions(arena PRIVATE
     ARENA_KERNEL_DIR="${CMAKE_SOURCE_DIR}/kernels"
     ARENA_SOURCE_DIR="${CMAKE_SOURCE_DIR}"

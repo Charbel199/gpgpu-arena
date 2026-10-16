@@ -40,4 +40,26 @@ DriftCheck check_drift(const std::vector<float>& history, int window, float thre
 // than propagating inf into throughput figures.
 double rate_per_sec(double quantity, float ms);
 
+// Summary of the NVML samples taken across one result's timed runs.
+struct ClockPowerStats {
+    int      samples = 0;          // clock samples
+    double   sm_mean_mhz = 0.0;
+    unsigned sm_min_mhz = 0;
+    unsigned sm_max_mhz = 0;
+    double   power_mean_w = 0.0;   // 0 when no power sample was taken
+    double   power_max_w = 0.0;
+};
+
+ClockPowerStats summarize_clock_power(const std::vector<unsigned>& sm_mhz,
+                                      const std::vector<double>& watts);
+
+// The clock --lock-clocks auto asks for: the lower of the board's default
+// application clock (its rated boost, which it is meant to sustain) and 85%
+// of the max SM clock, snapped down to a clock the board supports. The 85%
+// figure is the fallback when the default clock is unknown and a cap when it
+// is implausibly high. default_app_mhz may be 0 and supported may be empty.
+// Returns 0 if max_mhz is 0.
+unsigned pick_auto_lock_clock(unsigned max_mhz, unsigned default_app_mhz,
+                              const std::vector<unsigned>& supported);
+
 }

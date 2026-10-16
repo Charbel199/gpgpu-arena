@@ -8,6 +8,19 @@
 
 namespace arena {
 
+// How a manifest's scratch buffers are prepared before each launch.
+//
+// Legacy zeroes every one outside the timed op, so a kernel that needs a
+// zeroed workspace gets it for free. Declared charges for it instead: a
+// buffer marked "zero": true is cleared by a memset inside the timed op, and
+// every other buffer is filled with 0xFF bytes outside it, so a kernel that
+// relies on zeros it did not ask for fails verification.
+enum class ScratchPolicy { Legacy, Declared };
+
+inline const char* scratch_policy_name(ScratchPolicy p) {
+    return p == ScratchPolicy::Declared ? "declared" : "legacy";
+}
+
 struct RunConfig {
     enum class WarmupMode { Fixed, Auto };
 
@@ -27,6 +40,12 @@ struct RunConfig {
     int  number_of_runs   = 10;
     bool collect_metrics  = false;
 
+    // What collect_metrics gathers. Basic is DRAM bytes, occupancy and IPC.
+    // Full adds pipe utilisation, stall reasons, shared memory and L2
+    // traffic, at the cost of many more replay passes.
+    enum class CounterLevel { Basic, Full };
+    CounterLevel counter_level = CounterLevel::Basic;
+
     // Evict L2 before every timed launch. Off, a working set that fits in L2
     // (16 MB at n=4M on a 128 MB part) is served from cache on every run after
     // the first, and the timing describes L2 rather than DRAM. On, every
@@ -45,6 +64,8 @@ struct RunConfig {
     // defaults. The DSL equivalent of block_size: it needs a recompile, so
     // each distinct set gets its own cached cubin.
     std::map<std::string, int> compile_options;
+
+    ScratchPolicy scratch_policy = ScratchPolicy::Legacy;
 
     // Sweep range. Zero means "use the category's own default ladder", so
     // nothing changes until you actually set a range.

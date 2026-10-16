@@ -123,6 +123,11 @@ TEST_CASE("classify") {
         CHECK(o["global_store_64"] == 1);
         CHECK(o["global_store_128"] == 2);
     }
+    SUBCASE("every tensor core family counts as tensor, min/max ops do not") {
+        auto o = classify({{"HMMA.16816.F32", 1}, {"BMMA.88128", 1}, {"IGMMA.64x8x32", 1},
+                           {"QGMMA.64x8x32", 1}, {"UTCHMMA", 1}, {"HMNMX2", 1}, {"IMNMX", 1}});
+        CHECK(o["tensor"] == 5);
+    }
 }
 
 TEST_CASE("mean_global_load_bytes") {

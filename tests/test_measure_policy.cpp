@@ -162,3 +162,48 @@ TEST_CASE("sweep ladder") {
         CHECK(ladder(1, 100, 0.5).empty());
     }
 }
+
+TEST_CASE("summarize_clock_power") {
+    SUBCASE("no samples gives zeros") {
+        auto s = summarize_clock_power({}, {});
+        CHECK(s.samples == 0);
+        CHECK(s.sm_mean_mhz == doctest::Approx(0.0));
+        CHECK(s.power_max_w == doctest::Approx(0.0));
+    }
+    SUBCASE("mean, min and max") {
+        auto s = summarize_clock_power({2400, 2600, 2500}, {200.0, 300.0});
+        CHECK(s.samples == 3);
+        CHECK(s.sm_mean_mhz == doctest::Approx(2500.0));
+        CHECK(s.sm_min_mhz == 2400);
+        CHECK(s.sm_max_mhz == 2600);
+        CHECK(s.power_mean_w == doctest::Approx(250.0));
+        CHECK(s.power_max_w == doctest::Approx(300.0));
+    }
+    SUBCASE("clock without power") {
+        auto s = summarize_clock_power({1000}, {});
+        CHECK(s.samples == 1);
+        CHECK(s.power_mean_w == doctest::Approx(0.0));
+    }
+}
+
+TEST_CASE("pick_auto_lock_clock") {
+    const std::vector<unsigned> supported = {3090, 2625, 2617, 2610, 2595, 1500};
+    SUBCASE("default application clock below 85% of max wins, snapped down") {
+        CHECK(pick_auto_lock_clock(3090, 2612, supported) == 2610);
+    }
+    SUBCASE("85% of max caps an implausible default") {
+        CHECK(pick_auto_lock_clock(3090, 3090, supported) == 2625);   // 85% = 2626
+    }
+    SUBCASE("unknown default falls back to 85% of max") {
+        CHECK(pick_auto_lock_clock(3090, 0, supported) == 2625);
+    }
+    SUBCASE("no supported list returns the target itself") {
+        CHECK(pick_auto_lock_clock(3090, 2617, {}) == 2617);
+    }
+    SUBCASE("no supported clock at or below the target returns the target") {
+        CHECK(pick_auto_lock_clock(3090, 2400, {3090, 2800}) == 2400);
+    }
+    SUBCASE("max unknown") {
+        CHECK(pick_auto_lock_clock(0, 2617, supported) == 0);
+    }
+}

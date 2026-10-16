@@ -36,11 +36,15 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     result.kernel_name = desc.name();
     result.category = desc.category();
     result.description = desc.description();
+    result.reference = desc.reference();
     result.source = desc.effective_source_path();
     result.params = config.params;
     result.distribution = distribution_name(config.input_distribution);
     result.seed = config.input_seed;
     result.cold_l2 = config.cold_l2;
+    result.scratch_policy = scratch_policy_name(config.scratch_policy);
+    result.counters.level =
+        config.counter_level == RunConfig::CounterLevel::Full ? "full" : "basic";
 
     auto log = spdlog::get("runner");
 
@@ -59,6 +63,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     try {
         desc.set_problem_size(config.params);
         desc.set_input_spec(config.input_distribution, config.input_seed);
+        desc.set_scratch_policy(config.scratch_policy);
         desc.set_block_size(config.block_size);
         desc.set_compile_options(config.compile_options);
 
@@ -152,9 +157,29 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         // --- Tier 1: operation timing ---
         log->info("  benchmark: {} runs ...", config.number_of_runs);
         nvtxRangePushA(("BENCHMARK: " + result.kernel_name).c_str());
-        auto bench_result = measure::time_operation(launch_kernel, reset_fn,
-                                                    config.number_of_runs);
+        // Clock and power are sampled on another thread across exactly these
+        // runs, so they describe the window op_ms comes from.
+        power_.start_sampling();
+        measure::TimingResult bench_result;
+        try {
+            bench_result = measure::time_operation(launch_kernel, reset_fn,
+                                                   config.number_of_runs);
+        } catch (...) {
+            power_.stop_sampling();
+            throw;
+        }
+        const auto samples = power_.stop_sampling();
         nvtxRangePop();
+
+        result.clock_samples     = samples.samples;
+        result.sm_clock_mean_mhz = samples.sm_mean_mhz;
+        result.sm_clock_min_mhz  = samples.sm_min_mhz;
+        result.sm_clock_max_mhz  = samples.sm_max_mhz;
+        result.power_mean_w      = samples.power_mean_w;
+        result.power_max_w       = samples.power_max_w;
+        log->debug("  timed window: {} samples, SM {:.0f} MHz ({}..{}), {:.1f} W (max {:.1f})",
+            samples.samples, samples.sm_mean_mhz, samples.sm_min_mhz, samples.sm_max_mhz,
+            samples.power_mean_w, samples.power_max_w);
 
         result.op_ms = bench_result.median_ms;
         result.op_ms_trimmed = bench_result.trimmed_ms;
@@ -165,6 +190,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         auto activity = profiler_.collect_activity(launch_kernel);
         result.gpu_ms = activity.kernel_time_ms;
         result.sub_kernels = activity.sub_kernels;
+        result.launched_kernels = group_launched_kernels(activity.sub_kernels, 1);
         result.launch_count = activity.launch_count;
         result.overhead_ms = std::max(0.0f, result.op_ms - result.gpu_ms);
         result.counters.regs_per_thread = activity.registers_per_thread;
@@ -186,8 +212,9 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         if (config.collect_metrics) {
             log->info("  profiling: collecting hardware counters ...");
             nvtxRangePushA(("PROFILER: " + result.kernel_name).c_str());
+            const bool full = config.counter_level == RunConfig::CounterLevel::Full;
             auto mv = profiler_.collect_counters(launch_kernel, reset_fn,
-                                                  result.launch_count);
+                                                  result.launch_count, full);
             nvtxRangePop();
 
             // The counter pass runs a warm back-to-back sequence and reports
@@ -209,6 +236,28 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             }
             if (mv.count(metric::IPC)) {
                 result.counters.ipc = mv.at(metric::IPC);
+            }
+            if (full) {
+                // Percentages become fractions; ratios and per-op counts
+                // pass through as CUPTI reports them.
+                const std::string pipe = metric::PIPE_PREFIX;
+                const std::string stall = metric::STALL_PREFIX;
+                for (const auto& [key, value] : mv) {
+                    if (key.rfind(pipe, 0) == 0) {
+                        result.counters.pipes[key.substr(pipe.size())] = value / 100.0;
+                    } else if (key.rfind(stall, 0) == 0) {
+                        result.counters.stalls[key.substr(stall.size())] = value;
+                    } else if (key == metric::ISSUE_ACTIVE) {
+                        result.counters.extra[key] = value / 100.0;
+                    } else if (key == metric::ELIGIBLE_WARPS ||
+                               key == metric::SHARED_WAVEFRONTS ||
+                               key == metric::SHARED_BANK_CONFLICTS ||
+                               key == metric::L2_SECTORS) {
+                        result.counters.extra[key] = value;
+                    }
+                }
+                log->info("  profiling: full counters in {} replay passes",
+                    profiler_.last_num_passes());
             }
             result.counters.available = true;
 

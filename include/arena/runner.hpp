@@ -33,10 +33,14 @@ struct RunResult {
     // launch type: true = cubin via driver API, false = compiled (e.g. CUB)
     bool uses_module = false;
 
+    // a vendor library baseline such as cuBLAS (KernelDescriptor::reference)
+    bool reference = false;
+
     // launch config
     unsigned int grid_x = 0, grid_y = 0, grid_z = 0;
     unsigned int block_x = 0, block_y = 0, block_z = 0;
     unsigned int shared_mem_bytes = 0;
+    std::string scratch_policy = "legacy";   // see ScratchPolicy
 
     // --- Tier 1: per-invocation ---
     float op_ms        = 0.0f;   // event-bracketed whole operation, median
@@ -46,6 +50,7 @@ struct RunResult {
     int   launch_count = 0;
     std::vector<float> all_times_ms;
     std::vector<Profiler::SubKernelInfo> sub_kernels;
+    std::vector<LaunchedKernel> launched_kernels;   // sub_kernels grouped by name
 
     // --- Tier 2: per-process cold start ---
     float module_load_ms  = 0.0f;
@@ -78,6 +83,12 @@ struct RunResult {
         double dram_read_gbps = 0.0;
         double dram_write_gbps = 0.0;
         double ipc = 0.0;
+
+        // --counters full. Only what the chip supports is present.
+        std::string level = "basic";
+        std::map<std::string, double> extra;    // issue_active, eligible_warps, ...
+        std::map<std::string, double> pipes;    // fraction 0..1 of peak
+        std::map<std::string, double> stalls;   // warps stalled per issued instruction
     } counters;
 
     struct Energy {
@@ -109,6 +120,14 @@ struct RunResult {
     std::string warmup_stop;   // why it stopped, for when it did not converge
     unsigned sm_clock_start_mhz = 0;
     unsigned sm_clock_end_mhz = 0;
+    // Sampled by NVML across the timed runs only. Zero samples when NVML is
+    // unavailable.
+    double   sm_clock_mean_mhz = 0.0;
+    unsigned sm_clock_min_mhz = 0;
+    unsigned sm_clock_max_mhz = 0;
+    double   power_mean_w = 0.0;
+    double   power_max_w = 0.0;
+    int      clock_samples = 0;
 
     bool verified = false;
     bool success = false;
