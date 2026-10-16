@@ -27,6 +27,8 @@ The roof is moving the ideal bytes once at peak DRAM bandwidth.
 
 The roof is peak FP32 on CUDA cores. Tensor cores (TF32 or FP16 inputs) can exceed it, and a reading above 100% is allowed and expected then. The output must still pass the fp32 tolerance, so check the verdict.
 
+The nominal FP32 roof assumes the boost clock. A power-limited board cannot hold it under a full FFMA load: on the RTX PRO 6000, cuBLAS SGEMM sits at about 50% of nominal, at 2.2 to 2.4 GHz and 520 to 580 W. Judge compute-bound candidates against the library reference (`pgaio.py reference <run> --lib cublas`, then "% of cublas" in every eval) and the "SOL at the measured clock" line, not against 100%.
+
 1. **Data reuse.** Stage tiles of A and B (or K and V) in shared memory, so each global load feeds many FMAs.
 2. **Register blocking.** Have each thread compute a small tile of outputs (for example 8x8), so FMAs outnumber shared-memory loads. Look for a high `FFMA` count against `LDS` in SASS.
 3. **Tensor cores.** `HMMA`, `UTCHMMA` or `QMMA` in SASS mean they are used. Triton's `tl.dot` and cuTile's `ct.mma` emit them for suitable dtypes; CUDA needs `wmma`/`mma.sync` intrinsics or inline PTX.
@@ -66,5 +68,20 @@ Where instructions sit relative to barriers matters as much as which ones exist.
 - **reduce:** vectorized loads, a warp-shuffle reduction, and one atomic per block on a persistent grid. For small n, a single block with no atomics.
 - **scan:** single-pass decoupled look-back; per-tile scans in registers with warp shuffles. For small n, one block.
 - **softmax:** one pass with the row in registers, or an online softmax for long rows. For short rows, one warp per row.
-- **matmul:** shared-memory tiling, then register blocking, then tensor cores and pipelining.
+- **matmul:** shared-memory tiling, then register blocking, then pipelining (and tensor cores unless the run forbids them). For FP32 on CUDA cores, see the next section.
 - **attention:** fused online-softmax attention (FlashAttention style), tiling queries and streaming K and V.
+
+## Matmul, FP32 on CUDA cores (sm_120)
+
+From the matmul-fp32-vs-public run on an RTX PRO 6000 (best 47.4% of nominal SOL, about 95% of cuBLAS).
+
+cuBLAS with TF32 off dispatches `cutlass_80_simt_sgemm_256x128_8x4` from 2048 to 8192. Its shape is a good first target in CUDA: a 128x256 block tile, BK 8, a 4-stage `cp.async` pipeline, 256 threads with 8x16 outputs each, one block per SM at about 230 registers. Profile the reference once (`profile <run> --reference cublas`) and compare stalls against it.
+
+- Register blocking is most of the gain: 8x8 outputs per thread on a 128x128x8 tile with `LDS.128` on both operands took the naive 4.8% to 41.9% in one step. Count FFMA per `LDS.128` in the SASS: 16 at 8x8, about 21 at 8x16.
+- A is stored transposed in shared memory so both operands load as float4. With 4-byte `cp.async`, map 8 lanes to one row (one 32-byte sector) and give k a stride of BM + 4 floats. One row per lane gave 476M shared bank conflicts and 33% instead of 45%. Transpose only the 128-row A tile; B goes in with 16-byte copies.
+- Wave quantization: 128 tiles at 2048 and 512 at 4096 leave SMs idle on 188 SMs. Serial split-K fixes it, but order the grid split-major (every tile's split 0, then split 1). Tile-major order makes a tile's splits finish together and queue on the semaphore (2048 went from 0.307 to 0.360 ms); split-major with 4 splits took it to 0.275 ms. The semaphores need zeroed scratch: declare them `"zero": true` (or reset them in the kernel), or the kernel hangs under the declared policy.
+- At about 95% of cuBLAS the remaining gap was short_scoreboard, mio and lg_throttle stalls (FFMA waiting on LDS, the 4-byte `LDGSTS`) and the split-K epilogue. The last idea tried, double-buffered register fragments with the barrier at the last k step and a single thread fencing after it, matched the best within noise.
+- Triton: `tl.dot(..., input_precision="ieee")` lowers to FFMA only. cuBLAS's configuration (128x256x8, 4 stages, 8 warps) reached 43.7%.
+- cuTile: `ct.mma` on f32 tiles lowers to FMUL+FADD, so it caps near half of peak (6%). Write the outer product yourself with `ct.extract` and a broadcast to get FFMA; at 64x128 it reads `LDS.128` and reached 15%. Mark the DSL with `skip-dsl` once the SASS confirms this, rather than spending evals.
+- Warp: `tile_matmul` is cuBLASDx, a library, so it is out of bounds. A hand-blocked SIMT kernel reached 32% at 2 blocks per SM. Warp does not unroll `range(32)`, so unroll by hand.
+- TMA kernels cannot be written as manifests yet: a tensor map needs host-side setup (`cuTensorMapEncodeTiled`) that a manifest cannot do. cuTile and Triton build their own descriptors, so their TMA paths still work. A possible manifest arg type is sketched in `docs/tma-manifest-args.md`.

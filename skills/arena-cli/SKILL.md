@@ -42,6 +42,8 @@ Measurement options:
 | --- | --- |
 | `--l2 cold` | Evict L2 before every timed launch. Use it whenever the working set could fit in L2 (128 MB on Blackwell): warm numbers there measure L2, not DRAM. At n=4M fp32 the gap was 2.2x. |
 | `--profile` | Hardware counters: DRAM bytes, occupancy, IPC. Needs perf counter access. |
+| `--counters full` | With `--profile`: also issue active, pipe use, stall reasons, shared bank conflicts and L2 traffic. Many more replay passes; timing is unaffected. Default `basic`. |
+| `--lock-clocks <MHz\|auto>` | Lock the SM clock for the process. Needs root (in Docker, `--cap-add SYS_ADMIN`); otherwise it warns and runs unlocked. `environment.clock_lock` says whether it applied. |
 | `--energy` | NVML energy per op over a sustained window. Upper bound, whole board. |
 | `--warmup <n>` | Fixed warmup instead of auto steady state. |
 | `--block <n>` | Launch a CUDA kernel at this block size, if its descriptor lists it as tunable. |
@@ -49,6 +51,8 @@ Measurement options:
 | `--sweep-block` | Run every block size (CUDA) or compile config (DSL) the kernel declares. |
 | `--source-override <file>` | Run another source in this kernel's slot. See the arena-inspect skill. |
 | `--manifest <file.json>` | Run a kernel described by a JSON manifest, in any DSL, with no C++ descriptor. Replaces the kernel name. See the arena-optimize skill's manifests.md. |
+| `--plan` | With `--manifest`: print each launch's resolved grid, block, shared memory and arguments per `--shape`, without launching. Exit 1 on an expression error. |
+| `--scratch-policy declared` | Manifest scratch marked `"zero": true` is zeroed inside the timed op; the rest is filled with `0xFF`. Default `legacy` zeroes all of it outside timing. |
 | `-o file --format csv` | Write CSV instead of JSON to stdout. |
 
 ## Exit codes
@@ -64,7 +68,7 @@ Each result:
 ```text
 kernel, category, dsl, source        what ran (source is the file actually compiled)
 input        {params, distribution, seed, verify_seed, cold_l2}
-launch       {grid, block, shared_mem_bytes}
+launch       {grid, block, shared_mem_bytes, scratch_policy}
 timing       op_ms, gpu_ms, overhead_ms, launch_count, all_times_ms
 cold_start   module_load_ms, first_launch_ms
 build        cache_hit, compile_ms, import_ms, invoke_ms, options
@@ -72,10 +76,14 @@ throughput   gflops, bandwidth_gbps          (denominator: op_ms)
 counters     dram_read_bytes, dram_write_bytes, occupancy, ipc, regs_per_thread
 energy       mj_per_op, avg_watts
 numerics     max_rel_error, max_total_error, tolerance, input/output dtype
-quality      warmup_converged, warmup_stop, sm clocks
+quality      warmup_converged, warmup_stop, sm clocks; sm_clock_mean_mhz, power_mean_w etc. sampled during the timed runs
 sub_kernels  one entry per launch, in order, with start_offset_ms
+launched_kernels  [{name, count_per_op, gpu_ms}] per distinct demangled kernel, by gpu time
+reference    true for a vendor library baseline (matmul_cublas), also in --list and --inspect
 verified, success, error
 ```
+
+`matmul_cublas` is cuBLAS SGEMM in plain FP32 (pedantic math, no TF32). Use it as the bar for matmul work; `launched_kernels` names the kernel cuBLAS picked at that size.
 
 Rules that keep comparisons honest:
 

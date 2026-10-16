@@ -2,17 +2,24 @@
 
 A manifest is a small JSON file next to a kernel source. It tells arena how to launch the kernel against a category's buffers. It is data, not code: it can choose the launch shape and the arguments, but it cannot compute, copy or verify anything. Verification, the CPU reference, input generation and the byte and FLOP counts always come from the category.
 
-Run one with `$ARENA --manifest <file.json>` (plus the usual `-p`, `--dist`, `--seed`, `--l2`, `--profile`), and inspect it with `$ARENA --inspect --manifest <file.json>` or `--sass` / `--ptx`. Relative paths are resolved from the current directory, or else the repo root; the manifest's own `source` is resolved from the manifest's folder.
+Run one with `$ARENA --manifest <file.json>` (plus the usual `-p`, `--dist`, `--seed`, `--l2`, `--profile`), and inspect it with `$ARENA --inspect --manifest <file.json>` or `--sass` / `--ptx`. `$ARENA --plan --manifest <file.json> --shape ...` prints each launch's resolved grid, block, shared memory, scratch sizes and arguments without launching anything; in a PGAIO run, `pgaio.py check` does this for every timed and checked shape. Relative paths are resolved from the current directory, or else the repo root; the manifest's own `source` is resolved from the manifest's folder.
 
 ## Fields
 
 | Field | Meaning |
 | --- | --- |
-| `category` | `reduce`, `scan`, `softmax` or `matmul`. Fixes the buffers, sizes and verification. |
+| `category` | `reduce`, `scan`, `softmax`, `matmul` or `attention`. Fixes the buffers, sizes and verification. |
 | `source` | Kernel file: `.cu`, `.triton.py`, `.cutile.py` or `.warp.py`. The extension picks the compiler. |
 | `name`, `description` | Optional labels. |
-| `scratch` | Optional list of `{"name": ..., "bytes": expr}` device buffers, zeroed before every launch. |
+| `scratch` | Optional list of `{"name": ..., "bytes": expr, "zero": true}` device buffers. `zero` is optional and only matters under `--scratch-policy declared` (below). |
 | `launches` | One or more launches, run in order on one stream. |
+
+How scratch starts each launch depends on `--scratch-policy`:
+
+- `legacy` (the default): every scratch buffer is zeroed before every launch, outside the timed region, so a kernel gets a zeroed workspace for free.
+- `declared`: a buffer with `"zero": true` is zeroed by an async memset at the start of the timed op, so `op_ms` pays for it (it is not a kernel, so `gpu_ms` and `launch_count` do not include it). Every other buffer is filled with `0xFF` bytes outside the timed region, so a kernel that relies on zeros it did not declare fails verification. Each result records the policy as `launch.scratch_policy`.
+
+Under `declared`, a kernel that spin-waits on an undeclared buffer (split-K semaphores, look-back flags) does not fail: it hangs on the `0xFF` fill. Declare every buffer the kernel expects to start at zero.
 
 Each launch:
 
@@ -27,7 +34,7 @@ Each launch:
 
 ## Expressions
 
-Integers with `+ - * / %`, comparisons `< <= > >= == !=` (1 or 0), `&& || !`, parentheses, `cdiv(a, b)`, `min(...)`, `max(...)`. Names available:
+Integers with `+ - * / %`, comparisons `< <= > >= == !=` (1 or 0), `&& || !`, `c ? a : b`, parentheses, `cdiv(a, b)`, `min(...)`, `max(...)`. Precedence is C's, and `?:`, `&&` and `||` only evaluate the side they use, so `"M > 0 ? N / M : 0"` is fine at `M = 0`. Names available:
 
 - Problem sizes: `n` (reduce, scan), `rows`, `cols` (softmax), `M`, `K`, `N` (matmul), `BH`, `S`, `D` (attention).
 - `sm_count`.

@@ -379,13 +379,37 @@ both links to `skills/`, and `AGENTS.md` lists them.
 writes as many candidates as it wants, in any DSL:
 
 ```bash
-python3 tools/pgaio.py init --category softmax --sizes all --budget-per-dsl 10
+python3 tools/pgaio.py init --category softmax --sizes all --scratch-policy declared   # no budget, target 100% of SOL
+python3 tools/pgaio.py check <run> work/v3.json                  # free: launch plan at every shape
 python3 tools/pgaio.py sass <run> work/v3.json --show LDG,BAR   # free: how a draft compiled
 python3 tools/pgaio.py eval <run> work/v3.json --hypothesis "warp-shuffle reduction"
-python3 tools/pgaio.py compare <run> 2 7                        # free
+python3 tools/pgaio.py profile <run> 7                          # free: Nsight Compute on an evaluated iteration
+python3 tools/pgaio.py ab <run> 7 9                             # free: alternating A/B timing with a CI
+python3 tools/pgaio.py compare <run> 2 7                        # free, also against ref:cublas
+python3 tools/pgaio.py reference <run> --lib cublas             # free: matmul's library ceiling
+python3 tools/pgaio.py skip-dsl <run> cutile --reason "..." --evidence "..."
+python3 tools/pgaio.py status <run>
+python3 tools/pgaio.py learn <run> --insight "..." --evidence "..."
 python3 tools/pgaio.py api cutile load                           # free: a DSL's API
 python3 tools/pgaio.py report --html progress.html
 ```
+
+With no budget a run goes until the target, a plateau, or until it is
+stopped. A plateau is 10 evals without a real gain, after every DSL had 3
+evals or was marked a dead end with `skip-dsl`. In runs started now a gain
+must beat the best by more than 0.5 points and by more than the two scores'
+confidence intervals, or be shown faster by `ab`; older runs keep the plain
+0.5 point rule. Asking an agent only needs the problem, for example
+"optimize softmax for small inputs, any DSL", and the skill fills in the
+rest.
+
+`profile` runs Nsight Compute on arena for an iteration that passed eval, or
+on the library reference, and saves stall reasons, pipe use, bank conflicts
+and the instructions carrying the most stalls under `profiles/` in the run.
+Its durations come from a locked base clock with replay and are never a
+score. `reference --lib cublas` times `matmul_cublas` (plain FP32, no TF32)
+with eval's settings, so every matmul candidate is also shown as a
+percentage of cuBLAS. References never become the best and do not count.
 
 A candidate is a kernel plus a small JSON manifest saying how to launch it:
 grid and block as expressions such as `cdiv(rows, ROWS_PER_PROGRAM)`, and
@@ -420,12 +444,30 @@ The first loops, run on every category at all sizes with Claude Opus 5.5 on
 an RTX PRO 6000: reduce 0.7% to 75.1%, scan 1.1% to 64.7% (CUDA plus Triton
 dispatch), softmax 57.5% to 74.9%, matmul 8.1% to 29.6% (40.7% of FP32 peak
 at 4096^3), attention 2.1% to 22.9% (a fused online-softmax kernel at ~31%
-of FP32 peak for long sequences). What they taught is in
+of FP32 peak for long sequences). A later FP32 matmul run against cuBLAS
+went from 4.8% to 47.4%, about 95% of cuBLAS on the same board. What they
+taught is in
 `pgaio/learnings.jsonl` and the optimize skill's `playbook.md`.
 
 Run directories go to `pgaio/runs/` (ignored by git). Insights recorded with
 `pgaio.py learn` go to `pgaio/learnings.jsonl` and are shown at the start of
 later runs.
+
+### Measurement changes
+
+Some later additions change what a measurement includes. Each is reporting
+only, opt-in, or applies only to runs started after it, so older runs stay
+readable and comparable:
+
+| Change | Effect on measurements |
+| --- | --- |
+| Score CI and per-shape spread | Reporting only, computed from the timings eval already takes. |
+| `init --counters full` (the default for new runs) | More counter replay passes, so evals take longer. Timing runs separately and is unaffected. |
+| Clock and power sampling | A host thread polls NVML every 2 ms during the timed runs. It issues no GPU work and timing uses CUDA events, so GPU times are unaffected; on a busy host it shares the CPU with the launching thread. NVML refreshes the clock reading about every 500 ms, so short windows report one value. |
+| `init --lock-clocks <MHz\|auto>` | Opt-in. Steadier rankings, lower absolute numbers than boost. Needs root (and `SYS_ADMIN` in Docker); falls back to unlocked with a warning, recorded in the run. |
+| `init --scratch-policy declared` | Opt-in. Zeroing scratch marked `"zero": true` moves inside the timed op, so `op_ms` includes the memset; other scratch is filled with `0xFF`. The default `legacy` keeps the old behaviour. |
+| `matmul_cublas` | A new reference kernel. It never becomes a run's best and does not count as an iteration. |
+| Plateau rule 2 | New runs only; runs without the setting keep rule 1. |
 
 ## Tests
 
