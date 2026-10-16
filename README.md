@@ -27,11 +27,25 @@ pipe the output straight into other tools.
 ```
 
 Sizes, input distributions and seeds take comma-separated lists, and every
-combination runs, each result recording which one it was:
+combination runs, each result recording which one it was. Shapes that are not
+a grid are listed with `--shape`:
 
 ```bash
 ./arena --run reduce_vectorized -p n=1000003,67108864 --dist uniform,adversarial --seed 1,2
+./arena --run softmax --shape rows=64,cols=1024 --shape rows=16384,cols=4096
 ```
+
+Kernels described by a JSON manifest (see Agents and PGAIO) need no C++
+descriptor. `--manifest k.json` runs one; `--open <dir>` loads every manifest
+under a folder as kernels, for `--list` and category runs.
+
+The GUI lists one folder's kernels at a time: `kernels/` by default, or the
+folder given with `--open`, so `docker compose run --rm gui --gui --open
+pgaio/runs/scan-1` shows that run's baseline and candidates (named
+`scan-1/006-m1`, with the hypothesis and score on hover), and `--open
+pgaio/runs` shows every run. The Open button switches folders and lists the
+PGAIO runs. A native build usually lacks Triton, cuTile or Warp; their kernels
+are greyed out there, and the Docker GUI runs them.
 
 Three commands describe a kernel without running it:
 
@@ -111,6 +125,14 @@ together or compare one against another.
 | Build | `compile_ms`, `import_ms`, `invoke_ms` | One time, cached to disk. `compile_ms` is the DSL compiler itself, separate from Python startup. |
 
 GFLOPS and GB/s divide by `op_ms`. Hardware counters divide by `gpu_ms`.
+
+`op_ms` is a median. Microsecond kernels' event timings cluster near
+multiples of about 2 µs on some GPUs, so results also carry `op_ms_trimmed`,
+the mean of the middle half of the runs, which moves smoothly where the
+median steps. Each run also reports two floors in `environment`:
+`launch_floor_ms` (an empty kernel launch, about 2.2 µs on an RTX PRO 6000)
+and `roundtrip_floor_ms` (a launch plus one cold DRAM read and one write,
+about 4.1 µs), the least a kernel that reads its input from memory can take.
 
 By default the timed loop runs with whatever the previous launch left in L2.
 A working set smaller than L2 (128 MB on an RTX PRO 6000) is then served from
@@ -352,40 +374,54 @@ both links to `skills/`, and `AGENTS.md` lists them.
 | `arena-add-kernel` | Files, descriptors, ABI, promoting a candidate to a kernel |
 | `arena-optimize` | The PGAIO loop |
 
-`tools/pgaio.py` is the environment for that loop. A run targets a problem,
-and the agent writes as many candidates as it wants, in any DSL:
+`tools/pgaio.py` is the environment for that loop. A run targets a problem
+(reduce, scan, softmax, matmul or attention) at a size regime, and the agent
+writes as many candidates as it wants, in any DSL:
 
 ```bash
-python3 tools/pgaio.py init --category softmax --budget-per-dsl 10 --target 0.9
-python3 tools/pgaio.py sass <run> work/v3.json        # free: how a draft compiled
+python3 tools/pgaio.py init --category softmax --sizes all --budget-per-dsl 10
+python3 tools/pgaio.py sass <run> work/v3.json --show LDG,BAR   # free: how a draft compiled
 python3 tools/pgaio.py eval <run> work/v3.json --hypothesis "warp-shuffle reduction"
-python3 tools/pgaio.py compare <run> 2 7              # free: two iterations side by side
+python3 tools/pgaio.py compare <run> 2 7                        # free
+python3 tools/pgaio.py api cutile load                           # free: a DSL's API
 python3 tools/pgaio.py report --html progress.html
 ```
 
-A candidate is a kernel source plus a small JSON manifest saying how to launch
-it: grid and block as expressions such as `cdiv(rows, ROWS_PER_PROGRAM)`, and
+A candidate is a kernel plus a small JSON manifest saying how to launch it:
+grid and block as expressions such as `cdiv(rows, ROWS_PER_PROGRAM)`, and
 arguments from a fixed vocabulary (the category's buffers and sizes, scratch
-buffers, and each DSL's argument format). `arena --manifest k.json` runs one
-directly. The manifest is data, not code, so it chooses how a kernel is
-launched but never touches the data, the reference, the verification or the
-byte counts SOL is computed from. Arena checks every argument against the
+buffers, and each DSL's argument format). Launches can carry a `when`
+condition and their own `source`, so one candidate can dispatch small and
+large inputs to different kernels, chain several Triton kernels, or mix
+DSLs. The manifest is data, not code: it chooses how a kernel is launched
+but never touches the data, the reference, the verification or the byte
+counts SOL is computed from. Arena checks every argument against the
 compiled function's real parameter sizes and refuses a mismatch.
 
-Each `eval` gates the candidate on held-out sizes, distributions and seeds,
-times it at a size larger than L2 with `--l2 cold`, scores it as a fraction of
-the roofline, diffs its SASS against the best so far, and prints a short
-diagnosis. Verification uses inputs regenerated from a seed the kernel never
-saw and covers the whole output, so a kernel that caches, precomputes or skips
-work fails. The harness is hashed before and after, so a candidate that edits
-it is rejected. Every eval counts as an iteration of its DSL's budget, failed
-ones included; looking at SASS does not. `report` gives iterations-to-50, 70,
-80 and 90% SOL overall and per DSL, and `--html` draws the progression: every
-iteration coloured by DSL, with its hypothesis and SASS changes.
+`--sizes small|large|all` (default all) picks the timed shapes, from a few KB
+up to several times L2. Each shape is scored against the slowest of three
+floors: the ideal bytes at peak DRAM bandwidth, the FLOPs at peak FP32, and
+the round-trip latency floor. The run's score is the geometric mean across
+shapes, so a kernel cannot hide a weak size, and every observation prints the
+per-shape table.
 
-`--mode cross-dsl` lets the agent study the existing kernels as well;
-comparing it with `isolated` measures what they are worth as hints.
-`init --kernel <name>` instead tunes one existing kernel's source in place.
+Each `eval` gates the candidate on held-out sizes, distributions and seeds,
+times it with `--l2 cold` and 100 runs per shape, diffs its SASS against the
+best so far, and prints a short diagnosis. Verification uses inputs
+regenerated from a seed the kernel never saw and covers the whole output, so
+a kernel that caches, precomputes or skips work fails. The harness is hashed
+before and after, so a candidate that edits it is rejected; `rehash` lets a
+maintainer accept a deliberate harness change mid-run, and records it in the
+journal. Every eval counts against its DSL's budget (candidates mixing DSLs
+count as `mixed`); looking at SASS does not. `journal.md` and `progress.html`
+in the run folder update after every eval.
+
+The first loops, run on every category at all sizes with Claude Opus 5.5 on
+an RTX PRO 6000: reduce 0.7% to 75.1%, scan 1.1% to 64.7% (CUDA plus Triton
+dispatch), softmax 57.5% to 74.9%, matmul 8.1% to 29.6% (40.7% of FP32 peak
+at 4096^3), attention 2.1% to 22.9% (a fused online-softmax kernel at ~31%
+of FP32 peak for long sequences). What they taught is in
+`pgaio/learnings.jsonl` and the optimize skill's `playbook.md`.
 
 Run directories go to `pgaio/runs/` (ignored by git). Insights recorded with
 `pgaio.py learn` go to `pgaio/learnings.jsonl` and are shown at the start of

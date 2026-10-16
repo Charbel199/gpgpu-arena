@@ -32,7 +32,9 @@ $ARENA --run matmul -p M=1024 -p N=1024 -p K=1024
 $ARENA --run reduce --dist uniform,normal,adversarial --seed 1,2   # every combination runs
 ```
 
-Every combination of `-p` lists, `--dist` and `--seed` runs, and each result says which one it was in `results[i].input`.
+Every combination of `-p` lists, `--dist` and `--seed` runs, and each result says which one it was in `results[i].input`. For shapes that are not a grid, list them instead: `--shape rows=64,cols=1024 --shape rows=16384,cols=4096`.
+
+Kernels from manifests (see the arena-optimize skill) join the built-in ones with `--open <dir>`: every manifest under the folder becomes a kernel for `--list` and category runs, named by its `"name"` or else `<folder>/<file>`; PGAIO names its snapshots `<run>/<iteration>-<file>`. The GUI with `--open <dir>` lists only that folder's kernels (plus the baseline of each PGAIO run in it) instead of `kernels/`. A single one runs with `--manifest <file.json>`. Relative paths are taken from the current directory, or else the repo root; a folder that does not exist exits with code 2.
 
 Measurement options:
 
@@ -55,7 +57,7 @@ Measurement options:
 
 ## Reading a result
 
-Top level: `environment` (device, arch, `peak_dram_gbps`, `peak_fp32_gflops`, `l2_cache_bytes`, driver, toolkit), `config`, `results[]`, `summary`.
+Top level: `environment` (device, arch, `peak_dram_gbps`, `peak_fp32_gflops`, `l2_cache_bytes`, `launch_floor_ms` (an empty kernel launch, the least any `op_ms` can be), driver, toolkit), `config`, `results[]`, `summary`.
 
 Each result:
 

@@ -83,6 +83,6 @@ Constraints, which together are the slot's ABI:
 - Same file type as the slot (`.cu`, `.triton.py`, `.cutile.py`, `.warp.py`).
 - Same entry point name (`entry_point` from `--inspect`) and the same parameter list in the same order.
 - The descriptor decides the launch grid and block. Read `descriptor_file` before changing how work is split. For example `reduce_baseline` launches one thread per element, while `reduce_grid_stride` launches `32 * SMs` blocks and expects a grid-stride loop. Triton slots take the grid from the source's own constants, so a Triton candidate can change `BLOCK_SIZE`/`NUM_BLOCKS` freely.
-- Under Docker the file must be inside the repo, since only the repo is mounted. Relative paths are resolved from the repo root.
+- Under Docker the file must be inside the repo, since only the repo is mounted. Relative paths are resolved from the current directory, or else the repo root.
 
 If an idea needs a different ABI, write a manifest instead: a JSON file naming the source, the launch shape and the arguments, run with `--manifest`. No descriptor and no rebuild, in any DSL; see the arena-optimize skill's [manifests.md](../arena-optimize/manifests.md). `--inspect`, `--sass` and `--ptx` all accept `--manifest` in place of a kernel name, and describe every entry point a multi-launch manifest uses.
