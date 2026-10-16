@@ -11,11 +11,13 @@
 #include "arena/manifest/manifest_kernel.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <string>
 
 namespace frontend {
@@ -332,6 +334,9 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
     try {
         arena::CompileResult cr;
         const bool compiled = k.needs_compilation() && !k.source_path().empty();
+        // A manifest launch with "defines" on the main source builds over
+        // --define, as in a run, so its variant key needs them set first.
+        k.set_compile_options(o.config.compile_options);
         if (compiled) cr = runner.compiler().compile(k.effective_source_path(), o.config.compile_options);
         std::map<std::string, arena::CompileResult> extra_cr;
         for (const auto& src : k.extra_sources()) extra_cr[src] = runner.compiler().compile(src);
@@ -427,20 +432,55 @@ int run_inspect(arena::Runner& runner, arena::KernelDescriptor& k,
                 namespace fs = std::filesystem;
                 fs::path dir(arena::resolve_user_path(o.artifacts_dir, ARENA_SOURCE_DIR));
                 fs::create_directories(dir);
-                // CUDA has no sidecar; its PTX is a separate nvcc pass.
-                if (dsl == "cuda") {
-                    const auto ptx = runner.compiler().emit_ptx(k.effective_source_path(),
-                                                                o.config.compile_options);
-                    if (!ptx.empty()) artifacts.push_back(fs::absolute(ptx).string());
-                }
+                // Every source a manifest compiles, each saved as <stem>.ptx,
+                // .ttgir, .warp_gen.cu; a launch variant adds its defines,
+                // <stem>_BLOCK256.ptx. The main source is also kernel.<ext>,
+                // the name tools read before manifests had several sources.
+                std::vector<std::pair<std::string, arena::CompileDefines>> builds = {
+                    {k.effective_source_path(), o.config.compile_options}};
+                for (const auto& [src, ecr] : extra_cr) builds.push_back({src, {}});
                 std::vector<std::string> copied;
-                for (const auto& a : artifacts) {
-                    const std::string name = fs::path(a).filename().string();
-                    const auto dot = name.find('.');
-                    const fs::path dest = dir / ("kernel" + (dot == std::string::npos ? "" : name.substr(dot)));
+                std::set<std::string> taken = {"kernel"};
+                auto copy = [&](const std::string& from, const fs::path& dest) {
                     std::error_code ec;
-                    fs::copy_file(a, dest, fs::copy_options::overwrite_existing, ec);
+                    fs::copy_file(from, dest, fs::copy_options::overwrite_existing, ec);
                     if (!ec) copied.push_back(dest.string());
+                };
+                for (size_t b = 0; b < builds.size(); b++) {
+                    const auto& [src, defs] = builds[b];
+                    auto files = runner.compiler().sidecars(src, defs);
+                    // CUDA has no sidecar; its PTX is a separate nvcc pass.
+                    if (arena::KernelCompiler::get_extension(src) == ".cu") {
+                        const auto ptx = runner.compiler().emit_ptx(src, defs);
+                        // sidecars() already lists it when an earlier build wrote it
+                        const auto abs = ptx.empty() ? "" : fs::absolute(ptx).string();
+                        if (!abs.empty() && std::find(files.begin(), files.end(), abs) == files.end())
+                            files.push_back(abs);
+                    }
+                    const auto [path, vdefs] = arena::KernelCompiler::split_variant(src);
+                    const std::string fname = fs::path(path).filename().string();
+                    std::string stem = fname.substr(0, fname.find('.')) + arena::defines_suffix(vdefs);
+                    // Two sources can share a stem (sub/ln.cu next to ln.cu, or
+                    // ln.cu and ln.triton.py), and one named kernel.* would hit
+                    // the main build's alias; later builds get their index.
+                    if (b > 0 && taken.count(stem)) stem += "_" + std::to_string(b);
+                    taken.insert(stem);
+                    for (const auto& a : files) {
+                        const std::string name = fs::path(a).filename().string();
+                        // "<cache name><ext>"; the cache name has no dots
+                        std::string ext;
+                        for (const char* e : {".warp_gen.cu", ".ttgir", ".ptx"}) {
+                            const std::string se(e);
+                            if (name.size() >= se.size() && name.compare(name.size() - se.size(), se.size(), se) == 0) {
+                                ext = se;
+                                break;
+                            }
+                        }
+                        if (ext.empty()) continue;
+                        if (b == 0) copy(a, dir / ("kernel" + ext));
+                        copy(a, dir / (stem + ext));
+                    }
+                    if (b == 0) artifacts = files;
                 }
                 j["artifacts_copied"] = copied;
             }
@@ -512,6 +552,11 @@ int run_plan(arena::Runner& runner, arena::KernelDescriptor& k, const CliOptions
     }
 
     json j = {{"plans", json::array()}, {"ok", true}};
+    try {
+        j["device"] = minfo->device_limits(runner.mutable_context());
+    } catch (const std::exception& e) {
+        j["device"] = {{"error", e.what()}};
+    }
     for (const auto& params : param_sets) {
         k.set_problem_size(params);
         auto p = minfo->plan(runner.mutable_context());
@@ -580,16 +625,19 @@ void print_cli_usage(const char* program) {
         "                            descriptor\n"
         "  --plan                    With --manifest: compile, then print as JSON what\n"
         "                            each --shape would launch (scratch sizes, grid,\n"
-        "                            block, shared memory, arguments) without allocating\n"
-        "                            or launching. Exit 0 if every shape resolves, 1 if\n"
-        "                            any has an error\n"
+        "                            block, shared memory, arguments, registers) without\n"
+        "                            allocating or launching, and checks each launch\n"
+        "                            against the device's limits. Exit 0 if every shape\n"
+        "                            resolves, 1 if any has an error\n"
         "  --scratch-policy <p>      legacy (default): manifest scratch is zeroed before\n"
         "                            every launch, untimed. declared: scratch marked\n"
         "                            \"zero\": true is zeroed inside the timed op, the\n"
         "                            rest is filled with 0xFF bytes\n"
         "  --artifacts-dir <dir>     With --inspect: copy PTX, Triton IR and Warp's\n"
         "                            generated CUDA into dir, since the compile cache may\n"
-        "                            not be visible outside Docker\n"
+        "                            not be visible outside Docker. One set per manifest\n"
+        "                            source, named after the file (v1.ptx), plus kernel.*\n"
+        "                            for the main one\n"
         "  --source-override <file>  Use this source in the kernel's slot instead of its\n"
         "                            own. Needs a single kernel and the same file type\n"
         "                            as the slot\n"

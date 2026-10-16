@@ -56,14 +56,18 @@ float measure_roundtrip_floor_ms() {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    // The input lives at the start of the scrub buffer and the memset that
-    // evicts L2 runs before the start event, so each timed launch reads its
-    // one value from DRAM, as a kernel on cold input would.
+    // The input lives in the middle of the scrub buffer, and the memset that
+    // evicts L2 finishes before the start event, so each timed launch reads
+    // its one value from DRAM, as a kernel on cold input would. Waiting for
+    // the memset matters: an event queued behind it is stamped on a 2 us
+    // grid, which made this floor read exactly 4.096 us whatever the load
+    // cost (the same fix as arena's --timing-mode v2).
     float best = 0.0f;
     for (int batch = 0; batch < 4; batch++) {
         std::vector<float> t;
         for (int i = 0; i < 32; i++) {
             cudaMemsetAsync(scrub, i & 0xff, scrub_bytes, nullptr);
+            cudaStreamSynchronize(nullptr);
             cudaEventRecord(start, nullptr);
             arena_roundtrip_kernel<<<1, 1>>>(scrub + (scrub_bytes / sizeof(float)) / 2, out);
             cudaEventRecord(stop, nullptr);

@@ -102,6 +102,10 @@ public:
     double calculate_bytes_accessed() const override {
         return static_cast<double>(size_input_ + size_output_);
     }
+
+    IdealBytes ideal_bytes() const override {
+        return ideal::reduce((size_t)n_, input_dtype(), output_dtype());
+    }
     
     VerifyResult verify(Context& ctx) override {
         // Read back through the output type, whatever its width.

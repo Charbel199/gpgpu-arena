@@ -24,6 +24,9 @@
 //     }]
 //   }
 //
+// A launch may also name its own "source" and carry "defines": {"BLOCK": 256}
+// so one source compiles into several variants.
+//
 // Everything that decides the score stays with the category: input data,
 // the CPU reference, verification, tolerance, and the byte and FLOP counts
 // SOL is computed from. A manifest is data, so it can choose how the kernel
@@ -38,8 +41,15 @@ public:
     virtual ~ManifestInfo() = default;
     virtual const std::string& manifest_path() const = 0;
     virtual std::vector<std::string> entry_points() const = 0;
-    // Source file of each entry point, in the same order.
+    // Source of each entry point, in the same order, as extra_sources() names
+    // it: a launch with "defines" gives KernelCompiler::variant_path().
     virtual std::vector<std::string> entry_sources() const = 0;
+
+    // The device limits launches are checked against, for --plan:
+    // {"max_threads_per_block", "max_block", "max_grid",
+    //  "max_shared_per_block", "max_shared_per_block_optin",
+    //  "max_registers_per_block", "max_registers_per_sm"}.
+    virtual nlohmann::json device_limits(Context& ctx) = 0;
 
     // What a run would launch at the current problem size, without
     // allocating or launching anything: scratch sizes, and for each launch
@@ -47,10 +57,16 @@ public:
     // (buffers by name). Needs the compile results set and the modules
     // loadable, since entry points and parameter sizes come from the cubin.
     // Never throws for a manifest error: the first one goes in "error".
+    // Each applying launch is checked against the device and the compiled
+    // function (manifest/limits.hpp); a launch with "problems" makes them the
+    // shape's error, naming the launch.
     //
     //   {"params": {...}, "scratch": [{"name", "bytes"}],
-    //    "launches": [{"index", "entry", "source", "applies",
-    //                  "grid", "block", "shared_mem_bytes", "args"}],
+    //    "launches": [{"index", "entry", "source", "defines", "applies",
+    //                  "grid", "block", "shared_mem_bytes", "args",
+    //                  "resources": {"registers", "static_shared_bytes",
+    //                                "max_threads_per_block"},
+    //                  "problems": ["..."]}],
     //    "error": ""}
     virtual nlohmann::json plan(Context& ctx) = 0;
 };

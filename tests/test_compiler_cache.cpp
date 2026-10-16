@@ -209,6 +209,31 @@ TEST_CASE("KernelCompiler cache") {
         CHECK(compiles == 3);
     }
 
+    SUBCASE("a variant path carries its defines") {
+        const auto v = KernelCompiler::variant_path(src, {{"ROWS", 4}, {"BLOCK", 256}});
+        CHECK(v == src + "|BLOCK=256,ROWS=4");
+        CHECK(KernelCompiler::variant_path(src, {}) == src);
+        const auto [path, d] = KernelCompiler::split_variant(v);
+        CHECK(path == src);
+        CHECK(d == CompileDefines{{"BLOCK", 256}, {"ROWS", 4}});
+        CHECK(KernelCompiler::split_variant(src).second.empty());
+        CHECK(KernelCompiler::get_extension(v) == ".cu");
+        CHECK(KernelCompiler::derive_output_name(v) ==
+              KernelCompiler::derive_output_name(src) + "_BLOCK256_ROWS4");
+
+        // the same build as passing the defines, and cached with it
+        auto a = c.compile(v);
+        CHECK(compiles == 2);
+        auto b = c.compile(src, {{"BLOCK", 256}, {"ROWS", 4}});
+        CHECK(b.cache_hit);
+        CHECK(a.module_path == b.module_path);
+        // a variant's own defines win over the ones passed
+        CHECK(c.compile(v, {{"BLOCK", 128}}).cache_hit);
+        CHECK(compiles == 2);
+        CHECK(c.compile(KernelCompiler::variant_path(src, {{"BLOCK", 128}})).module_path != a.module_path);
+        CHECK(compiles == 3);
+    }
+
     SUBCASE("metadata from before fingerprints is treated as stale") {
         auto meta = fs::path(cache) / (KernelCompiler::derive_output_name(src) + ".json");
         REQUIRE(fs::exists(meta));

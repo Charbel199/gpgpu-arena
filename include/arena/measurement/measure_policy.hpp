@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <vector>
 
 // Pure measurement policy: no CUDA, no I/O, no global state.
@@ -53,11 +54,31 @@ struct ClockPowerStats {
 ClockPowerStats summarize_clock_power(const std::vector<unsigned>& sm_mhz,
                                       const std::vector<double>& watts);
 
+// SM clock samples pooled across every timed window of a process, so a run
+// can report the clock it actually got next to the one it asked for. The
+// sampler polls at a fixed interval, so the mean is weighted by time.
+struct ClockTally {
+    double sum_mhz = 0.0;
+    long long samples = 0;
+    void add(const std::vector<unsigned>& sm_mhz);
+    // nullopt when no window was sampled (NVML missing, nothing timed)
+    std::optional<double> mean() const;
+};
+
+// True when achieved_mhz falls more than `tolerance` (a fraction) below
+// requested_mhz. A lock is a ceiling, not a floor: the board's boost limit
+// at its current voltage and temperature, and power and thermal limits, still
+// hold the clock below it. False when either value is zero.
+bool clock_below_request(double achieved_mhz, unsigned requested_mhz,
+                         double tolerance = 0.03);
+
 // The clock --lock-clocks auto asks for: the lower of the board's default
 // application clock (its rated boost, which it is meant to sustain) and 85%
 // of the max SM clock, snapped down to a clock the board supports. The 85%
 // figure is the fallback when the default clock is unknown and a cap when it
-// is implausibly high. default_app_mhz may be 0 and supported may be empty.
+// is implausibly high. Locking higher than the board can hold does not raise
+// the clock: the boost limit, power and thermal limits still win, and only a
+// clock at or below the sustainable one stays fixed. default_app_mhz may be 0 and supported may be empty.
 // Returns 0 if max_mhz is 0.
 unsigned pick_auto_lock_clock(unsigned max_mhz, unsigned default_app_mhz,
                               const std::vector<unsigned>& supported);

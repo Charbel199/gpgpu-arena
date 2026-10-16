@@ -18,6 +18,7 @@
 #include "arena/manifest/manifest_kernel.hpp"
 
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 #ifdef ARENA_GUI_ENABLED
@@ -33,9 +34,38 @@ void print_usage(const char* program) {
 #endif
               << "  --help, -h                Show this help message\n\n";
     frontend::print_cli_usage(program);
+    std::cout <<
+        "\nMeasurement:\n"
+        "  --timing-mode <v1|v2>     How each timed launch is bracketed, for the whole\n"
+        "                            process. v1 (default) queues the start event right\n"
+        "                            behind the untimed reset and L2 scrub; such an event\n"
+        "                            lands on a 2.048 us grid on some GPUs, so small ops\n"
+        "                            read as 4.096, 6.144, 8.192 us. v2 waits for the\n"
+        "                            reset first (untimed), so the start event keeps its\n"
+        "                            full resolution and op_ms is measured the way\n"
+        "                            launch_floor_ms is. Small-shape op_ms differs between\n"
+        "                            the two: compare runs of the same mode only\n"
+        "  --lock-clocks note        A lock is a ceiling, not a floor. Locking above the\n"
+        "                            clock the board sustains does not raise it: the\n"
+        "                            boost limit, power and thermal limits still hold\n"
+        "                            it down.\n"
+        "                            environment.clock_lock.achieved_mhz reports the mean\n"
+        "                            clock of the timed runs, and a warning is logged\n"
+        "                            when it is more than 3% below the request\n";
 }
 
 int main(int argc, char** argv) {
+    // Process-wide, so handled here like --lock-clocks, and taken out of argv
+    // before the CLI parser sees it.
+    std::optional<arena::TimingMode> timing_mode;
+    if (auto tm = arena::cli::take_timing_mode(argc, argv)) {
+        timing_mode = arena::cli::parse_timing_mode(*tm);
+        if (!timing_mode) {
+            std::cerr << "Error: unknown --timing-mode '" << *tm << "' (expected v1 or v2)\n";
+            return static_cast<int>(frontend::CliExit::UsageError);
+        }
+    }
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
@@ -101,6 +131,7 @@ int main(int argc, char** argv) {
             }
         }
         arena::Runner runner(ctx, loader, compiler, profiler, power);
+        if (timing_mode) runner.set_timing_mode(timing_mode);
 
         if (cli_mode) {
             // The GUI loads these itself so it can log them in its panel.

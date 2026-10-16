@@ -72,6 +72,15 @@ std::optional<unsigned> parse_lock_clocks(const std::string& s);
 std::vector<std::map<std::string, int>> expand_grid(
     const std::map<std::string, std::vector<int>>& lists);
 
+// --timing-mode value: "v1" or "v2". nullopt for anything else.
+std::optional<TimingMode> parse_timing_mode(const std::string& s);
+
+// Removes every "--timing-mode <value>" pair from argv, in place, and
+// returns the last value, or nullopt when there is none. main handles the flag
+// itself, like --lock-clocks, because it applies to the whole process. A
+// trailing --timing-mode with no value is left for the CLI to reject.
+std::optional<std::string> take_timing_mode(int& argc, char** argv);
+
 // "legacy" or "declared". nullopt for anything else.
 std::optional<ScratchPolicy> parse_scratch_policy(const std::string& s);
 

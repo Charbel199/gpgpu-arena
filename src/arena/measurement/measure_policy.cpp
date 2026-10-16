@@ -73,6 +73,21 @@ ClockPowerStats summarize_clock_power(const std::vector<unsigned>& sm_mhz,
     return out;
 }
 
+void ClockTally::add(const std::vector<unsigned>& sm_mhz) {
+    for (unsigned c : sm_mhz) sum_mhz += c;
+    samples += static_cast<long long>(sm_mhz.size());
+}
+
+std::optional<double> ClockTally::mean() const {
+    if (samples <= 0) return std::nullopt;
+    return sum_mhz / static_cast<double>(samples);
+}
+
+bool clock_below_request(double achieved_mhz, unsigned requested_mhz, double tolerance) {
+    if (!(achieved_mhz > 0.0) || requested_mhz == 0) return false;
+    return achieved_mhz < requested_mhz * (1.0 - tolerance);
+}
+
 unsigned pick_auto_lock_clock(unsigned max_mhz, unsigned default_app_mhz,
                               const std::vector<unsigned>& supported) {
     if (max_mhz == 0) return 0;

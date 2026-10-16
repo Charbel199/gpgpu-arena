@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 #include "arena/manifest/expr.hpp"
 #include "arena/manifest/args.hpp"
+#include "arena/manifest/limits.hpp"
 #include "arena/warp_abi.hpp"
 
 #include <cstring>
@@ -155,10 +156,120 @@ TEST_CASE("manifest argument packing") {
         CHECK_THROWS_WITH(pack_args(json::parse(R"(["inptu"])"), ctx), doctest::Contains("unknown name"));
         CHECK_THROWS_WITH(pack_args(json::parse(R"([{"cutile_array": "nope", "shape": [1]}])"), ctx),
                           doctest::Contains("unknown buffer 'nope'"));
-        CHECK_THROWS(pack_args(json::parse(R"([{"f32": 1}])"), ctx));
+        CHECK_THROWS(pack_args(json::parse(R"([{"f16": 1}])"), ctx));
+        CHECK_THROWS(pack_args(json::parse(R"([{"f32": [1]}])"), ctx));
+        CHECK_THROWS_WITH(pack_args(json::parse(R"([{"f32": "epz"}])"), ctx), doctest::Contains("unknown name 'epz'"));
         CHECK_THROWS(pack_args(json::parse(R"(["...", "input"])"), ctx));
         CHECK_THROWS(pack_args(json::parse(R"({"not": "a list"})"), ctx));
         CHECK_THROWS(pack_args(json::parse(R"([{"cutile_array": "input", "shape": [1, 2], "strides": [1]}])"), ctx));
+    }
+}
+
+TEST_CASE("manifest float arguments") {
+    ArgContext ctx;
+    ctx.buffers = {{"input", 0x1000}};
+    ctx.vars = {{"rows", 4}, {"cols", 6}};
+    ctx.floats = {{"eps", 1e-5}};
+
+    auto p = pack_args(json::parse(R"([{"f32": 1e-5}, {"f64": 0.25}, "eps", {"f32": "eps"},
+                                       {"f64": "eps"}, {"f32": "cols"}, {"f32": "2.5e-3"}, {"f32": 3}])"), ctx);
+    REQUIRE(p.size() == 8);
+    CHECK(p.size_of(0) == 4);
+    CHECK(p.size_of(1) == 8);
+    CHECK(p.size_of(2) == 4);
+    CHECK(as<float>(p, 0) == 1e-5f);
+    CHECK(as<double>(p, 1) == 0.25);
+    CHECK(as<float>(p, 2) == 1e-5f);
+    CHECK(as<float>(p, 3) == 1e-5f);
+    CHECK(as<double>(p, 4) == 1e-5);
+    CHECK(as<float>(p, 5) == 6.0f);
+    CHECK(as<float>(p, 6) == 2.5e-3f);
+    CHECK(as<float>(p, 7) == 3.0f);
+    // the bytes are the IEEE value, and each parameter is aligned for its type
+    float f = 1e-5f;
+    CHECK(std::memcmp(p.bytes(0).data(), &f, 4) == 0);
+    for (size_t i = 0; i < p.size(); i++) {
+        CHECK(reinterpret_cast<uintptr_t>(p.pointers()[i]) % p.size_of(i) == 0);
+    }
+
+    SUBCASE("sizes are checked against the kernel") {
+        ctx.param_sizes = {8, 4};
+        CHECK_NOTHROW(pack_args(json::parse(R"(["input", {"f32": 1}])"), ctx));
+        CHECK_THROWS_WITH(pack_args(json::parse(R"(["input", {"f64": 1}])"), ctx),
+                          doctest::Contains("argument 1 is 8 bytes"));
+    }
+    SUBCASE("described for --plan") {
+        json d;
+        pack_args(json::parse(R"(["eps", {"f64": 0.5}])"), ctx, &d);
+        CHECK(d[0]["name"] == "eps");
+        CHECK(d[0]["type"] == "f32");
+        CHECK(d[1] == json{{"type", "f64"}, {"expr", 0.5}, {"value", 0.5}});
+    }
+}
+
+TEST_CASE("manifest launch defines") {
+    const auto d = parse_defines(json::parse(R"({"BLOCK": 256, "ROWS": 4, "_x1": -2})"));
+    CHECK(d == std::map<std::string, int>{{"BLOCK", 256}, {"ROWS", 4}, {"_x1", -2}});
+    CHECK(parse_defines(json::object()).empty());
+
+    CHECK_THROWS_WITH(parse_defines(json::parse(R"([1])")), doctest::Contains("must be an object"));
+    CHECK_THROWS_WITH(parse_defines(json::parse(R"({"1BLOCK": 1})")), doctest::Contains("not an identifier"));
+    CHECK_THROWS_WITH(parse_defines(json::parse(R"({"BLO CK": 1})")), doctest::Contains("not an identifier"));
+    CHECK_THROWS_WITH(parse_defines(json::parse(R"({"": 1})")), doctest::Contains("not an identifier"));
+    CHECK_THROWS_WITH(parse_defines(json::parse(R"({"BLOCK": 1.5})")), doctest::Contains("must be an integer"));
+    CHECK_THROWS_WITH(parse_defines(json::parse(R"({"BLOCK": "256"})")), doctest::Contains("must be an integer"));
+    CHECK_THROWS_WITH(parse_defines(json::parse(R"({"BLOCK": true})")), doctest::Contains("must be an integer"));
+    CHECK_THROWS_WITH(parse_defines(json::parse(R"({"BLOCK": 4294967296})")), doctest::Contains("32 bits"));
+}
+
+TEST_CASE("manifest launch resource problems") {
+    DeviceLimits dev;
+    dev.max_shared_per_block_optin = 101376;
+    FunctionLimits fn;
+    fn.registers = 40;
+    fn.max_threads_per_block = 1024;
+    LaunchShape l;
+    l.grid = {4096, 1, 1};
+    l.block = {256, 1, 1};
+
+    CHECK(launch_problems(dev, fn, l).empty());
+
+    SUBCASE("shared memory counts static and dynamic against the opt-in limit") {
+        l.dynamic_shared_bytes = 196608;
+        auto p = launch_problems(dev, fn, l);
+        REQUIRE(p.size() == 1);
+        CHECK(p[0] == "needs 196608 B of shared memory (196608 dynamic + 0 static), "
+                      "the device allows 101376 per block");
+        l.dynamic_shared_bytes = 101376;
+        CHECK(launch_problems(dev, fn, l).empty());
+        fn.static_shared_bytes = 16;
+        CHECK(launch_problems(dev, fn, l).size() == 1);
+    }
+    SUBCASE("threads per block, the device's and the function's") {
+        l.block = {2048, 1, 1};
+        auto p = launch_problems(dev, fn, l);
+        REQUIRE(p.size() == 2);
+        CHECK(p[0] == "block.x is 2048, the device allows 1024");
+        CHECK(p[1] == "block has 2048 threads, the device allows 1024");
+
+        l.block = {32, 32, 1};
+        fn.registers = 128;
+        fn.max_threads_per_block = 512;
+        p = launch_problems(dev, fn, l);
+        REQUIRE(p.size() == 1);
+        CHECK(p[0] == "block has 1024 threads, but at 128 registers per thread "
+                      "the function can run at most 512 per block");
+    }
+    SUBCASE("grid limits and zero sizes") {
+        l.grid = {1, 70000, 0};
+        l.block = {0, 1, 1};
+        l.dynamic_shared_bytes = -4;
+        auto p = launch_problems(dev, fn, l);
+        REQUIRE(p.size() == 4);
+        CHECK(p[0] == "grid.y is 70000, the device allows 65535");
+        CHECK(p[1] == "grid.z is 0, every grid size must be at least 1");
+        CHECK(p[2] == "block.x is 0, every block size must be at least 1");
+        CHECK(p[3] == "shared_mem is -4, it cannot be negative");
     }
 }
 

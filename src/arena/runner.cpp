@@ -31,7 +31,10 @@ void Runner::scrub_l2() {
                "cuMemsetD32Async (L2 scrub)");
 }
 
-RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
+RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config_in) {
+    RunConfig config = config_in;
+    if (forced_timing_mode_) config.timing_mode = *forced_timing_mode_;
+
     RunResult result;
     result.kernel_name = desc.name();
     result.category = desc.category();
@@ -42,6 +45,7 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
     result.distribution = distribution_name(config.input_distribution);
     result.seed = config.input_seed;
     result.cold_l2 = config.cold_l2;
+    result.timing_mode = timing_mode_name(config.timing_mode);
     result.scratch_policy = scratch_policy_name(config.scratch_policy);
     result.counters.level =
         config.counter_level == RunConfig::CounterLevel::Full ? "full" : "basic";
@@ -163,7 +167,8 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
         measure::TimingResult bench_result;
         try {
             bench_result = measure::time_operation(launch_kernel, reset_fn,
-                                                   config.number_of_runs);
+                                                   config.number_of_runs,
+                                                   config.timing_mode);
         } catch (...) {
             power_.stop_sampling();
             throw;
@@ -202,6 +207,10 @@ RunResult Runner::run(KernelDescriptor& desc, const RunConfig& config) {
             desc.calculate_flops(), result.op_ms) / 1e9;
         result.bandwidth_gbps = measure::rate_per_sec(
             desc.calculate_bytes_accessed(), result.op_ms) / 1e9;
+        const IdealBytes ideal = desc.ideal_bytes();
+        result.ideal_bytes_known = ideal.known();
+        result.ideal_read_bytes  = ideal.read;
+        result.ideal_write_bytes = ideal.write;
 
         log->info("  result: op={:.3f} ms  gpu={:.3f} ms  overhead={:.3f} ms  "
                   "{:.2f} GFLOPS  {:.2f} GB/s",

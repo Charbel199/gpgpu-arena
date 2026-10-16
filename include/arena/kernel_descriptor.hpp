@@ -7,6 +7,7 @@
 #include "arena/distribution.hpp"
 #include "arena/runner_config.hpp"
 #include "arena/measurement/accuracy.hpp"
+#include "arena/categories/ideal_bytes.hpp"
 #include <string>
 #include <vector>
 #include <map>
@@ -125,6 +126,10 @@ public:
     // calculate speed of light metrics
     virtual double calculate_flops() const = 0;
     virtual double calculate_bytes_accessed() const = 0;
+
+    // calculate_bytes_accessed() split into reads and writes, per op. The
+    // default is unknown (both zero), reported as null rather than as zero.
+    virtual IdealBytes ideal_bytes() const { return {}; }
     
     // Element types of the input and output buffers. These are what the
     // framework can actually observe: it allocates those buffers and reads

@@ -21,7 +21,11 @@
 //   "..."                         null pointers until the cubin's parameter
 //                                 count is reached (Triton appends scratch
 //                                 parameters after the declared ones)
+//   "eps"                         a named float problem value (layernorm's
+//                                 eps): one f32
 //   {"i32": expr} {"u32": expr} {"i64": expr}   a scalar of that width
+//   {"f32": x} {"f64": x}         a float scalar: a number, a float name
+//                                 ("eps") or an integer expression
 //   {"cutile_array": "input", "shape": [...], "strides": [...]}
 //                                 cuTile's expansion of an array: pointer,
 //                                 then each shape, then each stride, as u32;
@@ -38,6 +42,7 @@ namespace arena::manifest {
 struct ArgContext {
     std::map<std::string, uint64_t> buffers;   // device pointers by name
     Vars vars;                                 // sizes, constants, sm_count
+    std::map<std::string, double> floats;      // float problem values (eps)
 
     // Byte size of each parameter the compiled function takes, from the
     // driver. When known, every argument must match its parameter's size and
@@ -73,12 +78,21 @@ private:
 
 // Throws std::runtime_error naming the offending entry.
 //
+// Every value is stored in its own heap block, so each parameter is aligned
+// for its type (4 bytes for i32/u32/f32, 8 for pointers, i64 and f64), which
+// is what cuLaunchKernel expects of each kernelParams entry.
+//
 // If `described` is given, it receives one object per manifest entry saying
 // what was passed, for --plan: {"buffer": name} for a pointer,
-// {"name", "type", "value"} for a named size, {"type", "expr", "value"} for
+// {"name", "type", "value"} for a named size or float, {"type", "expr", "value"} for
 // an explicit scalar, {"null": true}, {"padding": count} for "...", and the
 // resolved shape and strides for cutile_array and warp_array.
 PackedArgs pack_args(const nlohmann::json& args, const ArgContext& ctx,
                      nlohmann::json* described = nullptr);
+
+// A launch's "defines": {"BLOCK": 256, "ROWS": 4}, compile constants for that
+// launch's source. Keys must be identifiers and values integers that fit in
+// 32 bits. Throws std::runtime_error naming the bad entry.
+std::map<std::string, int> parse_defines(const nlohmann::json& defines);
 
 }

@@ -1,6 +1,7 @@
 #include "arena/cli_args.hpp"
 
 #include <cstdlib>
+#include <cstring>
 
 namespace arena::cli {
 
@@ -139,6 +140,27 @@ std::vector<std::map<std::string, int>> expand_grid(
         out = std::move(next);
     }
     return out;
+}
+
+std::optional<TimingMode> parse_timing_mode(const std::string& s) {
+    if (s == "v1") return TimingMode::V1;
+    if (s == "v2") return TimingMode::V2;
+    return std::nullopt;
+}
+
+std::optional<std::string> take_timing_mode(int& argc, char** argv) {
+    std::optional<std::string> value;
+    int out = 0;
+    for (int i = 0; i < argc; i++) {
+        if (i > 0 && i + 1 < argc && std::strcmp(argv[i], "--timing-mode") == 0) {
+            value = argv[++i];
+            continue;
+        }
+        argv[out++] = argv[i];
+    }
+    argc = out;
+    argv[out] = nullptr;
+    return value;
 }
 
 std::optional<ScratchPolicy> parse_scratch_policy(const std::string& s) {

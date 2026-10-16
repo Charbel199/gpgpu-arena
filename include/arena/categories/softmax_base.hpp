@@ -82,6 +82,10 @@ public:
         return 2.0 * rows_ * cols_ * sizeof(float);
     }
 
+    IdealBytes ideal_bytes() const override {
+        return ideal::softmax((size_t)rows_, (size_t)cols_);
+    }
+
     VerifyResult verify(Context& ctx) override {
         std::vector<float> h_input(rows_ * cols_);
         std::vector<float> h_output(rows_ * cols_);

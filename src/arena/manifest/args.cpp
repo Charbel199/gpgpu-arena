@@ -1,7 +1,11 @@
 #include "arena/manifest/args.hpp"
 #include "arena/warp_abi.hpp"
 
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace arena::manifest {
@@ -81,6 +85,49 @@ void push_scalar(PackedArgs& out, const char* type, const nlohmann::json& expr,
     said = {{"type", type}, {"expr", expr}, {"value", v}};
 }
 
+// A float scalar: a JSON number, a float name ("eps"), a number written as
+// a string ("1e-5"), or failing those an integer expression ("cols").
+template <typename T>
+void push_float(PackedArgs& out, const char* type, const nlohmann::json& x,
+                const ArgContext& ctx, nlohmann::json& said) {
+    double v = 0;
+    if (x.is_number()) {
+        v = x.get<double>();
+    } else if (x.is_string()) {
+        const std::string s = x.get<std::string>();
+        auto it = ctx.floats.find(s);
+        char* end = nullptr;
+        const double parsed = s.empty() ? 0 : std::strtod(s.c_str(), &end);
+        if (it != ctx.floats.end()) v = it->second;
+        else if (end && end != s.c_str() && *end == '\0') v = parsed;
+        else v = static_cast<double>(eval(s, ctx.vars));
+    } else {
+        throw std::runtime_error(std::string(type) + " needs a number, a name or an expression");
+    }
+    if (!std::isfinite(v)) throw std::runtime_error(std::string(type) + " value is not finite");
+    const T t = static_cast<T>(v);
+    out.push(t);
+    said = {{"type", type}, {"expr", x}, {"value", t}};
+}
+
+}
+
+std::map<std::string, int> parse_defines(const nlohmann::json& defines) {
+    if (!defines.is_object())
+        throw std::runtime_error("\"defines\" must be an object of NAME: integer, e.g. {\"BLOCK\": 256}");
+    std::map<std::string, int> out;
+    for (const auto& [k, v] : defines.items()) {
+        bool ident = !k.empty() && !std::isdigit(static_cast<unsigned char>(k[0]));
+        for (char c : k) ident = ident && (std::isalnum(static_cast<unsigned char>(c)) || c == '_');
+        if (!ident) throw std::runtime_error("define '" + k + "' is not an identifier");
+        if (!v.is_number_integer())
+            throw std::runtime_error("define " + k + " must be an integer, got " + v.dump());
+        const int64_t x = v.get<int64_t>();
+        if (x < std::numeric_limits<int>::min() || x > std::numeric_limits<int>::max())
+            throw std::runtime_error("define " + k + " = " + v.dump() + " does not fit in 32 bits");
+        out[k] = static_cast<int>(x);
+    }
+    return out;
 }
 
 PackedArgs pack_args(const nlohmann::json& args, const ArgContext& ctx, nlohmann::json* described) {
@@ -104,6 +151,10 @@ PackedArgs pack_args(const nlohmann::json& args, const ArgContext& ctx, nlohmann
                 } else if (ctx.buffers.count(s)) {
                     out.push(ctx.buffers.at(s));
                     said = {{"buffer", s}};
+                } else if (ctx.floats.count(s)) {
+                    const auto v = static_cast<float>(ctx.floats.at(s));
+                    out.push(v);
+                    said = {{"name", s}, {"type", "f32"}, {"value", v}};
                 } else if (ctx.vars.count(s)) {
                     const auto v = static_cast<int32_t>(ctx.vars.at(s));
                     out.push(v);
@@ -115,6 +166,8 @@ PackedArgs pack_args(const nlohmann::json& args, const ArgContext& ctx, nlohmann
                 if (a.contains("i32"))           push_scalar<int32_t>(out, "i32", a.at("i32"), ctx, said);
                 else if (a.contains("u32"))      push_scalar<uint32_t>(out, "u32", a.at("u32"), ctx, said);
                 else if (a.contains("i64"))      push_scalar<int64_t>(out, "i64", a.at("i64"), ctx, said);
+                else if (a.contains("f32"))      push_float<float>(out, "f32", a.at("f32"), ctx, said);
+                else if (a.contains("f64"))      push_float<double>(out, "f64", a.at("f64"), ctx, said);
                 else if (a.contains("cutile_array")) push_cutile_array(out, a, ctx, said);
                 else if (a.contains("warp_array"))   push_warp_array(out, a, ctx, said);
                 else if (a.contains("warp_bounds")) {

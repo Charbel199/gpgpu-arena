@@ -21,6 +21,26 @@ inline const char* scratch_policy_name(ScratchPolicy p) {
     return p == ScratchPolicy::Declared ? "declared" : "legacy";
 }
 
+// How each timed launch is bracketed.
+//
+// V1 records the start event right after the per-run reset (and the L2
+// scrub, when cold) has been queued, so the start event waits in the stream
+// behind that work. On the RTX PRO 6000 Blackwell an event that waits behind
+// earlier work gets a timestamp on a 2.048 us grid: almost every small-shape
+// op_ms is then a multiple of 2.048 us (4.096, 6.144, 8.192), and a kernel
+// can be up to 2 us faster without its median moving.
+//
+// V2 drains the stream after the reset, outside the timed interval, so the
+// start event is recorded on an idle stream and keeps its fine resolution.
+// The window then covers launch submission plus the kernel, the same way
+// launch_floor_ms is measured. Results of the two modes are not comparable at
+// small sizes, so V1 stays the default.
+enum class TimingMode { V1, V2 };
+
+inline const char* timing_mode_name(TimingMode m) {
+    return m == TimingMode::V2 ? "v2" : "v1";
+}
+
 struct RunConfig {
     enum class WarmupMode { Fixed, Auto };
 
@@ -38,6 +58,7 @@ struct RunConfig {
     // warmup_min below 2 * drift_window has no effect.
 
     int  number_of_runs   = 10;
+    TimingMode timing_mode = TimingMode::V1;
     bool collect_metrics  = false;
 
     // What collect_metrics gathers. Basic is DRAM bytes, occupancy and IPC.

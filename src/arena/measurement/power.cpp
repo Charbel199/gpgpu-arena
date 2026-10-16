@@ -200,6 +200,7 @@ measure::ClockPowerStats PowerMonitor::stop_sampling() {
     sampler_cv_.notify_one();
     sampler_.join();
     const unsigned long long window_end_us = wall_clock_us();
+    tally_.add(clock_samples_);
 
     // The driver's power buffer, if it covers the window.
     std::vector<double> buffered;
@@ -284,7 +285,9 @@ const ClockLockStatus& PowerMonitor::lock_clocks(unsigned mhz) {
     }
 
     lock_.applied = true;
-    log->info("GPU clock locked to {} MHz", lock_.requested_mhz);
+    log->info("GPU clock locked to {} MHz (a ceiling: the boost limit, power and thermal "
+              "limits can still hold it lower, see environment.clock_lock.achieved_mhz)",
+              lock_.requested_mhz);
     return lock_;
 }
 

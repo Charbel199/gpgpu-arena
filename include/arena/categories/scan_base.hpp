@@ -69,6 +69,8 @@ public:
     double calculate_bytes_accessed() const override {
         return static_cast<double>(2 * size_data_); // we read all elements and write all of them back
     }
+
+    IdealBytes ideal_bytes() const override { return ideal::scan((size_t)n_); }
     
     VerifyResult verify(Context& ctx) override {
         std::vector<float> h_output(n_);

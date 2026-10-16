@@ -12,9 +12,10 @@ namespace arena {
 // Row-wise layer normalization, forward, fp32:
 //   y[r, c] = (x[r, c] - mean_r) / sqrt(var_r + eps) * gamma[c] + beta[c]
 // x and y are [rows, cols], contiguous. var is the biased (population)
-// variance, as in torch.nn.LayerNorm. eps is fixed at 1e-5 and is not a
-// kernel argument: manifests have no float scalars, so every kernel bakes it
-// in, the same way the problem definition does.
+// variance, as in torch.nn.LayerNorm. eps is fixed at 1e-5 (kEps). The
+// built-in slot's parameter list has no eps, so those kernels bake it in; a
+// manifest can pass it instead as {"f32": "eps"}, which the manifest code
+// reads from kEps.
 class LayerNormDescriptorBase : public KernelDescriptor {
 public:
     static constexpr double kEps = 1e-5;
@@ -125,6 +126,10 @@ public:
         // x read once and y written once; gamma and beta are read once in
         // total, since every row shares them and they stay in cache
         return (2.0 * rows_ * cols_ + 2.0 * cols_) * sizeof(float);
+    }
+
+    IdealBytes ideal_bytes() const override {
+        return ideal::layernorm((size_t)rows_, (size_t)cols_);
     }
 
     VerifyResult verify(Context& ctx) override {

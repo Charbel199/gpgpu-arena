@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <optional>
 
 namespace arena {
 
@@ -47,6 +48,7 @@ struct RunResult {
     float op_ms_trimmed = 0.0f;  // same, interquartile mean: steadier for short ops
     float gpu_ms       = 0.0f;   // sum of SASS durations (CUPTI Activity)
     float overhead_ms  = 0.0f;   // max(0, op_ms - gpu_ms)
+    std::string timing_mode = "v1";   // see TimingMode
     int   launch_count = 0;
     std::vector<float> all_times_ms;
     std::vector<Profiler::SubKernelInfo> sub_kernels;
@@ -66,6 +68,11 @@ struct RunResult {
     // --- throughput: denominator is op_ms ---
     double gflops = 0.0;
     double bandwidth_gbps = 0.0;
+    // The ideal bytes behind bandwidth_gbps, split per op. Not known for
+    // every descriptor; see KernelDescriptor::ideal_bytes.
+    bool   ideal_bytes_known = false;
+    double ideal_read_bytes = 0.0;
+    double ideal_write_bytes = 0.0;
 
     // --- hardware counters: denominator is gpu_ms ---
     struct Counters {
@@ -156,6 +163,10 @@ public:
     KernelCompiler& compiler() { return compiler_; }
     const PowerMonitor& power() const { return power_; }
 
+    // Overrides RunConfig::timing_mode for every run of this Runner, for a
+    // process-wide --timing-mode. nullopt goes back to the config's value.
+    void set_timing_mode(std::optional<TimingMode> m) { forced_timing_mode_ = m; }
+
 private:
     // Overwrites a buffer twice the size of L2, which evicts whatever the
     // previous launch left there. Enqueued on the null stream, so it finishes
@@ -167,6 +178,8 @@ private:
     KernelCompiler& compiler_;
     Profiler& profiler_;
     PowerMonitor& power_;
+
+    std::optional<TimingMode> forced_timing_mode_;
 
     CUdeviceptr scrub_buf_ = 0;
     size_t      scrub_bytes_ = 0;

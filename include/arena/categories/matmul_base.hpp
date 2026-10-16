@@ -79,6 +79,10 @@ public:
         return static_cast<double>(size_a_ + size_b_ + size_c_);
     }
 
+    IdealBytes ideal_bytes() const override {
+        return ideal::matmul((size_t)M_, (size_t)K_, (size_t)N_);
+    }
+
     VerifyResult verify(Context& ctx) override {
         std::vector<float> h_c((size_t)M_ * N_);
         ctx.copy_to_host(h_c.data(), d_c_, size_c_);

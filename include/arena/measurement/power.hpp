@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -60,12 +61,18 @@ public:
     measure::ClockPowerStats stop_sampling();
 
     // Locks the SM clock to mhz, or for 0 to the clock pick_auto_lock_clock
-    // chooses. Needs root, and inside a container CAP_SYS_ADMIN as well
+    // chooses. The lock is a ceiling: a clock above what the board sustains
+    // is not reached, the boost limit and power and thermal limits hold it
+    // down as they would unlocked. achieved_sm_clock_mhz() says what it really ran at. Needs root, and inside a container CAP_SYS_ADMIN as well
     // (root alone gets NVML_ERROR_NO_PERMISSION). On failure it logs a
     // warning and the run goes on unlocked. The lock is released by the
     // destructor, at exit, on SIGINT/SIGTERM and on std::terminate.
     const ClockLockStatus& lock_clocks(unsigned mhz);
     const ClockLockStatus& clock_lock() const { return lock_; }
+
+    // Mean SM clock over every window sampled so far in this process, which
+    // is every timed benchmark. nullopt when nothing was sampled.
+    std::optional<double> achieved_sm_clock_mhz() const { return tally_.mean(); }
 
 private:
     void sample_once();
@@ -77,6 +84,7 @@ private:
     nvmlDevice_t device_{};
 
     ClockLockStatus lock_;
+    measure::ClockTally tally_;
 
     std::thread             sampler_;
     std::mutex              sampler_mu_;

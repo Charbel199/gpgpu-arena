@@ -252,3 +252,50 @@ TEST_CASE("parse_lock_clocks") {
     CHECK_FALSE(parse_lock_clocks("24x").has_value());
     CHECK_FALSE(parse_lock_clocks("AUTO").has_value());
 }
+
+TEST_CASE("parse_timing_mode") {
+    CHECK(parse_timing_mode("v1") == arena::TimingMode::V1);
+    CHECK(parse_timing_mode("v2") == arena::TimingMode::V2);
+    CHECK_FALSE(parse_timing_mode("").has_value());
+    CHECK_FALSE(parse_timing_mode("V2").has_value());
+    CHECK_FALSE(parse_timing_mode("v3").has_value());
+}
+
+TEST_CASE("take_timing_mode") {
+    SUBCASE("removes the pair and keeps the rest in order") {
+        char a0[] = "arena", a1[] = "--run", a2[] = "k", a3[] = "--timing-mode",
+             a4[] = "v2", a5[] = "--runs", a6[] = "5";
+        char* argv[] = {a0, a1, a2, a3, a4, a5, a6, nullptr};
+        int argc = 7;
+        auto v = take_timing_mode(argc, argv);
+        REQUIRE(v.has_value());
+        CHECK(*v == "v2");
+        REQUIRE(argc == 5);
+        CHECK(std::string(argv[1]) == "--run");
+        CHECK(std::string(argv[2]) == "k");
+        CHECK(std::string(argv[3]) == "--runs");
+        CHECK(std::string(argv[4]) == "5");
+        CHECK(argv[5] == nullptr);
+    }
+    SUBCASE("absent leaves argv alone") {
+        char a0[] = "arena", a1[] = "--list";
+        char* argv[] = {a0, a1, nullptr};
+        int argc = 2;
+        CHECK_FALSE(take_timing_mode(argc, argv).has_value());
+        CHECK(argc == 2);
+    }
+    SUBCASE("the last one wins") {
+        char a0[] = "arena", a1[] = "--timing-mode", a2[] = "v2", a3[] = "--timing-mode", a4[] = "v1";
+        char* argv[] = {a0, a1, a2, a3, a4, nullptr};
+        int argc = 5;
+        CHECK(take_timing_mode(argc, argv) == std::string("v1"));
+        CHECK(argc == 1);
+    }
+    SUBCASE("a trailing flag without a value is left for the CLI to reject") {
+        char a0[] = "arena", a1[] = "--timing-mode";
+        char* argv[] = {a0, a1, nullptr};
+        int argc = 2;
+        CHECK_FALSE(take_timing_mode(argc, argv).has_value());
+        CHECK(argc == 2);
+    }
+}

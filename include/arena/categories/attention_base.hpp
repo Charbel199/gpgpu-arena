@@ -90,6 +90,10 @@ public:
     double calculate_flops() const override { return 4.0 * BH_ * (double)S_ * S_ * D_; }
     // Q, K and V read once, O written once: what a fused kernel must move.
     double calculate_bytes_accessed() const override { return 4.0 * (double)size_; }
+    // The same total, split.
+    IdealBytes ideal_bytes() const override {
+        return ideal::attention((size_t)BH_, (size_t)S_, (size_t)D_);
+    }
 
     VerifyResult verify(Context& ctx) override {
         std::vector<float> h_o((size_t)BH_ * S_ * D_);

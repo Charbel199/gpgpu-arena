@@ -1,6 +1,8 @@
 #include "arena/manifest/manifest_kernel.hpp"
 #include "arena/manifest/args.hpp"
 #include "arena/manifest/expr.hpp"
+#include "arena/manifest/limits.hpp"
+#include "arena/compilers/kernel_compiler.hpp"
 #include "arena/paths.hpp"
 #include "arena/categories/reduce_base.hpp"
 #include "arena/categories/scan_base.hpp"
@@ -11,11 +13,13 @@
 #include "arena/device/utils.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
 #include <set>
 #include <stdexcept>
+#include <type_traits>
 
 namespace arena {
 
@@ -25,6 +29,57 @@ using nlohmann::json;
 std::unique_ptr<KernelDescriptor> load_manifest_spec(const nlohmann::json& spec, const std::string& path);
 
 namespace {
+
+// Categories with a float constant in the problem (layernorm's eps) expose
+// it as kEps; manifests can pass it as "eps".
+template <typename B, typename = void>
+struct HasEps : std::false_type {};
+template <typename B>
+struct HasEps<B, std::void_t<decltype(B::kEps)>> : std::true_type {};
+
+manifest::DeviceLimits query_device_limits() {
+    CUdevice dev = 0;
+    check_cuda(cuCtxGetDevice(&dev), "cuCtxGetDevice");
+    auto attr = [&](CUdevice_attribute a) {
+        int v = 0;
+        check_cuda(cuDeviceGetAttribute(&v, a, dev), "cuDeviceGetAttribute");
+        return static_cast<int64_t>(v);
+    };
+    manifest::DeviceLimits d;
+    d.max_threads_per_block = attr(CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK);
+    d.max_block = {attr(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X), attr(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y),
+                   attr(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z)};
+    d.max_grid = {attr(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X), attr(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y),
+                  attr(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)};
+    d.max_shared_per_block = attr(CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK);
+    d.max_shared_per_block_optin = attr(CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN);
+    d.max_regs_per_block = attr(CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK);
+    d.max_regs_per_sm = attr(CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR);
+    return d;
+}
+
+manifest::FunctionLimits query_function_limits(CUfunction fn) {
+    auto attr = [&](CUfunction_attribute a) {
+        int v = 0;
+        check_cuda(cuFuncGetAttribute(&v, a, fn), "cuFuncGetAttribute");
+        return static_cast<int64_t>(v);
+    };
+    manifest::FunctionLimits f;
+    f.registers = attr(CU_FUNC_ATTRIBUTE_NUM_REGS);
+    f.static_shared_bytes = attr(CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES);
+    f.max_threads_per_block = attr(CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK);
+    return f;
+}
+
+json device_limits_json(const manifest::DeviceLimits& d) {
+    return {{"max_threads_per_block", d.max_threads_per_block},
+            {"max_block", d.max_block},
+            {"max_grid", d.max_grid},
+            {"max_shared_per_block", d.max_shared_per_block},
+            {"max_shared_per_block_optin", d.max_shared_per_block_optin},
+            {"max_registers_per_block", d.max_regs_per_block},
+            {"max_registers_per_sm", d.max_regs_per_sm}};
+}
 
 struct ScratchSpec {
     std::string name;
@@ -74,18 +129,22 @@ public:
 
     std::vector<std::string> entry_sources() const override {
         std::vector<std::string> out;
-        for (const auto& l : spec_.at("launches")) out.push_back(launch_source(l));
+        for (const auto& l : spec_.at("launches")) out.push_back(launch_key(l));
         return out;
     }
+
+    json device_limits(Context&) override { return device_limits_json(query_device_limits()); }
 
     // Launches may name their own source, relative to the manifest; the
     // runner compiles those too. This is how a candidate combines kernels
     // from several Triton, cuTile or Warp files (one kernel per file), or
-    // dispatches different sizes to different DSLs.
+    // dispatches different sizes to different DSLs. A launch with "defines"
+    // is a variant of its source (KernelCompiler::variant_path), compiled once
+    // per distinct set of defines.
     std::vector<std::string> extra_sources() const override {
         std::vector<std::string> out;
         for (const auto& l : spec_.at("launches")) {
-            const auto s = launch_source(l);
+            const auto s = launch_key(l);
             if (s != source_ && std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
         }
         return out;
@@ -110,7 +169,11 @@ public:
         std::vector<Resolved> resolved;
         resolve_launches(buffers, sizes, load_modules(), resolved);
         for (auto& r : resolved) {
-            if (r.applies) launches_.push_back({r.fn, r.cfg, std::move(r.args)});
+            if (!r.applies) continue;
+            // The same check --plan reports, so a launch the device cannot
+            // run fails here with the reason instead of "invalid argument".
+            if (!r.problems.empty()) throw std::runtime_error(problem_message(r));
+            launches_.push_back({r.fn, r.cfg, std::move(r.args), r.index, r.entry});
         }
         if (launches_.empty()) throw std::runtime_error(kNoLaunchApplies);
     }
@@ -128,6 +191,9 @@ public:
             resolve_launches(buffers, sizes, load_modules(), resolved);
             if (std::none_of(resolved.begin(), resolved.end(), [](const Resolved& r) { return r.applies; }))
                 throw std::runtime_error(kNoLaunchApplies);
+            for (const auto& r : resolved) {
+                if (r.applies && !r.problems.empty()) throw std::runtime_error(problem_message(r));
+            }
         } catch (const std::exception& e) {
             out["error"] = e.what();
         }
@@ -142,11 +208,18 @@ public:
             json l = {{"index", r.index}, {"entry", r.entry},
                       {"source", fs::path(r.source).lexically_relative(dir).generic_string()},
                       {"applies", r.applies}};
+            if (!r.defines.empty()) l["defines"] = r.defines;
             if (r.applies) {
-                l["grid"]  = {r.cfg.grid_x, r.cfg.grid_y, r.cfg.grid_z};
-                l["block"] = {r.cfg.block_x, r.cfg.block_y, r.cfg.block_z};
-                l["shared_mem_bytes"] = r.cfg.shared_mem_bytes;
+                l["grid"]  = r.shape.grid;
+                l["block"] = r.shape.block;
+                l["shared_mem_bytes"] = r.shape.dynamic_shared_bytes;
                 l["args"] = r.args_described;
+                if (r.fn) {
+                    l["resources"] = {{"registers", r.fn_limits.registers},
+                                      {"static_shared_bytes", r.fn_limits.static_shared_bytes},
+                                      {"max_threads_per_block", r.fn_limits.max_threads_per_block}};
+                }
+                l["problems"] = r.problems;
             }
             out["launches"].push_back(std::move(l));
         }
@@ -194,7 +267,14 @@ public:
             if (r.result != CUDA_SUCCESS) {
                 const char* msg = nullptr;
                 cuGetErrorString(r.result, &msg);
-                throw std::runtime_error(std::string("kernel launch failed: ") + (msg ? msg : "unknown"));
+                std::string why = std::string("manifest launch ") + std::to_string(l.index) + " (" +
+                                  l.entry + "): kernel launch failed: " + (msg ? msg : "unknown");
+                // allocate() already refused what launch_problems() knows
+                // about; say so, since "invalid argument" alone gives no lead.
+                if (r.result == CUDA_ERROR_INVALID_VALUE)
+                    why += " (the launch passed the grid, block and shared memory checks; "
+                           "check the argument layout and the function's shared memory attribute)";
+                throw std::runtime_error(why);
             }
         }
     }
@@ -210,6 +290,8 @@ private:
         CUfunction fn = nullptr;
         KernelLoader::LaunchConfig cfg;
         manifest::PackedArgs args;
+        size_t index = 0;
+        std::string entry;
     };
 
     // One manifest launch worked out at the current problem size.
@@ -219,9 +301,19 @@ private:
         bool applies = true;
         CUfunction fn = nullptr;
         KernelLoader::LaunchConfig cfg;
+        manifest::LaunchShape shape;
+        manifest::FunctionLimits fn_limits;
+        std::vector<std::string> problems;   // what the device or function cannot run
+        std::map<std::string, int> defines;  // the launch's own "defines"
         manifest::PackedArgs args;
         json args_described;
     };
+
+    static std::string problem_message(const Resolved& r) {
+        std::string msg = "manifest launch " + std::to_string(r.index) + " (" + r.entry + "): ";
+        for (size_t i = 0; i < r.problems.size(); i++) msg += (i ? "; " : "") + r.problems[i];
+        return msg;
+    }
 
     static constexpr const char* kNoLaunchApplies =
         "no manifest launch applies at this size (every \"when\" is 0)";
@@ -244,6 +336,7 @@ private:
         }
     }
 
+    // Keyed like extra_sources(): a variant is its own module.
     std::map<std::string, CUmodule> load_modules() {
         module_ = loader_.load_module(module_path());
         std::map<std::string, CUmodule> modules = {{source_, module_}};
@@ -267,13 +360,14 @@ private:
             r.index = i;
             r.entry = entries[i];
             r.source = launch_source(l);
+            r.defines = launch_defines(l);
             // "when": launch only if the expression is non-zero for this
             // problem size, so one manifest can dispatch small and large
             // inputs to different kernels.
             if (l.contains("when")) {
                 int64_t on = 0;
                 try {
-                    on = manifest::eval_json(l.at("when"), variables_for(result_for(l)));
+                    on = manifest::eval_json(l.at("when"), variables_for(l));
                 } catch (const std::exception& e) {
                     throw std::runtime_error("manifest launch " + std::to_string(i) + " \"when\": " + e.what());
                 }
@@ -283,18 +377,23 @@ private:
                     continue;
                 }
             }
-            r.fn = loader_.get_function(modules.at(r.source), r.entry);
+            r.fn = loader_.get_function(modules.at(launch_key(l)), r.entry);
             // Expressions see the constants of the source this launch uses.
-            auto lvars = variables_for(result_for(l));
+            auto lvars = variables_for(l);
             for (size_t s = 0; s < scratch_.size(); s++) lvars[scratch_[s].name + "_bytes"] = scratch_bytes[s];
 
             manifest::ArgContext actx;
             for (const auto& [k, v] : buffers) actx.buffers[k] = v;
             actx.vars = lvars;
+            actx.floats = float_values();
             actx.param_sizes = param_sizes(r.fn);
 
             try {
-                r.cfg = launch_config(l, lvars);
+                r.shape = launch_shape(l, lvars);
+                r.fn_limits = query_function_limits(r.fn);
+                if (!device_limits_) device_limits_ = std::make_unique<manifest::DeviceLimits>(query_device_limits());
+                r.problems = manifest::launch_problems(*device_limits_, r.fn_limits, r.shape);
+                r.cfg = to_config(r.shape);
                 r.args = manifest::pack_args(l.at("args"), actx, &r.args_described);
             } catch (const std::exception& e) {
                 throw std::runtime_error("manifest launch " + std::to_string(i) + " (" +
@@ -306,17 +405,52 @@ private:
 
     // Names an expression can use: problem sizes, the SM count, and what the
     // compiler reported for the launch's source, constants included.
-    manifest::Vars variables_for(const CompileResult& cr) const {
+    // A launch's own "defines" are laid over the reported constants, since a
+    // CUDA build reports only its "// arena:" lines, not the -D values.
+    manifest::Vars variables_for(const CompileResult& cr, const std::map<std::string, int>& defines) const {
         manifest::Vars v;
         for (const auto& [k, x] : this->problem_values()) v[k] = x;
         for (const auto& [k, x] : cr.constants) v[k] = x;
+        for (const auto& [k, x] : defines) v[k] = x;
         v["sm_count"] = this->sm_count();
         v["num_warps"] = cr.num_warps;
         v["block_dim"] = cr.block_dim;
         v["shared_memory"] = cr.shared_memory;
         return v;
     }
-    manifest::Vars variables() const { return variables_for(this->compile_result_); }
+    manifest::Vars variables() const { return variables_for(this->compile_result_, this->compile_options()); }
+    manifest::Vars variables_for(const json& l) const {
+        return variables_for(result_for(l), key_defines(l));
+    }
+
+    std::map<std::string, double> float_values() const {
+        if constexpr (HasEps<Base>::value) return {{"eps", static_cast<double>(Base::kEps)}};
+        else return {};
+    }
+
+    static std::map<std::string, int> launch_defines(const json& l) {
+        return l.contains("defines") ? manifest::parse_defines(l.at("defines")) : std::map<std::string, int>{};
+    }
+
+    // Defines a launch's build uses: for the manifest's own source the run's
+    // --define values, then the launch's "defines" over them.
+    std::map<std::string, int> key_defines(const json& l) const {
+        const auto own = launch_defines(l);
+        if (own.empty()) return launch_source(l) == source_ ? this->compile_options() : own;
+        std::map<std::string, int> d = launch_source(l) == source_ ? this->compile_options()
+                                                                   : std::map<std::string, int>{};
+        for (const auto& [k, v] : own) d[k] = v;
+        return d;
+    }
+
+    // The source a launch's module comes from: its file, or a variant of it
+    // when the launch has "defines". The manifest's own source without
+    // launch defines is source_ itself, built by the runner.
+    std::string launch_key(const json& l) const {
+        const auto s = launch_source(l);
+        if (!l.contains("defines") || launch_defines(l).empty()) return s;
+        return KernelCompiler::variant_path(s, key_defines(l));
+    }
 
     std::string launch_source(const json& l) const {
         if (!l.contains("source")) return source_;
@@ -326,14 +460,16 @@ private:
     }
 
     const CompileResult& result_for(const json& l) const {
-        const auto s = launch_source(l);
+        const auto s = launch_key(l);
         if (s == source_) return this->compile_result_;
         auto it = extra_results_.find(s);
         if (it == extra_results_.end()) throw std::runtime_error("launch source not compiled: " + s);
         return it->second;
     }
 
-    static KernelLoader::LaunchConfig launch_config(const json& l, const manifest::Vars& vars) {
+    // Grid, block and shared memory as evaluated. Sizes the device cannot
+    // run are left for manifest::launch_problems() to report.
+    static manifest::LaunchShape launch_shape(const json& l, const manifest::Vars& vars) {
         auto dims = [&](const char* key) {
             std::array<int64_t, 3> d{1, 1, 1};
             if (!l.contains(key)) throw std::runtime_error(std::string("missing \"") + key + "\"");
@@ -341,20 +477,23 @@ private:
             if (!j.is_array() || j.empty() || j.size() > 3)
                 throw std::runtime_error(std::string("\"") + key + "\" must be a list of 1 to 3 sizes");
             for (size_t i = 0; i < j.size(); i++) d[i] = manifest::eval_json(j[i], vars);
-            for (auto x : d)
-                if (x <= 0) throw std::runtime_error(std::string("\"") + key + "\" has a size <= 0");
             return d;
         };
-        const auto g = dims("grid");
-        const auto b = dims("block");
-        if (b[0] * b[1] * b[2] > 1024) throw std::runtime_error("block has more than 1024 threads");
-        const int64_t shmem = l.contains("shared_mem") ? manifest::eval_json(l.at("shared_mem"), vars) : 0;
-        if (shmem < 0) throw std::runtime_error("shared_mem is negative");
+        manifest::LaunchShape s;
+        s.grid = dims("grid");
+        s.block = dims("block");
+        s.dynamic_shared_bytes = l.contains("shared_mem") ? manifest::eval_json(l.at("shared_mem"), vars) : 0;
+        return s;
+    }
 
+    // Only called on a shape without problems for a launch, so every value
+    // fits; clamped anyway so --plan never prints a wrapped number.
+    static KernelLoader::LaunchConfig to_config(const manifest::LaunchShape& s) {
+        auto u = [](int64_t x) { return static_cast<unsigned>(std::clamp<int64_t>(x, 0, 0xFFFFFFFFLL)); };
         KernelLoader::LaunchConfig c;
-        c.grid_x = (unsigned)g[0]; c.grid_y = (unsigned)g[1]; c.grid_z = (unsigned)g[2];
-        c.block_x = (unsigned)b[0]; c.block_y = (unsigned)b[1]; c.block_z = (unsigned)b[2];
-        c.shared_mem_bytes = (unsigned)shmem;
+        c.grid_x = u(s.grid[0]); c.grid_y = u(s.grid[1]); c.grid_z = u(s.grid[2]);
+        c.block_x = u(s.block[0]); c.block_y = u(s.block[1]); c.block_z = u(s.block[2]);
+        c.shared_mem_bytes = u(s.dynamic_shared_bytes);
         return c;
     }
 
@@ -386,6 +525,7 @@ private:
     KernelLoader loader_;
     CUmodule module_ = nullptr;
     std::vector<Launch> launches_;
+    std::unique_ptr<manifest::DeviceLimits> device_limits_;   // queried once
     ScratchPolicy policy_ = ScratchPolicy::Legacy;
 };
 
@@ -493,11 +633,26 @@ std::unique_ptr<KernelDescriptor> load_manifest_spec(const json& spec, const std
         if (s.contains("zero") && !s.at("zero").is_boolean())
             throw std::runtime_error("manifest " + path + ": scratch \"zero\" must be true or false");
     }
-    for (const auto& l : spec.at("launches")) {
-        if (!l.contains("source")) continue;
-        fs::path ls = l.at("source").get<std::string>();
-        if (ls.is_relative()) ls = mpath.parent_path() / ls;
-        if (!fs::exists(ls)) throw std::runtime_error("launch source not found: " + ls.string());
+    const auto& launches = spec.at("launches");
+    for (size_t i = 0; i < launches.size(); i++) {
+        const auto& l = launches[i];
+        fs::path ls = src;
+        if (l.contains("source")) {
+            ls = l.at("source").get<std::string>();
+            if (ls.is_relative()) ls = mpath.parent_path() / ls;
+            if (!fs::exists(ls)) throw std::runtime_error("launch source not found: " + ls.string());
+        }
+        if (!l.contains("defines")) continue;
+        try {
+            manifest::parse_defines(l.at("defines"));
+        } catch (const std::exception& e) {
+            throw std::runtime_error("manifest " + path + " launch " + std::to_string(i) + ": " + e.what());
+        }
+        // warp_base.py accepts --define but ignores it, so a Warp variant
+        // would silently be the source's own build.
+        if (KernelCompiler::get_extension(ls.string()) == ".warp.py" && !l.at("defines").empty())
+            throw std::runtime_error("manifest " + path + " launch " + std::to_string(i) +
+                                     ": \"defines\" do not reach Warp kernels; Warp fixes its constants in the source");
     }
     const std::string name = spec.value("name", mpath.stem().string());
     const std::string category = spec.at("category").get<std::string>();

@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace arena {
@@ -49,9 +50,18 @@ public:
     void clear_cache();
 
     // "reduce/fp32/baseline.cu" -> "reduce_fp32_baseline". Public so tests and
-    // the inspect command can predict cache file names.
+    // the inspect command can predict cache file names. A variant path (below)
+    // gets its defines suffix, as its cubin does.
     static std::string derive_output_name(const std::string& source_path);
     static std::string get_extension(const std::string& source_path);
+
+    // A source path with defines folded in, "/abs/ln.cu|BLOCK=256,ROWS=4", for
+    // callers that pass sources around as plain paths: a manifest launch with
+    // its own "defines" is one of the descriptor's extra sources. compile(),
+    // emit_ptx() and sidecars() take it in place of a path and apply its
+    // defines over the ones passed. No defines gives the path unchanged.
+    static std::string variant_path(const std::string& source_path, const CompileDefines& defines);
+    static std::pair<std::string, CompileDefines> split_variant(const std::string& source_path);
 
 private:
     CompilerBackend& backend_for(const std::string& source_path);

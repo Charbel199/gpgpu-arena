@@ -16,8 +16,50 @@ namespace {
 const char* kSidecarExtensions[] = {".ptx", ".ttgir", ".warp_gen.cu"};
 }
 
-std::vector<std::string> KernelCompiler::sidecars(const std::string& source_path,
-                                                  const CompileDefines& defines) const {
+std::string KernelCompiler::variant_path(const std::string& source_path,
+                                         const CompileDefines& defines) {
+    if (defines.empty()) return source_path;
+    std::string out = source_path + "|";
+    bool first = true;
+    for (const auto& [k, v] : defines) {
+        out += (first ? "" : ",") + k + "=" + std::to_string(v);
+        first = false;
+    }
+    return out;
+}
+
+std::pair<std::string, CompileDefines> KernelCompiler::split_variant(const std::string& source_path) {
+    const auto bar = source_path.rfind('|');
+    if (bar == std::string::npos) return {source_path, {}};
+    CompileDefines d;
+    const std::string rest = source_path.substr(bar + 1);
+    size_t pos = 0;
+    while (pos < rest.size()) {
+        auto comma = rest.find(',', pos);
+        if (comma == std::string::npos) comma = rest.size();
+        const std::string kv = rest.substr(pos, comma - pos);
+        const auto eq = kv.find('=');
+        if (eq == std::string::npos) throw std::runtime_error("malformed source variant: " + source_path);
+        d[kv.substr(0, eq)] = std::stoi(kv.substr(eq + 1));
+        pos = comma + 1;
+    }
+    return {source_path.substr(0, bar), d};
+}
+
+namespace {
+// The real path and the defines to build with: a variant's own over `base`.
+std::pair<std::string, CompileDefines> resolve_variant(const std::string& source_path,
+                                                       const CompileDefines& base) {
+    auto [path, d] = KernelCompiler::split_variant(source_path);
+    CompileDefines merged = base;
+    for (const auto& [k, v] : d) merged[k] = v;
+    return {path, merged};
+}
+}
+
+std::vector<std::string> KernelCompiler::sidecars(const std::string& variant,
+                                                  const CompileDefines& base_defines) const {
+    const auto [source_path, defines] = resolve_variant(variant, base_defines);
     std::vector<std::string> out;
     const auto base = cache_dir_ + "/" + derive_output_name(source_path) + defines_suffix(defines);
     for (const char* ext : kSidecarExtensions) {
@@ -45,7 +87,8 @@ void KernelCompiler::register_compiler(const std::string& extension,
     compilers_[extension] = std::move(compiler);
 }
 
-std::string KernelCompiler::missing_toolchain(const std::string& source_path) {
+std::string KernelCompiler::missing_toolchain(const std::string& variant) {
+    const auto source_path = split_variant(variant).first;
     try {
         const std::string id = backend_for(source_path).toolchain_id();
         if (id.find(" missing ") != std::string::npos) return id.substr(0, id.find(' '));
@@ -81,8 +124,9 @@ std::string KernelCompiler::fingerprint(const std::string& source_path,
     return build_fingerprint(in);
 }
 
-CompileResult KernelCompiler::compile(const std::string& source_path,
-                                      const CompileDefines& defines) {
+CompileResult KernelCompiler::compile(const std::string& variant,
+                                      const CompileDefines& base_defines) {
+    const auto [source_path, defines] = resolve_variant(variant, base_defines);
     auto log = spdlog::get("compiler");
 
     // The fingerprint covers the source text, so an edited file never hits a
@@ -137,8 +181,9 @@ CompileResult KernelCompiler::compile(const std::string& source_path,
     return result;
 }
 
-std::string KernelCompiler::emit_ptx(const std::string& source_path,
-                                     const CompileDefines& defines) {
+std::string KernelCompiler::emit_ptx(const std::string& variant,
+                                     const CompileDefines& base_defines) {
+    const auto [source_path, defines] = resolve_variant(variant, base_defines);
     compile(source_path, defines);
     auto output_name = derive_output_name(source_path) + defines_suffix(defines);
     return backend_for(source_path).emit_ptx(source_path, output_name, cache_dir_, defines);
@@ -216,7 +261,8 @@ std::string KernelCompiler::derive_output_name(const std::string& source_path) {
     // so the dtype folder keeps fp32 and fp16 builds of the same kernel from
     // overwriting each other's cubin. A source outside the kernel dir would
     // make that an unreadable path, so it gets a short hash of the path.
-    fs::path p(source_path);
+    const auto [path, defines] = split_variant(source_path);
+    fs::path p(path);
 
     std::string prefix;
     if (p.is_absolute()) {
@@ -242,14 +288,14 @@ std::string KernelCompiler::derive_output_name(const std::string& source_path) {
         }
     }
 
-    if (dsl.empty()) return prefix + "_" + name;
-    return prefix + "_" + dsl + "_" + name;
+    if (dsl.empty()) return prefix + "_" + name + defines_suffix(defines);
+    return prefix + "_" + dsl + "_" + name + defines_suffix(defines);
 }
 
 std::string KernelCompiler::get_extension(const std::string& source_path) {
     // "reduce/reduce.triton.py" -> ".triton.py"
     // "reduce/baseline.cu"      -> ".cu"
-    auto filename = fs::path(source_path).filename().string();
+    auto filename = fs::path(split_variant(source_path).first).filename().string();
     auto dot = filename.find('.');
     if (dot == std::string::npos) return "";
     return filename.substr(dot);

@@ -1,10 +1,14 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 #include "arena/measurement/measure_policy.hpp"
+#include "arena/categories/ideal_bytes.hpp"
 
 #include <vector>
 
 using namespace arena::measure;
+using arena::IdealBytes;
+using arena::DType;
+namespace ideal = arena::ideal;
 
 TEST_CASE("median") {
     SUBCASE("odd count returns the middle element") {
@@ -206,4 +210,105 @@ TEST_CASE("pick_auto_lock_clock") {
     SUBCASE("max unknown") {
         CHECK(pick_auto_lock_clock(0, 2617, supported) == 0);
     }
+}
+
+TEST_CASE("ClockTally") {
+    SUBCASE("nothing sampled is unknown, not zero") {
+        ClockTally t;
+        CHECK_FALSE(t.mean().has_value());
+        t.add({});
+        CHECK_FALSE(t.mean().has_value());
+    }
+    SUBCASE("pools every window, weighted by sample count") {
+        // a long window at 2800 and a short one at 3000: the long one dominates
+        ClockTally t;
+        t.add({2800, 2800, 2800});
+        t.add({3000});
+        REQUIRE(t.mean().has_value());
+        CHECK(*t.mean() == doctest::Approx(2850.0));
+        CHECK(t.samples == 4);
+    }
+}
+
+TEST_CASE("clock_below_request") {
+    SUBCASE("the RTX PRO 6000 case: 3090 asked, 2817 achieved") {
+        CHECK(clock_below_request(2817.0, 3090));
+    }
+    SUBCASE("within 3% is fine") {
+        CHECK_FALSE(clock_below_request(3000.0, 3090));   // 2.9% below
+        CHECK_FALSE(clock_below_request(3090.0, 3090));
+        CHECK_FALSE(clock_below_request(3100.0, 3090));
+    }
+    SUBCASE("just past the tolerance") {
+        CHECK(clock_below_request(2990.0, 3090));          // 3.2% below
+    }
+    SUBCASE("custom tolerance") {
+        CHECK_FALSE(clock_below_request(2817.0, 3090, 0.10));
+    }
+    SUBCASE("unknown values never warn") {
+        CHECK_FALSE(clock_below_request(0.0, 3090));
+        CHECK_FALSE(clock_below_request(2817.0, 0));
+    }
+}
+
+// --- ideal bytes per category (include/arena/categories/ideal_bytes.hpp) ---
+// Each split must add up to what the category's calculate_bytes_accessed()
+// returns, since bandwidth_gbps is built on that total. The totals below are
+// those formulas written out.
+
+TEST_CASE("ideal bytes: unknown by default") {
+    IdealBytes b;
+    CHECK_FALSE(b.known());
+    CHECK(b.total() == doctest::Approx(0.0));
+}
+
+TEST_CASE("ideal bytes: reduce") {
+    const auto b = ideal::reduce(1000, DType::FP32, DType::FP32);
+    CHECK(b.read == doctest::Approx(4000.0));
+    CHECK(b.write == doctest::Approx(4.0));
+    CHECK(b.known());
+    // fp16 in, fp32 out: the input type sets the read, the output the write
+    const auto h = ideal::reduce(1000, DType::FP16, DType::FP32);
+    CHECK(h.read == doctest::Approx(2000.0));
+    CHECK(h.write == doctest::Approx(4.0));
+    CHECK(h.total() == doctest::Approx(arena::dtype_buffer_bytes(1000, DType::FP16) +
+                                       arena::dtype_buffer_bytes(1, DType::FP32)));
+}
+
+TEST_CASE("ideal bytes: scan") {
+    const auto b = ideal::scan(4096);
+    CHECK(b.read == doctest::Approx(4096.0 * 4));
+    CHECK(b.write == doctest::Approx(4096.0 * 4));
+    CHECK(b.total() == doctest::Approx(2.0 * 4096 * 4));
+}
+
+TEST_CASE("ideal bytes: softmax") {
+    const auto b = ideal::softmax(64, 1024);
+    CHECK(b.read == doctest::Approx(64.0 * 1024 * 4));
+    CHECK(b.write == doctest::Approx(64.0 * 1024 * 4));
+    CHECK(b.total() == doctest::Approx(2.0 * 64 * 1024 * 4));
+}
+
+TEST_CASE("ideal bytes: layernorm") {
+    const auto b = ideal::layernorm(64, 1024);
+    CHECK(b.read == doctest::Approx(270336.0));    // x plus gamma and beta
+    CHECK(b.write == doctest::Approx(262144.0));   // y
+    CHECK(b.total() == doctest::Approx((2.0 * 64 * 1024 + 2.0 * 1024) * 4));
+    // the large shapes do not overflow
+    const auto big = ideal::layernorm(16384, 4096);
+    CHECK(big.write == doctest::Approx(16384.0 * 4096 * 4));
+}
+
+TEST_CASE("ideal bytes: matmul") {
+    const auto b = ideal::matmul(256, 128, 512);   // M, K, N
+    CHECK(b.read == doctest::Approx((256.0 * 128 + 128.0 * 512) * 4));
+    CHECK(b.write == doctest::Approx(256.0 * 512 * 4));
+}
+
+TEST_CASE("ideal bytes: attention") {
+    const auto b = ideal::attention(16, 1024, 64);
+    const double t = 16.0 * 1024 * 64 * 4;
+    CHECK(b.read == doctest::Approx(3.0 * t));
+    CHECK(b.write == doctest::Approx(t));
+    CHECK(b.total() == doctest::Approx(4.0 * t));
 }

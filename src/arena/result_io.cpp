@@ -3,6 +3,7 @@
 #include "arena/measurement/launch_floor.hpp"
 
 #include <cuda.h>
+#include <spdlog/spdlog.h>
 #include <sstream>
 
 namespace arena::result_io {
@@ -56,6 +57,7 @@ json to_json(const RunResult& r) {
         {"gpu_ms",       r.gpu_ms},
         {"overhead_ms",  r.overhead_ms},
         {"launch_count", r.launch_count},
+        {"timing_mode",  r.timing_mode},
         {"all_times_ms", r.all_times_ms},
     };
 
@@ -78,6 +80,12 @@ json to_json(const RunResult& r) {
         {"gflops",         r.gflops},
         {"bandwidth_gbps", r.bandwidth_gbps},
     };
+    // Per op, the split of the bytes bandwidth_gbps counts. null when the
+    // descriptor does not say.
+    j["throughput"]["ideal_read_bytes"] =
+        r.ideal_bytes_known ? json(r.ideal_read_bytes) : json(nullptr);
+    j["throughput"]["ideal_write_bytes"] =
+        r.ideal_bytes_known ? json(r.ideal_write_bytes) : json(nullptr);
 
     j["counters"] = {
         {"available",       r.counters.available},
@@ -194,11 +202,30 @@ json environment_json(const Context& ctx, const PowerMonitor& power) {
     j["sm_clock_now_mhz"]    = power.sm_clock_mhz();
     const auto& lock = power.clock_lock();
     if (lock.requested) {
+        // achieved_mhz is the mean SM clock over every timed window of the
+        // process. A lock is a ceiling, so it can sit well below
+        // requested_mhz while applied is true: on an RTX PRO 6000 Blackwell
+        // a 3090 MHz lock ran at about 2817 MHz with no throttle reason set,
+        // the boost limit at that voltage and temperature.
+        const auto achieved = power.achieved_sm_clock_mhz();
         j["clock_lock"] = {
             {"requested_mhz", lock.requested_mhz},
             {"applied",       lock.applied},
             {"error",         lock.error},
+            {"achieved_mhz",  achieved ? json(*achieved) : json(nullptr)},
         };
+        static bool warned = false;
+        if (!warned && lock.applied && achieved &&
+            measure::clock_below_request(*achieved, lock.requested_mhz)) {
+            warned = true;
+            spdlog::get("power")->warn(
+                "--lock-clocks asked for {} MHz but the timed runs averaged {:.0f} MHz "
+                "({:.1f}% lower). A lock is a ceiling: the board's boost limit, power or "
+                "thermal limits kept it below that, so the clock was not fixed. Lock at "
+                "or below {:.0f} MHz for a steady clock.",
+                lock.requested_mhz, *achieved,
+                100.0 * (1.0 - *achieved / lock.requested_mhz), *achieved);
+        }
     }
     return j;
 }
