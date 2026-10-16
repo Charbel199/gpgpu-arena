@@ -196,46 +196,158 @@ def sol(result, env):
     return out
 
 
-def size_sol(result, env):
+# Score rules. Runs record "score_rule" at init; runs without the key are
+# rule 1 and score exactly as they always did. Rule 2 (see size_sol):
+# the launch is added to the slowest of the other floors instead of competing
+# with them, and output parked in L2 past the timed window is charged at DRAM
+# speed. `rescore <run> --score-rule 2` moves an old run to rule 2.
+SCORE_RULE = 2
+
+
+def score_rule(cfg):
+    return (cfg or {}).get("score_rule", 1)
+
+
+def score_time(timing, rule=1):
+    """The op time (ms) a shape's score is computed from. This is the hook
+    for the timing statistic: rule 1 uses arena's interquartile mean
+    (op_ms_trimmed), falling back to the median. Rule 2 uses the mean of
+    the fastest half of the runs (see lower_half_mean), and new rule 2 runs
+    time with arena's --timing-mode v2, whose start event no longer sits on
+    the 2 us timestamp grid behind the L2 flush."""
+    t = timing or {}
+    median = float(t.get("op_ms") or 0.0)
+    if rule >= 2:
+        times = [float(x) for x in t.get("all_times_ms") or [] if x is not None]
+        if len(times) >= 4:
+            return lower_half_mean(times)
+    return float(t.get("op_ms_trimmed") or median)
+
+
+def larger_than_l2(nbytes, env):
+    """Whether a shape's working set exceeds the L2, so output still in L2
+    when the timer stops is output a real workload would wait for."""
+    l2 = float((env or {}).get("l2_cache_bytes") or 0)
+    return l2 > 0 and nbytes > l2
+
+
+def size_sol(result, env, rule=1):
     """SOL at one shape, against the slowest of three floors: moving the
     ideal bytes at peak DRAM bandwidth, doing the FLOPs at peak FP32, and the
     latency floor (an empty launch plus one cold DRAM read and one write).
     The last is what makes small shapes scorable: at a few KB no kernel can
     beat that latency, so it is the roof, not bandwidth. At large shapes this
-    equals the plain roofline SOL."""
+    equals the plain roofline SOL.
+
+    Rule 2 changes three things. The floor is launch + max(memory, compute,
+    round trip - launch): launch overhead cannot overlap the transfer, while
+    the DRAM latency inside the round trip can. Below the L2 size the memory
+    floor counts only the reads, since the output stays in L2. And when arena reports the
+    ideal write bytes and the DRAM write counter, at a shape larger than L2,
+    writes that never reached DRAM inside the timed op (parked in L2 by an
+    evict_last store, written back after the timer stopped) are charged at
+    peak DRAM bandwidth: op time + parked bytes / peak bandwidth."""
     tp = result.get("throughput", {})
     t = result.get("timing", {})
     median = float(t.get("op_ms") or 0.0)
     # Interquartile mean when arena reports it: steadier than the median for
     # microsecond kernels, whose timings cluster. Throughput is reported on
     # the median, so bytes and FLOPs are recovered with it.
-    op = float(t.get("op_ms_trimmed") or median)
+    op = score_time(t, rule)
     gbps = float(tp.get("bandwidth_gbps") or 0.0)
     gflops = float(tp.get("gflops") or 0.0)
     nbytes = gbps * 1e6 * median        # GB/s x ms
     flops = gflops * 1e6 * median
     peak_bw = float(env.get("peak_dram_gbps") or 0.0)
     peak_fl = float(env.get("peak_fp32_gflops") or 0.0)
-    # The latency roof is the round trip (launch, one cold DRAM read, one
-    # write) when arena measured it, otherwise the empty launch.
-    latency = float(env.get("roundtrip_floor_ms") or 0.0) or float(env.get("launch_floor_ms") or 0.0)
-    floors = {
-        "memory": nbytes / (peak_bw * 1e6) if peak_bw > 0 else 0.0,
-        "compute": flops / (peak_fl * 1e6) if peak_fl > 0 else 0.0,
-        "latency": latency,
-    }
-    bound = max(floors, key=floors.get)
-    roof = floors[bound]
-    return {
+    ideal_w = tp.get("ideal_write_bytes")
+    ideal_r = tp.get("ideal_read_bytes")
+    if rule >= 2 and ideal_w is not None and ideal_r is not None and (ideal_w or ideal_r):
+        nbytes = float(ideal_r) + float(ideal_w)    # exact, not recovered from a rounded rate
+    launch = float(env.get("launch_floor_ms") or 0.0)
+    roundtrip = float(env.get("roundtrip_floor_ms") or 0.0)
+    dram_bytes = nbytes
+    if rule >= 2 and ideal_r is not None and not larger_than_l2(nbytes, env):
+        # Below the L2 size the output stays in the write-back L2 inside the
+        # timed window for any kernel; only the (cold) reads must cross DRAM.
+        # Counting the writes at DRAM speed put good kernels above 100%.
+        dram_bytes = float(ideal_r)
+    mem = dram_bytes / (peak_bw * 1e6) if peak_bw > 0 else 0.0
+    comp = flops / (peak_fl * 1e6) if peak_fl > 0 else 0.0
+    if rule >= 2:
+        terms = {"memory": mem, "compute": comp, "latency": max(0.0, (roundtrip or launch) - launch)}
+        bound = max(terms, key=terms.get)
+        roof = launch + terms[bound]
+    else:
+        # The latency roof is the round trip (launch, one cold DRAM read,
+        # one write) when arena measured it, otherwise the empty launch.
+        floors = {"memory": mem, "compute": comp, "latency": roundtrip or launch}
+        bound = max(floors, key=floors.get)
+        roof = floors[bound]
+    out = {
         "params": result.get("input", {}).get("params", {}),
         "op_ms": op,
         "gpu_ms": result.get("timing", {}).get("gpu_ms"),
-        "fraction": (roof / op) if op > 0 and roof > 0 else 0.0,
+        "fraction": 0.0,
         "bound": bound,
         "roof_ms": roof,
         "ideal_bytes": nbytes,
         "flops": flops,
     }
+    if dram_bytes != nbytes:
+        out["roof_bytes"] = dram_bytes
+    # What the write-back check needs, recorded under every rule so the
+    # diagnosis can flag parked writes in rule 1 runs too.
+    c = result.get("counters") or {}
+    if ideal_w is not None:
+        out["ideal_write_bytes"] = float(ideal_w)
+        out["larger_than_l2"] = larger_than_l2(nbytes, env)
+        if c.get("available", True) and c.get("dram_write_bytes") is not None:
+            out["dram_write_bytes"] = float(c["dram_write_bytes"])
+    # Only above the L2 size: below it the write-back L2 holds part of any
+    # kernel's output past the timer (a naive layernorm leaves half of a 4 MB
+    # output there), which a following kernel would also find in L2. Above
+    # it, parked writes mostly come from cache hints (a plain kernel leaves a
+    # few percent too, which every kernel pays alike) and a following kernel
+    # pays for them.
+    if (rule >= 2 and out.get("larger_than_l2") and out.get("dram_write_bytes") is not None
+            and peak_bw > 0 and op > 0):
+        parked = max(0.0, out["ideal_write_bytes"] - out["dram_write_bytes"])
+        if parked > 0:
+            out["op_ms_raw"] = op
+            out["parked_write_bytes"] = parked
+            out["parked_ms"] = parked / (peak_bw * 1e6)
+            op = op + out["parked_ms"]
+            out["op_ms"] = op
+    out["fraction"] = (roof / op) if op > 0 and roof > 0 else 0.0
+    if rule >= 2:
+        out["score_rule"] = rule
+        # A kernel at the latency floor can read a hair under it (the floors
+        # are batch medians, the score a fastest-half mean). Reaching the
+        # roof is 100%; noise past it must not lift the geometric mean.
+        if out["fraction"] > 1.0:
+            out["fraction_raw"] = out["fraction"]
+            out["fraction"] = 1.0
+    return out
+
+
+def ideal_split(results):
+    """Whether arena reported the ideal read and write bytes for every
+    timed shape. Rule 2 needs the split: without it the writes of a shape
+    below the L2 size count at DRAM speed, which puts good kernels above
+    100% (older builds, and runs timed before arena reported it)."""
+    rs = [r for r in results or [] if r.get("success", True)]
+    return bool(rs) and all((r.get("throughput") or {}).get(k) is not None
+                            for r in rs for k in ("ideal_read_bytes", "ideal_write_bytes"))
+
+
+def parked_text(p):
+    """"writes parked in L2: 42 MB, charged 0.0230 ms (measured 0.3580 ms)",
+    or "" for a shape without the rule 2 write-back charge."""
+    if not p.get("parked_ms"):
+        return ""
+    return (f"writes parked in L2: {p['parked_write_bytes'] / 1e6:.0f} MB, charged "
+            f"{p['parked_ms']:.4f} ms (measured {p.get('op_ms_raw', 0):.4f} ms)")
 
 
 def geomean(values):
@@ -367,7 +479,7 @@ def diagnose(obs):
 
     frac = s.get("fraction", 0.0)
     if compute_bound(obs):
-        return diagnose_compute(obs) + diagnose_noise(obs)
+        return diagnose_compute(obs) + diagnose_writeback(obs) + diagnose_noise(obs)
     if s.get("bound") == "memory":
         out.append(f"memory-bound: {frac:.1%} of the DRAM roof "
                    f"({s.get('achieved', 0):.0f} of {s.get('roof', 0):.0f} GB/s).")
@@ -417,7 +529,34 @@ def diagnose(obs):
 
     if frac >= 0.85:
         out.append("within 15% of the roof: further gains will be small.")
-    return out + diagnose_noise(obs)
+    return out + diagnose_writeback(obs) + diagnose_noise(obs)
+
+
+# DRAM writes under this share of the ideal writes, at a shape larger than
+# L2, mean part of the output was still in L2 when the timer stopped.
+PARKED_WRITE_SHARE = 0.9
+
+
+def diagnose_writeback(obs):
+    """Lines about output parked in L2 past the timed window, at shapes
+    larger than L2, under any score rule. Needs arena's ideal_write_bytes
+    and the DRAM write counter."""
+    out = []
+    rule = obs.get("score_rule", 1)
+    for p in obs.get("sizes", []) or []:
+        iw, dw = p.get("ideal_write_bytes"), p.get("dram_write_bytes")
+        if not iw or dw is None or not p.get("larger_than_l2") or dw >= PARKED_WRITE_SHARE * iw:
+            continue
+        txt = (f"at {shape_label(p.get('params'))} DRAM writes are {dw / 1e6:.0f} of {iw / 1e6:.0f} MB "
+               f"ideal ({dw / iw:.0%}) at a shape larger than L2: part of the output stays in L2 "
+               "(e.g. an evict_last store) and is written back after the timer stops, which a "
+               "following kernel would pay for")
+        if p.get("parked_ms"):
+            txt += f"; score rule 2 charges it ({p['parked_ms']:.4f} ms)"
+        elif rule < 2:
+            txt += "; score rule 1 counts this as a gain (rescore --score-rule 2 charges it)"
+        out.append(txt + ".")
+    return out
 
 
 def diagnose_compute(obs):
@@ -519,18 +658,28 @@ def diagnose_noise(obs):
     """Lines about timing spread: two clusters, or many outliers, mean a
     single eval cannot resolve a small change."""
     out = []
+    rule = obs.get("score_rule", 1)
+    stat = "the mean of the fastest half" if rule >= 2 else "the interquartile mean"
+    holds = 0.5 if rule >= 2 else 0.75     # share of fast runs the statistic needs
     for p in obs.get("sizes", []) or []:
         sp = p.get("spread") or {}
         if sp.get("bimodal"):
             cl = sp.get("clusters") or {}
-            out.append(f"timings at {shape_label(p.get('params'))} are bimodal: {cl.get('low_share', 0):.0%} "
-                       f"of runs near {cl.get('low_ms', 0):.4f} ms, the rest near {cl.get('high_ms', 0):.4f} ms "
-                       "(clock, power or placement changed between runs). Compare candidates with "
-                       "`pgaio.py ab` rather than one eval.")
+            share = cl.get("low_share", 0)
+            txt = (f"timings at {shape_label(p.get('params'))} are bimodal: {share:.0%} "
+                   f"of runs near {cl.get('low_ms', 0):.4f} ms, the rest near {cl.get('high_ms', 0):.4f} ms. "
+                   "On a shared GPU the slow cluster is usually runs delayed by other clients (the "
+                   "display compositor, other processes), not the kernel. ")
+            if share >= holds:
+                txt += f"The score uses {stat}, which leaves that cluster out."
+            else:
+                txt += (f"The score uses {stat}, and the slow share is too large for it: close other "
+                        "GPU work, and compare candidates with `pgaio.py ab` rather than one eval.")
+            out.append(txt)
         elif sp.get("outliers", 0) >= 0.1 and sp.get("ci_half_frac", 0) * 2 > PLATEAU_GAIN:
             out.append(f"{sp['outliers']:.0%} of timed runs at {shape_label(p.get('params'))} are outliers "
                        f"({sp.get('min', 0):.4f}..{sp.get('max', 0):.4f} ms around a median of "
-                       f"{sp.get('median', 0):.4f}); the score uses the interquartile mean, but changes "
+                       f"{sp.get('median', 0):.4f}); the score uses {stat}, but changes "
                        f"under {sp.get('ci_half_frac', 0) * 2:.1%} here are within noise.")
     return out
 
@@ -597,9 +746,14 @@ def budget_error(cfg, attempts, dsl):
 PLATEAU_EVALS = 10
 PLATEAU_GAIN = 0.005
 PLATEAU_MIN_PER_DSL = 3
-# Runs started from now on record "plateau_rule": 2 (see plateau()). Runs
-# without the key keep rule 1, so their history reads the same as before.
-PLATEAU_RULE = 2
+# Runs started from now on record "plateau_rule": 3 (see plateau_state()).
+# Runs without the key keep rule 1, rule 2 runs keep rule 2, so their
+# history reads the same as before.
+PLATEAU_RULE = 3
+# Rule 3 may stop after this many evals without a gain instead of
+# PLATEAU_EVALS, once the leads are closed (see plateau_state()).
+PLATEAU_EARLY_EVALS = 6
+PLATEAU_EARLY_AB = 2
 
 
 def score_half_width(att):
@@ -610,17 +764,22 @@ def score_half_width(att):
     return max(0.0, (ci[1] - ci[0]) / 2)
 
 
+def ab_covers(r, shapes=None):
+    """Whether a saved A/B timed every one of shapes (all, without shapes)."""
+    need = {pkey(s) for s in shapes or []}
+    timed = {pkey(s.get("params")) for s in r.get("shapes") or [] if isinstance(s, dict)}
+    return not (need - timed)
+
+
 def ab_says_faster(ab_results, new_it, old_it, shapes=None):
     """Whether a saved A/B comparison shows iteration new_it faster than
     old_it over all its shapes, with a CI that excludes no difference.
     With shapes (the run's timed shapes), only an A/B that timed every one
     of them counts: the score is a mean over all of them, so a gain at one
     shape (ab --shape) is not a gain in the score."""
-    need = {pkey(s) for s in shapes or []}
     for r in ab_results or []:
         o = r.get("overall") or {}
-        timed = {pkey(s.get("params")) for s in r.get("shapes") or [] if isinstance(s, dict)}
-        if need - timed:
+        if not ab_covers(r, shapes):
             continue
         if r.get("a") == old_it and r.get("b") == new_it and o.get("faster") == "b":
             return True
@@ -629,10 +788,182 @@ def ab_says_faster(ab_results, new_it, old_it, shapes=None):
     return False
 
 
-def plateau(cfg, attempts, ab_results=None):
-    """(evals since the best last rose by a real gain, DSLs still short of
-    PLATEAU_MIN_PER_DSL evals and not skipped, whether the run may stop on a
-    plateau).
+def ab_relation(ab_results, x, y, shapes=None):
+    """What the saved A/Bs over every one of shapes say of iterations x and
+    y: x or y (that one faster overall, CI excluding no difference), "tie"
+    (compared, nothing resolved) or None (never compared). A resolved result
+    wins over ties; between resolved ones, the latest."""
+    out = None
+    if x == y:
+        return None
+    for r in ab_results or []:
+        if {r.get("a"), r.get("b")} != {x, y} or not ab_covers(r, shapes):
+            continue
+        f = (r.get("overall") or {}).get("faster")
+        if f in ("a", "b"):
+            out = r.get(f)
+        elif out is None:
+            out = "tie"
+    return out
+
+
+def ab_best(attempts, ab_results=None, shapes=None):
+    """The A/B-adjusted best: {"score_best", "best", "ties", "chain"}, or
+    None before anything passes. It starts from the best score; while a
+    saved A/B over every timed shape shows another passing iteration faster
+    than it (overall, CI excluding no difference), that one replaces it
+    (the highest scoring one if several, never going back to one already
+    passed over). "ties" are the passing iterations whose A/B against the
+    final best resolved nothing. Scores themselves do not change."""
+    ok = [x for x in attempts if x.get("verdict") == "ok" and x.get("score") is not None]
+    if not ok:
+        return None
+    by = {x["iteration"]: x for x in ok}
+    score_best = max(ok, key=lambda x: x["score"])["iteration"]
+    best, chain, seen = score_best, [], {score_best}
+    while True:
+        winners = [it for it in by if it not in seen
+                   and ab_relation(ab_results, it, best, shapes) == it]
+        if not winners:
+            break
+        nxt = max(winners, key=lambda it: by[it]["score"])
+        chain.append({"from": best, "to": nxt})
+        seen.add(nxt)
+        best = nxt
+    ties = sorted(it for it in by if it != best and ab_relation(ab_results, it, best, shapes) == "tie")
+    return {"score_best": score_best, "best": best, "ties": ties, "chain": chain}
+
+
+def ab_best_text(adj):
+    """One line on the A/B-adjusted best, or "" when nothing is known."""
+    if not adj:
+        return ""
+    if adj["best"] != adj["score_best"]:
+        via = " -> ".join([str(adj["chain"][0]["from"])] + [str(c["to"]) for c in adj["chain"]])
+        line = (f"A/B-adjusted best: iteration {adj['best']} (the best score is iteration "
+                f"{adj['score_best']}; A/B over every shape: {via})")
+    else:
+        line = f"A/B-adjusted best: iteration {adj['best']} (also the best score)"
+    if adj["ties"]:
+        line += f"; tied with the best (A/B): {', '.join(str(t) for t in adj['ties'])}"
+    return line
+
+
+def ab_shape_gain(s):
+    """How much faster the faster side of one A/B shape row is, or None."""
+    r, f = s.get("ratio"), s.get("faster")
+    if not r or f not in ("a", "b"):
+        return None
+    return 1 - r if f == "b" else 1 - 1 / r
+
+
+def ab_split(r):
+    """For an A/B unresolved overall: {iteration: [shape rows]} of the
+    shapes where one side was resolved faster. {} otherwise."""
+    if (r.get("overall") or {}).get("faster"):
+        return {}
+    out = {}
+    for s in r.get("shapes") or []:
+        if isinstance(s, dict) and s.get("faster") in ("a", "b"):
+            out.setdefault(r.get(s["faster"]), []).append(s)
+    return out
+
+
+def ab_split_text(r):
+    """"16 faster at rows=16384 cols=4096 (2.7%); 18 faster at ..." for an
+    A/B unresolved overall but resolved at some shapes, or ""."""
+    split = ab_split(r)
+    if not split:
+        return ""
+    parts = []
+    for it in (r.get("a"), r.get("b")):
+        if split.get(it):
+            parts.append(f"{it} faster at " + ", ".join(
+                f"{shape_label(s.get('params'))} ({ab_shape_gain(s):.1%})" for s in split[it]))
+    text = "; ".join(parts)
+    if len(split) == 2:
+        return text + ": each wins somewhere, a size-dispatched manifest could run both"
+    return text + ", unresolved at the rest: a dispatch opportunity at those shapes"
+
+
+def ab_shape_relation(ab_results, x, y, key):
+    """Like ab_relation, at one shape (pkey) of any A/B that timed it."""
+    out = None
+    for r in ab_results or []:
+        if {r.get("a"), r.get("b")} != {x, y} or x == y:
+            continue
+        for s in r.get("shapes") or []:
+            if not isinstance(s, dict) or pkey(s.get("params")) != key:
+                continue
+            if s.get("faster") in ("a", "b"):
+                out = (r.get(s["faster"]), ab_shape_gain(s))
+            elif out is None:
+                out = ("tie", None)
+    return out
+
+
+def ci_half_ms(p):
+    """Half the width of a shape row's op time CI, in ms, or 0."""
+    ci = (p.get("spread") or {}).get("ci_ms")
+    return max(0.0, (ci[1] - ci[0]) / 2) if ci and len(ci) == 2 else 0.0
+
+
+def shape_opportunities(sizes_by_it, best_it, ab_results=None):
+    """Shapes where another passing iteration beats the best: per shape the
+    fastest one whose op time is below the best's by more than both CIs
+    combined (and PLATEAU_GAIN), or that a saved A/B found faster there.
+    An A/B that timed the shape and found no difference, or the best
+    faster, closes it. sizes_by_it: {iteration: obs["sizes"]}.
+    [{"params", "iteration", "best", "gain", "op_ms", "best_op_ms", "evidence"}]"""
+    out = []
+    for bp in sizes_by_it.get(best_it) or []:
+        key, tb = pkey(bp.get("params")), bp.get("op_ms") or 0
+        if tb <= 0:
+            continue
+        top = None
+        for it, rows in sizes_by_it.items():
+            if it == best_it:
+                continue
+            p = next((q for q in rows or [] if pkey(q.get("params")) == key), None)
+            if not p or not p.get("op_ms"):
+                continue
+            ev = ab_shape_relation(ab_results, it, best_it, key)
+            if ev and ev[0] != it:
+                continue
+            if ev:
+                gain, how = ev[1], "ab"
+            else:
+                if tb - p["op_ms"] <= max(PLATEAU_GAIN * tb, ci_half_ms(p) + ci_half_ms(bp)):
+                    continue
+                gain, how = 1 - p["op_ms"] / tb, "eval"
+            if top is None or gain > top["gain"]:
+                top = {"params": bp.get("params"), "iteration": it, "best": best_it, "gain": gain,
+                       "op_ms": p["op_ms"], "best_op_ms": tb, "evidence": how}
+        if top:
+            out.append(top)
+    return out
+
+
+def opportunity_text(o):
+    """"iteration 13 is 6% faster than the best (18) at rows=4096 cols=768
+    (...): try a size-dispatched manifest"."""
+    if o.get("evidence") == "ab":
+        how = "in an A/B"
+    else:
+        spec = ",".join(f"{k}={v}" for k, v in sorted((o.get("params") or {}).items()))
+        how = (f"beyond both eval CIs; `ab {o['best']} {o['iteration']} --shape {spec}` "
+               "confirms or closes it")
+    return (f"iteration {o['iteration']} is {o['gain']:.0%} faster than the best ({o['best']}) at "
+            f"{shape_label(o['params'])} ({how}): try a size-dispatched manifest")
+
+
+def plateau_state(cfg, attempts, ab_results=None, sizes_by_it=None):
+    """Where the run stands against its plateau rule:
+    {"rule", "since", "short", "flat", "needed", "early", and for rule 3
+    "conditions", "ab_since_gain", "ab_lost", "opportunities", "best"}.
+
+    since: evals since the best last rose by a real gain. short: DSLs still
+    under PLATEAU_MIN_PER_DSL evals and not skipped. flat: the run may stop.
 
     Rule 1 (runs without "plateau_rule"): a gain is a score at least
     PLATEAU_GAIN above the best. Rule 2: the score must clear the best by
@@ -642,14 +973,23 @@ def plateau(cfg, attempts, ab_results=None):
     (1-3% interquartile) is larger than PLATEAU_GAIN, so rule 1 counted noise
     as progress. A saved `ab` result showing the iteration faster than the
     best of its time over all the timed shapes, with a CI excluding zero,
-    also counts as a gain."""
+    also counts as a gain. Both stop at PLATEAU_EVALS.
+
+    Rule 3: the gain test of rule 2, but the run may stop at
+    PLATEAU_EARLY_EVALS when every allowed DSL has its minimum (or is
+    skipped), at least PLATEAU_EARLY_AB A/Bs were saved since the last gain
+    and none found a winner over the A/B-adjusted best, and no shape has an
+    open lead (shape_opportunities over sizes_by_it). Otherwise it stops at
+    PLATEAU_EVALS as before. Padding a run to ten evals with low-odds
+    candidates measures nothing."""
     rule = cfg.get("plateau_rule", 1)
     timed = cfg.get("train_shapes")
-    best, best_att, since = None, None, 0
+    best, best_att, since, gain_time = None, None, 0, ""
     for x in attempts:
         if x.get("iteration", 0) == 0:
             if x.get("verdict") == "ok" and x.get("score") is not None:
                 best, best_att = x["score"], x
+            gain_time = x.get("time", "")
             continue
         sc = x.get("score") if x.get("verdict") == "ok" else None
         if rule >= 2:
@@ -660,7 +1000,7 @@ def plateau(cfg, attempts, ab_results=None):
         else:
             gain = sc is not None and (best is None or sc >= best + PLATEAU_GAIN)
         if gain:
-            best, best_att, since = max(sc, best or 0), x, 0
+            best, best_att, since, gain_time = max(sc, best or 0), x, 0, x.get("time", "")
         else:
             if sc is not None and sc > (best or 0):
                 best, best_att = sc, x
@@ -672,7 +1012,33 @@ def plateau(cfg, attempts, ab_results=None):
         if x.get("iteration", 0) > 0:
             per[x.get("dsl")] = per.get(x.get("dsl"), 0) + 1
     short = [d for d in allowed if per.get(d, 0) < PLATEAU_MIN_PER_DSL and d not in skipped]
-    return since, short, since >= PLATEAU_EVALS and not short
+    st = {"rule": rule, "since": since, "short": short, "needed": PLATEAU_EVALS, "early": False}
+    if rule >= 3:
+        adj = ab_best(attempts, ab_results, timed)
+        b = adj["best"] if adj else None
+        recent = [r for r in ab_results or [] if (r.get("time") or "") > (gain_time or "")]
+        lost = []
+        for r in recent:
+            f = (r.get("overall") or {}).get("faster")
+            if b in (r.get("a"), r.get("b")) and f in ("a", "b") and r.get(f) != b:
+                lost.append(r.get(f))
+        opps = shape_opportunities(sizes_by_it or {}, b, ab_results) if b is not None else []
+        conds = {"dsls": not short, "ab": len(recent) >= PLATEAU_EARLY_AB and not lost,
+                 "no_lead": not opps}
+        st.update(best=b, conditions=conds, ab_since_gain=len(recent), ab_lost=lost, opportunities=opps)
+        if all(conds.values()):
+            st["needed"] = PLATEAU_EARLY_EVALS
+            st["early"] = since >= PLATEAU_EARLY_EVALS and since < PLATEAU_EVALS
+    st["flat"] = since >= st["needed"] and not short
+    return st
+
+
+def plateau(cfg, attempts, ab_results=None, sizes_by_it=None):
+    """(evals since the best last rose by a real gain, DSLs still short of
+    PLATEAU_MIN_PER_DSL evals and not skipped, whether the run may stop on a
+    plateau). See plateau_state() for the rules."""
+    st = plateau_state(cfg, attempts, ab_results, sizes_by_it)
+    return st["since"], st["short"], st["flat"]
 
 
 def plateau_text(cfg):
@@ -680,6 +1046,23 @@ def plateau_text(cfg):
     if cfg.get("plateau_rule", 1) >= 2:
         return f"the best last rose beyond its noise (CI) and {PLATEAU_GAIN:.1%}"
     return f"the best last rose by {PLATEAU_GAIN:.1%}"
+
+
+def plateau_rule3_text(st):
+    """For rule 3 runs: which early-stop conditions hold, or ""."""
+    if st.get("rule", 1) < 3:
+        return ""
+    c = st["conditions"]
+    parts = [("every DSL has its minimum" if c["dsls"] else "DSLs short of the minimum: " + ", ".join(st["short"])),
+             (f"{st['ab_since_gain']} A/B(s) since the last gain" +
+              (f", iteration(s) {', '.join(str(x) for x in st['ab_lost'])} beat the best" if st["ab_lost"] else
+               ", none beat the best" if st["ab_since_gain"] else "")
+              + ("" if c["ab"] else f" (need {PLATEAU_EARLY_AB} without a winner)")),
+             ("no open per-shape lead" if c["no_lead"] else
+              f"{len(st['opportunities'])} open per-shape lead(s)")]
+    head = (f"early stop at {PLATEAU_EARLY_EVALS} applies" if all(c.values())
+            else f"stops at {PLATEAU_EVALS}; early stop at {PLATEAU_EARLY_EVALS} needs all of")
+    return f"plateau rule 3: {head}: " + "; ".join(parts)
 
 
 # --------------------------------------------------------------------------
@@ -696,6 +1079,23 @@ BOOTSTRAP_SEED = 20261016
 # inside one cluster of a 100-run matmul timing was under 3%.
 BIMODAL_GAP = 0.04
 BIMODAL_SIDE = 0.15
+
+
+def lower_half_mean(values):
+    """Mean of the fastest half of the runs. Rule 2's statistic: on a GPU
+    shared with other clients (a compositor, other contexts) a slow tail of
+    10 to 25% of runs lands several microseconds late, in bursts, while the
+    kernel itself runs unchanged; the interquartile mean breaks once that
+    tail passes 25%, the fastest half survives up to 50%."""
+    v = sorted(values)
+    if not v:
+        return 0.0
+    k = (len(v) + 1) // 2
+    return sum(v[:k]) / k
+
+
+def score_estimator(rule):
+    return lower_half_mean if rule >= 2 else trimmed_mean
 
 
 def trimmed_mean(values):
@@ -731,11 +1131,12 @@ def bimodal_gap(sorted_times, median):
             "low_share": len(low) / n}
 
 
-def spread(times, resamples=BOOTSTRAP_RESAMPLES, seed=BOOTSTRAP_SEED):
+def spread(times, resamples=BOOTSTRAP_RESAMPLES, seed=BOOTSTRAP_SEED, estimator=None):
     """Dispersion of one shape's timed runs: quartiles, interquartile range
     as a fraction of the median, a bootstrap 95% CI of the interquartile mean
-    (deterministic), the share of runs outside the 1.5 IQR fences, and a
-    second cluster if there is one. None with fewer than 4 runs."""
+    (deterministic; or of `estimator`, the score's statistic), the share of
+    runs outside the 1.5 IQR fences, and a second cluster if there is one.
+    None with fewer than 4 runs."""
     import random
     ts = sorted(float(t) for t in times or [] if t is not None)
     n = len(ts)
@@ -744,10 +1145,11 @@ def spread(times, resamples=BOOTSTRAP_RESAMPLES, seed=BOOTSTRAP_SEED):
     q1, med, q3 = statistics.quantiles(ts, n=4)
     iqr = q3 - q1
     rng = random.Random(seed)
-    means = sorted(trimmed_mean(rng.choices(ts, k=n)) for _ in range(resamples))
+    est = estimator or trimmed_mean
+    means = sorted(est(rng.choices(ts, k=n)) for _ in range(resamples))
     lo = means[int(0.025 * (resamples - 1))]
     hi = means[int(round(0.975 * (resamples - 1)))]
-    tm = trimmed_mean(ts)
+    tm = est(ts)
     out_lo, out_hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
     gap = bimodal_gap(ts, med)
     return {
@@ -779,16 +1181,19 @@ def score_ci(sizes):
             highs.append(p.get("fraction", 0.0))
             continue
         any_ci = True
-        lows.append(roof / ci[1])
-        highs.append(roof / ci[0])
+        # rule 2's write-back charge moves the whole interval (0 otherwise)
+        extra = p.get("parked_ms") or 0.0
+        cap = 1.0 if p.get("score_rule", 1) >= 2 else float("inf")   # as size_sol caps it
+        lows.append(min(cap, roof / (ci[1] + extra)))
+        highs.append(min(cap, roof / (ci[0] + extra)))
     return [geomean(lows), geomean(highs)] if any_ci else None
 
 
-def add_spread(per, results):
+def add_spread(per, results, rule=1):
     """Puts each shape's spread into the per-shape SOL rows (same order as
     the timing results) and returns the score CI."""
     for p, r in zip(per, results):
-        p["spread"] = spread(r.get("timing", {}).get("all_times_ms"))
+        p["spread"] = spread(r.get("timing", {}).get("all_times_ms"), estimator=score_estimator(rule))
     return score_ci(per)
 
 
@@ -930,7 +1335,8 @@ def ref_relative(ref, sizes):
     ref_ms = {pkey(s.get("params")): s.get("op_ms") for s in (ref or {}).get("sizes", [])}
     per = {}
     for p in sizes or []:
-        r, c = ref_ms.get(pkey(p.get("params"))), p.get("op_ms")
+        # the measured time: a library is not charged for parked writes either
+        r, c = ref_ms.get(pkey(p.get("params"))), p.get("op_ms_raw") or p.get("op_ms")
         if r and c:
             per[pkey(p.get("params"))] = r / c
     return (geomean(list(per.values())) if per else None), per
@@ -1036,21 +1442,53 @@ def unknown_option(stderr):
 
 
 def plan_error(data):
-    """The first error over all shapes of a --plan result, with its shape."""
+    """The first error over all shapes of a --plan result, with its shape.
+    A launch problem (too many registers or too much shared memory for the
+    device) counts, also from a build that does not copy it to the shape's
+    error."""
     for p in (data or {}).get("plans", []):
         if p.get("error"):
             return f"{shape_label(p.get('params'))}: {p['error']}"
+    probs = plan_problems(data)
+    if probs:
+        return probs[0]
     return ""
+
+
+def plan_problems(data):
+    """["<shape>: launch #i: <problem>"] over every applied launch of a
+    --plan result that reports "problems"."""
+    out = []
+    for p in (data or {}).get("plans", []):
+        for l in p.get("launches", []):
+            if l.get("applies", True):
+                for prob in l.get("problems") or []:
+                    out.append(f"{shape_label(p.get('params'))}: launch #{l.get('index')}: {prob}")
+    return out
 
 
 def fmt_dims(d):
     return "x".join(str(x) for x in d) if isinstance(d, (list, tuple)) else str(d)
 
 
+def device_limits_text(data):
+    """"device limits: max_threads_per_block 1024, ..." from a --plan
+    result's top-level "device", or ""."""
+    dev = (data or {}).get("device") or {}
+    lim = dev.get("limits") if isinstance(dev.get("limits"), dict) else dev
+    items = [(k, v) for k, v in sorted((lim or {}).items()) if isinstance(v, (int, float))]
+    return ("device limits: " + ", ".join(f"{k} {v}" for k, v in items)) if items else ""
+
+
 def render_plan(data):
-    """One block per shape: the launches that apply, with grid, block and
-    dynamic shared memory, and which ones are skipped by their "when"."""
+    """One block per shape: the launches that apply, with grid, block,
+    dynamic shared memory and, when arena reports them, registers, static
+    shared memory and problems; and which launches are skipped by their
+    "when"."""
     lines = []
+    lim = device_limits_text(data)
+    if lim:
+        lines.append(lim)
     for p in (data or {}).get("plans", []):
         lines.append(f"{shape_label(p.get('params'))}:")
         if p.get("error"):
@@ -1059,8 +1497,20 @@ def render_plan(data):
         skipped = [str(l.get("index")) for l in p.get("launches", []) if not l.get("applies", True)]
         for l in used:
             what = l.get("entry") or Path(l.get("source") or "").name or "?"
-            lines.append(f"  #{l.get('index')} {what:22} grid {fmt_dims(l.get('grid')):12} "
-                         f"block {fmt_dims(l.get('block')):9} smem {l.get('shared_mem_bytes', 0)}")
+            line = (f"  #{l.get('index')} {what:22} grid {fmt_dims(l.get('grid')):12} "
+                    f"block {fmt_dims(l.get('block')):9} smem {l.get('shared_mem_bytes', 0)}")
+            r = l.get("resources") or {}
+            if r:
+                static = r.get("static_shared_bytes")
+                if static is not None:
+                    line += f" dynamic + {static} static = {(l.get('shared_mem_bytes') or 0) + static} B"
+                if r.get("registers") is not None:
+                    line += f", {r['registers']} regs"
+                if r.get("max_threads_per_block") is not None:
+                    line += f", max {r['max_threads_per_block']} threads/block"
+            lines.append(line)
+            for prob in l.get("problems") or []:
+                lines.append(f"    PROBLEM: {prob}")
         if p.get("launches") and not used and not p.get("error"):
             lines.append("  no launch applies at this shape")
         if skipped:
@@ -1068,6 +1518,23 @@ def render_plan(data):
         if p.get("scratch"):
             lines.append("  scratch: " + ", ".join(f"{s.get('name')} {s.get('bytes')} B" for s in p["scratch"]))
     return lines
+
+
+def plan_resources(data):
+    """{launch index: "entry 40 regs, 4096 B static + 0 B dynamic smem"}
+    for the launches of a plan, from the first shape that applies each, so
+    an ok plan can still say what each launch costs."""
+    out = {}
+    for p in (data or {}).get("plans", []):
+        for l in p.get("launches", []):
+            r = l.get("resources") or {}
+            if not l.get("applies", True) or not r or l.get("index") in out:
+                continue
+            what = l.get("entry") or Path(l.get("source") or "").name or "?"
+            out[l.get("index")] = (f"{what} {r.get('registers', '?')} regs, "
+                                   f"{r.get('static_shared_bytes', 0)} B static + "
+                                   f"{l.get('shared_mem_bytes', 0) or 0} B dynamic smem")
+    return out
 
 
 def plan_summary(data):
@@ -1531,6 +1998,95 @@ def show_lines(sass_text, prefixes, limit=80):
     return out
 
 
+MEM_OPS = ("LDG", "STG", "LDS", "STS", "LDGSTS", "LD", "ST")
+SASS_FUNCTION = re.compile(r"^\s*Function\s*:\s*(\S+)")
+# Suffixes of a load or store mnemonic that give its width or its address
+# form rather than a cache hint.
+WIDTH_SUFFIX = {"128": 128, "64": 64, "U8": 8, "S8": 8, "U16": 16, "S16": 16, "32": 32}
+NOT_HINTS = {"E"}
+SCOPES = {"GPU", "SYS", "SM", "CTA", "CLUSTER"}
+
+
+def mem_op_parts(mnemonic):
+    """("LDG", 128, ["CONSTANT"]) for LDG.E.128.CONSTANT, or None for an
+    instruction that is not a global, shared or generic load or store.
+    A width without a suffix is 32 bits; a scope after .STRONG (or .WEAK,
+    ...) stays attached to it: .STRONG.GPU."""
+    parts = mnemonic.split(".")
+    if parts[0] not in MEM_OPS:
+        return None
+    width, hints = 32, []
+    for x in parts[1:]:
+        if x in WIDTH_SUFFIX:
+            width = WIDTH_SUFFIX[x]
+        elif x in NOT_HINTS:
+            continue
+        elif x in SCOPES and hints:
+            hints[-1] += "." + x
+        else:
+            hints.append(x)
+    return parts[0], width, hints
+
+
+def sass_widths(sass_text):
+    """Per entry (SASS "Function :"), the loads and stores by width and the
+    cache hints on them: [{"entry", "ops": {"LDG": {"128": n, "32": n}},
+    "hints": {"LDG": {"CONSTANT": n}}}], in listing order. Widths are bits,
+    as strings so the result survives a JSON round trip unchanged."""
+    out, cur = [], None
+    for line in (sass_text or "").splitlines():
+        f = SASS_FUNCTION.match(line)
+        if f:
+            cur = {"entry": f.group(1), "ops": {}, "hints": {}}
+            out.append(cur)
+            continue
+        m = SASS_MNEMONIC.search(line)
+        if not m:
+            continue
+        got = mem_op_parts(m.group(1))
+        if not got:
+            continue
+        if cur is None:
+            cur = {"entry": "?", "ops": {}, "hints": {}}
+            out.append(cur)
+        op, width, hints = got
+        w = cur["ops"].setdefault(op, {})
+        w[str(width)] = w.get(str(width), 0) + 1
+        for h in hints:
+            hs = cur["hints"].setdefault(op, {})
+            hs[h] = hs.get(h, 0) + 1
+    return out
+
+
+def widths_text(entry):
+    """"LDG 128b x114 32b x145 (CONSTANT x235), STG 128b x34 32b x29" for
+    one sass_widths() entry, or "no global/shared loads or stores"."""
+    parts = []
+    for op in MEM_OPS:
+        w = entry["ops"].get(op)
+        if not w:
+            continue
+        txt = f"{op} " + " ".join(f"{k}b x{v}" for k, v in sorted(w.items(), key=lambda kv: -int(kv[0])))
+        h = entry["hints"].get(op)
+        if h:
+            txt += " (" + ", ".join(f"{k} x{v}" for k, v in sorted(h.items(), key=lambda kv: (-kv[1], kv[0]))) + ")"
+        parts.append(txt)
+    return ", ".join(parts) or "no global/shared loads or stores"
+
+
+def saved_artifacts(out_dir, insp):
+    """What arena left in an --artifacts-dir: the files it says it copied
+    plus any per-source artifact (<source stem>.ptx, .ttgir,
+    .warp_gen.cu) found there."""
+    names = set(copied_artifacts(insp))
+    d = Path(out_dir)
+    if d.is_dir():
+        for f in d.iterdir():
+            if f.is_file() and f.name.endswith((".ptx", ".ttgir", ".warp_gen.cu", ".cubin")):
+                names.add(f.name)
+    return sorted(names)
+
+
 def run_shapes(cfg):
     """(timed shapes, checked shapes), also for runs started before shapes."""
     if "train_shapes" in cfg:
@@ -1547,6 +2103,8 @@ def run_flags(cfg, timing):
     out = []
     if cfg.get("scratch_policy"):
         out += ["--scratch-policy", cfg["scratch_policy"]]
+    if timing and cfg.get("timing_mode"):
+        out += ["--timing-mode", cfg["timing_mode"]]
     if timing and cfg.get("lock_clocks"):
         out += ["--lock-clocks", str(cfg["lock_clocks"])]
     if timing and cfg.get("profile") and cfg.get("counters"):
@@ -1652,10 +2210,15 @@ def observe(cfg, m, guard):
     for key in ("launch_floor_ms", "roundtrip_floor_ms"):
         if cfg.get(key):
             env[key] = cfg[key]
-    per = [size_sol(r, env) for r in rs]
+    rule = score_rule(cfg)
+    per = [size_sol(r, env, rule) for r in rs]
+    if rule >= 2:
+        obs["score_rule"] = rule
+    if env.get("clock_lock"):
+        obs["clock_lock"] = env["clock_lock"]
     obs["sizes"] = per
     obs["score"] = geomean([p["fraction"] for p in per])
-    obs["score_ci"] = add_spread(per, rs)
+    obs["score_ci"] = add_spread(per, rs, rule)
     add_clock(per, rs, env)
     # Counters and the diagnosis describe the largest timed shape: that is
     # where bandwidth or FLOPs are the limit and the counters say most.
@@ -1699,7 +2262,8 @@ def size_line(p, refs=None):
     if sp.get("bimodal"):
         line += ", BIMODAL"
     pw = power_text(p)
-    return line + (f"\n  {'':>16}  {pw}" if pw else "")
+    pk = parked_text(p)
+    return line + (f"\n  {'':>16}  {pw}" if pw else "") + (f"\n  {'':>16}  {pk}" if pk else "")
 
 
 def render(obs, it, cfg, best, baseline, refs=None):
@@ -1735,7 +2299,8 @@ def render(obs, it, cfg, best, baseline, refs=None):
         line += f"  | {baseline['timing']['op_ms'] / t['op_ms']:.2f}x vs baseline"
     if best and best.get("timing") and not obs.get("new_best"):
         line += (f", {best['timing']['op_ms'] / t['op_ms']:.2f}x vs best (iter {best['iteration']}"
-                 + (f", {obs['best_dsl']}" if obs.get("best_dsl") else "") + ")")
+                 + (f", {obs['best_dsl']}" if obs.get("best_dsl") else "")
+                 + (", A/B-adjusted" if obs.get("best_ab_adjusted") else "") + ")")
     lines.append(line)
     ai = s.get("intensity")
     at_clock = (f", {s['fraction_at_clock']:.1%} at the measured {s['clock_mhz'] / 1000:.2f} GHz"
@@ -1745,6 +2310,10 @@ def render(obs, it, cfg, best, baseline, refs=None):
                  f"ridge {s['ridge']:.1f})"
                  if ai is not None and s.get("ridge") else f"SOL: {s['fraction']:.1%}{at_clock}")
     lines.append(f"target {cfg['target']:.0%}" + (", reached" if s["fraction"] >= cfg["target"] else ""))
+    if cfg.get("lock_clocks"):
+        ct = clock_lock_text(cfg["lock_clocks"], obs.get("clock_lock"), measured_clock(obs.get("sizes")))
+        if ct:
+            lines.append(ct)
     c = obs["counters"]
     if c.get("available"):
         lines.append(f"counters: DRAM read {c['dram_read_bytes'] / 1e6:.1f} MB, write "
@@ -1874,9 +2443,13 @@ def cmd_init(a):
                                    capture_output=True, text=True).stdout.strip(),
         "profile": True,
         "plateau_rule": PLATEAU_RULE,
+        "score_rule": SCORE_RULE,
         "forbid_tensor_cores": bool(a.forbid_tensor_cores),
         "scratch_policy": a.scratch_policy or "legacy",
         "counters": a.counters or "full",
+        # Start events after the L2 flush has drained, at full timestamp
+        # resolution (arena --timing-mode v2); part of score rule 2.
+        "timing_mode": "v2",
         "protected_hashes": hash_protected(),
     }
     if a.lock_clocks:
@@ -1886,7 +2459,8 @@ def cmd_init(a):
     asked = {"--scratch-policy": "scratch_policy" if a.scratch_policy else None,
              "--counters": "counters" if a.counters else None,
              "--lock-clocks": "lock_clocks" if a.lock_clocks else None}
-    defaulted = {"--scratch-policy": "scratch_policy", "--counters": "counters", "--lock-clocks": "lock_clocks"}
+    defaulted = {"--scratch-policy": "scratch_policy", "--counters": "counters",
+                 "--lock-clocks": "lock_clocks", "--timing-mode": "timing_mode"}
 
     # Iteration 0. A slot run starts from the slot's source or --start; a
     # problem run measures the baseline kernel as it is in the repo.
@@ -1913,7 +2487,7 @@ def cmd_init(a):
         flag = unknown_option(m["check_stderr"] + m["timing_stderr"])
         if flag not in defaulted:
             break
-        if asked[flag]:
+        if asked.get(flag):
             shutil.rmtree(run_dir)
             sys.exit(f"this arena build does not know {flag}; rebuild arena or drop the option")
         print(f"[pgaio] this arena build does not know {flag}; the run goes on without it",
@@ -1946,6 +2520,10 @@ def cmd_init(a):
                                ("max_sm_clock_mhz", "peak_fp32_gflops_at_mhz", "clock_lock")
                                if m["environment"].get(k) is not None})
     cfg["dropped_checks"] = dropped
+    if score_rule(cfg) >= 2 and m["timing_results"] and not ideal_split(m["timing_results"]):
+        print("[pgaio] this arena build does not report ideal read and write bytes, which score "
+              "rule 2 needs; the run uses score rule 1", file=sys.stderr)
+        cfg["score_rule"] = 1
     if not passing:
         shutil.rmtree(run_dir)
         sys.exit("the baseline passes none of the correctness checks; nothing to gate on:\n" +
@@ -1984,7 +2562,7 @@ def cmd_init(a):
         print(f"budget {budget} iterations" if budget else "no iteration budget")
     print(f"mode {cfg['mode']}, docs {'on' if cfg['docs'] else 'off'}, target {cfg['target']:.0%} SOL, "
           f"train {train}, counters {cfg.get('counters', 'on') if cfg['profile'] else 'off'}")
-    print(settings_line(cfg))
+    print(settings_line(cfg, measured_clock(obs.get("sizes"))))
     if dropped:
         print(f"dropped {len(dropped)} checks the baseline fails: {', '.join(dropped[:6])}")
     print(render(obs, 0, cfg, None, None))
@@ -1995,18 +2573,61 @@ def cmd_init(a):
             print(f"  - [{l.get('dsl')}/{l.get('category')}, {l.get('device', '')}] {l['insight']}")
 
 
-def settings_line(cfg):
+# A locked clock that runs this far below what was asked for is a lock the
+# board cannot hold (power or thermal limits), not a rounding difference.
+CLOCK_SHORTFALL = 0.97
+
+
+def measured_clock(sizes):
+    """The highest mean SM clock arena sampled over a set of shape rows, in
+    MHz, or None: what the board ran at, for builds that do not report the
+    lock's achieved clock."""
+    mhz = [((p.get("clock") or {}).get("sm_clock_mean_mhz") or 0) for p in sizes or []]
+    return max(mhz) if any(mhz) else None
+
+
+def clock_lock_text(requested, lock, measured=None):
+    """"locked at 3090, achieved 2820: ..." when the lock held below what was
+    asked for, or "" when it held (or nothing says otherwise). The achieved
+    clock is arena's clock_lock.achieved_mhz, else the sampled clock."""
+    lock = lock or {}
+    req = lock.get("requested_mhz")
+    if not req:
+        try:
+            req = int(requested)
+        except (TypeError, ValueError):
+            req = None
+    got, how = lock.get("achieved_mhz"), "achieved"
+    if not got and measured:
+        got, how = measured, "measured"
+    if not req or not got or got >= CLOCK_SHORTFALL * req:
+        return ""
+    return (f"clock locked at {req:.0f} MHz, {how} {got:.0f}: the board cannot sustain that clock; "
+            "use --lock-clocks auto or a lower value")
+
+
+def settings_line(cfg, measured=None):
     """Run-level settings that change what arena measures."""
     out = [f"scratch policy {cfg.get('scratch_policy') or 'legacy (arena default)'}"]
     if cfg.get("lock_clocks"):
         lock = (cfg.get("environment") or {}).get("clock_lock") or {}
+        got = lock.get("achieved_mhz")
+        how = "achieved"
+        if not got and measured:
+            got, how = measured, "measured"
         out.append(f"clocks locked at {cfg['lock_clocks']}"
-                   + (" (applied)" if lock.get("applied") else
+                   + ((f" (applied, {how} {got:.0f} MHz)" if got else " (applied)") if lock.get("applied") else
                       f" (NOT applied: {lock.get('error') or 'arena did not say'})" if lock else ""))
     if cfg.get("forbid_tensor_cores"):
         out.append("tensor cores forbidden")
     out.append(f"plateau rule {cfg.get('plateau_rule', 1)}")
-    return "settings: " + ", ".join(out)
+    out.append(f"score rule {score_rule(cfg)}")
+    line = "settings: " + ", ".join(out)
+    if cfg.get("lock_clocks"):
+        warn = clock_lock_text(cfg["lock_clocks"], (cfg.get("environment") or {}).get("clock_lock"), measured)
+        if warn:
+            line += "\nWARNING: " + warn
+    return line
 
 
 def record(run_dir, cfg, it, cand_path, hypothesis, obs, m, dsl):
@@ -2129,6 +2750,31 @@ def best_of(run_dir, attempts, dsl=None):
     return b, json.loads((run_dir / "obs" / f"{b['iteration']:03d}.json").read_text())
 
 
+def reference_best(run_dir, cfg, attempts, ab_results=None):
+    """(attempt, observation) of the A/B-adjusted best: the reference for
+    "vs best" comparisons and SASS deltas. The attempt copy carries
+    "ab_adjusted": True when it is not the best score."""
+    adj = ab_best(attempts, load_ab(run_dir) if ab_results is None else ab_results,
+                  cfg.get("train_shapes"))
+    if not adj:
+        return None, None
+    att = dict(next(x for x in attempts if x.get("iteration") == adj["best"]))
+    att["ab_adjusted"] = adj["best"] != adj["score_best"]
+    obs = load_obs(run_dir, adj["best"])
+    return att, obs
+
+
+def load_sizes(run_dir, attempts):
+    """{iteration: per-shape rows} of every passing iteration."""
+    out = {}
+    for x in attempts:
+        if x.get("verdict") == "ok" and x.get("score") is not None:
+            obs = load_obs(run_dir, x["iteration"])
+            if obs and obs.get("sizes"):
+                out[x["iteration"]] = obs["sizes"]
+    return out
+
+
 def cmd_eval(a):
     run_dir, cfg = load_run(a.run)
     attempts = load_attempts(run_dir)
@@ -2179,14 +2825,19 @@ def cmd_eval(a):
     obs["iteration"] = it
     obs["dsl"] = dsl
 
-    best_att, best_obs = best_of(run_dir, attempts)
+    best_att, _ = best_of(run_dir, attempts)
+    # "vs best" and the SASS delta are against the A/B-adjusted best; the
+    # new_best flag stays on the score
+    ref_att, best_obs = reference_best(run_dir, cfg, attempts)
     base_obs = json.loads((run_dir / "obs" / "000.json").read_text()) \
         if (run_dir / "obs" / "000.json").exists() else None
     if obs["verdict"] == "ok":
         obs["new_best"] = best_att is None or obs["score"] > best_att["score"]
         if best_obs:
             obs["sass_vs_best"] = sass_delta(obs.get("sass"), best_obs.get("sass"))
-            obs["best_dsl"] = best_att.get("dsl")
+            obs["best_dsl"] = ref_att.get("dsl")
+            if ref_att.get("ab_adjusted"):
+                obs["best_ab_adjusted"] = True
 
     record(run_dir, cfg, it, snap, a.hypothesis, obs, m, dsl)
     if problem:
@@ -2201,16 +2852,30 @@ def cmd_eval(a):
                for d in cfg.get("dsls", [])}
         left += " (" + ", ".join(f"{d} {cfg['budget_per_dsl'] - n}" for d, n in per.items()) + ")"
     reached = obs.get("score") is not None and obs["score"] >= cfg["target"]
-    since, short, flat = plateau(cfg, load_attempts(run_dir), load_ab(run_dir))
+    all_att, ab = load_attempts(run_dir), load_ab(run_dir)
+    sizes_by_it = load_sizes(run_dir, all_att)
+    st = plateau_state(cfg, all_att, ab, sizes_by_it)
+    since, short, flat = st["since"], st["short"], st["flat"]
     left += f"; {since} eval(s) since {plateau_text(cfg)}"
     if short:
         left += f"; DSLs with under {PLATEAU_MIN_PER_DSL} evals (and not skipped): {', '.join(short)}"
     if reached:
         left += "; target reached, you may stop"
     elif flat and not cfg.get("budget"):
-        left += (f"; plateau ({PLATEAU_EVALS} evals without gain, every DSL tried): "
+        left += (f"; plateau ({st['needed']} evals without gain, every DSL tried"
+                 + (", leads closed (rule 3)" if st["needed"] < PLATEAU_EVALS else "") + "): "
                  "you may stop, or keep going if an untried idea remains")
+    adj = ab_best(all_att, ab, cfg.get("train_shapes"))
+    if adj and (adj["best"] != adj["score_best"] or adj["ties"]):
+        print(ab_best_text(adj))
     print(f"\n{left}")
+    if plateau_rule3_text(st):
+        print(plateau_rule3_text(st))
+    opps = st.get("opportunities")
+    if opps is None and adj:
+        opps = shape_opportunities(sizes_by_it, adj["best"], ab)
+    for o in (opps or [])[:4]:
+        print(f"open lead: {opportunity_text(o)}")
     print(f"snapshot: {snap.relative_to(REPO)}   full observation: "
           f"{(run_dir / 'obs' / f'{it:03d}.json').relative_to(REPO)}")
     print(f"journal: {(run_dir / 'journal.md').relative_to(REPO)}   "
@@ -2239,9 +2904,10 @@ def cmd_sass(a):
     out.mkdir(parents=True, exist_ok=True)
     (out / "inspect.json").write_text(json.dumps(insp, indent=1))
     (out / "kernel.sass").write_text(sass_text)
-    extra = copied_artifacts(insp)
+    extra = saved_artifacts(out, insp)
+    widths = sass_widths(sass_text)
     append_jsonl(run_dir / "inspections.jsonl", {"time": now(), "draft": str(src), "dsl": dsl,
-                                                 "sass": sass_brief(insp)})
+                                                 "sass": sass_brief(insp), "widths": widths})
 
     brief = sass_brief(insp)
     r = insp.get("resources", {})
@@ -2258,6 +2924,10 @@ def cmd_sass(a):
     for e in insp.get("entries", []):
         print(f"  entry {e['entry']}: {e['instructions']} instr, {e['registers']} regs")
     print("top opcodes: " + ", ".join(f"{op} x{c}" for op, c in top_opcodes(insp)))
+    if widths:
+        print("loads and stores per entry (width in bits, cache hints):")
+        for w in widths:
+            print(f"  {w['entry']}: {widths_text(w)}")
     mix = sass_mix(insp)
     if mix.get("ffma") and mix.get("ffma_per_lds") is not None:
         print(f"FMA balance: FFMA {mix['ffma_share']:.0%} of instructions, "
@@ -2274,6 +2944,8 @@ def cmd_sass(a):
             print(note)
         elif data.get("ok", True) and not plan_error(data):
             print(plan_summary(data))
+            for i, txt in sorted(plan_resources(data).items(), key=lambda kv: str(kv[0])):
+                print(f"  launch #{i}: {txt}")
         else:
             print("\n".join(render_plan(data)))
             print(f"first plan error: {plan_error(data)}")
@@ -2282,10 +2954,11 @@ def cmd_sass(a):
         print(f"SASS lines starting with {', '.join(prefixes)}, in program order:")
         for line in show_lines(sass_text, prefixes):
             print("  " + line)
-    best_att, best_obs = best_of(run_dir, load_attempts(run_dir))
+    best_att, best_obs = reference_best(run_dir, cfg, load_attempts(run_dir))
     if best_obs:
         d = sass_delta(brief, best_obs.get("sass"))
-        print(f"vs best (iteration {best_att['iteration']}, {best_att.get('dsl')}): " +
+        print(f"vs best (iteration {best_att['iteration']}, {best_att.get('dsl')}"
+              + (", A/B-adjusted" if best_att.get("ab_adjusted") else "") + "): " +
               (", ".join(f"{k} {v:+d}" for k, v in d.items()) or "same instruction mix"))
         best_sass = run_dir / "obs" / f"{best_att['iteration']:03d}.sass"
         print(f"diff the SASS: diff {best_sass.relative_to(REPO)} {(out / 'kernel.sass').relative_to(REPO)}")
@@ -2323,15 +2996,56 @@ def cmd_check(a):
         return
     print("\n".join(render_plan(data)))
     err = plan_error(data)
-    if err:
+    probs = plan_problems(data)
+    if err or probs:
+        if probs:
+            print(f"{len(probs)} launch problem(s); arena would refuse to launch this at these shapes:")
+            for x in probs[:20]:
+                print(f"  {x}")
         print(f"first error: {err}")
         sys.exit(1)
     print(plan_summary(data))
 
 
 API_LOOKUP = r"""
-import importlib, inspect, sys
+import importlib, inspect, re, shutil, subprocess, sys
 dsl, name = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
+
+
+def dist_version(dist, module):
+    try:
+        from importlib.metadata import version
+        return version(dist)
+    except Exception:
+        pass
+    try:
+        return getattr(importlib.import_module(module), "__version__", None) or "installed"
+    except Exception:
+        return "not installed"
+
+
+def tool_version(tool):
+    exe = shutil.which(tool)
+    if not exe:
+        return "not found"
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=60)
+        text = out.stdout + out.stderr
+    except Exception as e:
+        return f"unknown ({e})"
+    m = re.search(r"release ([0-9][0-9.]*)", text) or re.search(r"[Vv]ersion:?\s*V?([0-9][0-9.]*)", text) \
+        or re.search(r"([0-9]+\.[0-9]+(?:\.[0-9]+)*)", text)
+    return m.group(1) if m else (text.strip().splitlines() or ["unknown"])[0]
+
+
+print("installed: triton " + dist_version("triton", "triton")
+      + ", cuda-tile " + dist_version("cuda-tile", "cuda.tile")
+      + " (tileiras " + tool_version("tileiras") + ")"
+      + ", warp-lang " + dist_version("warp-lang", "warp")
+      + ", nvcc " + tool_version("nvcc"))
+print("docs (and the documentation tool) may describe newer versions than these; "
+      "`pgaio.py sass` or `check` on a draft is the test of what compiles here.")
+print()
 roots = {"triton": ["triton.language", "triton"], "cutile": ["cuda.tile"], "warp": ["warp"]}[dsl]
 mods = [importlib.import_module(r) for r in roots]
 if not name:
@@ -2456,14 +3170,23 @@ def update_journal(run_dir, cfg):
         lines.append(f"> Harness changed after iteration {hc['after_iteration']}: {hc['reason']} "
                      f"({', '.join(hc['files'])})")
         lines.append("")
+    for sc in cfg.get("score_rule_changes", []):
+        lines.append(f"> Rescored under score rule {sc['to']} (was {sc['from']}) after iteration "
+                     f"{sc['after_iteration']}, {sc['time']}.")
+        lines.append("")
     for sk in cfg.get("skipped_dsls", []):
         lines.append(f"> {sk['dsl']} marked exhausted after iteration {sk.get('after_iteration')}: "
                      f"{sk.get('reason', '')}" + (f" (evidence: {sk['evidence']})" if sk.get("evidence") else ""))
         lines.append("")
-    for r in load_ab(run_dir):
+    ab = load_ab(run_dir)
+    for r in ab:
         o = r.get("overall") or {}
         lines.append(f"> A/B iteration {r.get('a')} (A) vs {r.get('b')} (B), {r.get('rounds')} rounds: "
-                     f"{o.get('verdict', '')}")
+                     f"{o.get('verdict', '')}" + (f"; per shape: {ab_split_text(r)}" if ab_split_text(r) else ""))
+        lines.append("")
+    adj = ab_best(attempts, ab, cfg.get("train_shapes"))
+    if adj and ab:
+        lines.append(f"> {ab_best_text(adj)}")
         lines.append("")
     times = [a.get("time", "") for a in attempts]
     for i, a in enumerate(attempts):
@@ -2523,6 +3246,30 @@ def cmd_rescore(a):
         cfg["launch_floor_ms"] = a.launch_floor
         (run_dir / "run.json").write_text(json.dumps(cfg, indent=2))
     attempts = load_attempts(run_dir)
+    rule = getattr(a, "score_rule", None)
+    if (rule if rule is not None else score_rule(cfg)) >= 2:
+        missing = []
+        for att in attempts:
+            p = run_dir / "obs" / f"{att['iteration']:03d}.json"
+            if att.get("verdict") == "ok" and p.exists():
+                raw = json.loads(p.read_text()).get("raw", {}).get("timing_results")
+                if raw and not ideal_split(raw):
+                    missing.append(str(att["iteration"]))
+        if missing:
+            sys.exit(f"score rule 2 needs arena's ideal read and write bytes, which iteration(s) "
+                     f"{', '.join(missing[:10])} do not have (timed by an older build): their "
+                     "writes would count at DRAM speed below the L2 size and put good kernels "
+                     "above 100%. Keep score rule 1 for this run, or start a new one.")
+    if rule is not None and rule != score_rule(cfg):
+        # recorded, so the history says which scores came from which rule
+        cfg.setdefault("score_rule_changes", []).append(
+            {"time": now(), "from": score_rule(cfg), "to": rule,
+             "after_iteration": max([x.get("iteration", 0) for x in attempts] or [0])})
+        cfg["score_rule"] = rule
+        (run_dir / "run.json").write_text(json.dumps(cfg, indent=2))
+        print(f"score rule {cfg['score_rule_changes'][-1]['from']} -> {rule} (recorded in run.json)")
+    changed = bool(cfg.get("score_rule_changes"))
+    rule = score_rule(cfg)
     best = None
     for att in attempts:
         p = run_dir / "obs" / f"{att['iteration']:03d}.json"
@@ -2534,12 +3281,18 @@ def cmd_rescore(a):
             continue
         env = {**cfg.get("environment", {}), "launch_floor_ms": cfg.get("launch_floor_ms", 0.0),
                "roundtrip_floor_ms": cfg.get("roundtrip_floor_ms", 0.0)}
-        per = [size_sol(r, env) for r in raw]
+        per = [size_sol(r, env, rule) for r in raw]
         old = att.get("score")
         att["score"] = obs["score"] = geomean([x["fraction"] for x in per])
-        att["score_ci"] = obs["score_ci"] = add_spread(per, raw)
+        att["score_ci"] = obs["score_ci"] = add_spread(per, raw, rule)
         add_clock(per, raw, env)
         obs["sizes"] = per
+        if rule >= 2:
+            obs["score_rule"] = rule
+        else:
+            obs.pop("score_rule", None)
+        if (rule >= 2 or changed) and "diagnosis" in obs:
+            obs["diagnosis"] = diagnose(obs)   # the write-back line depends on the rule
         if obs.get("raw", {}).get("inspect"):
             obs["sass_mix"] = sass_mix(obs["raw"]["inspect"])
         p.write_text(json.dumps(obs, indent=1))
@@ -2750,13 +3503,13 @@ def ab_commands(cfg, args_a, args_b, shapes, runs, rounds):
     return out
 
 
-def round_times(results):
-    """{shape key: interquartile mean ms} from one timed arena call."""
+def round_times(results, rule=1):
+    """{shape key: ms} from one timed arena call, by the run's score
+    statistic (score_time), so an A/B ranks what eval ranks."""
     out = {}
     for r in results or []:
         t = r.get("timing", {})
-        ms = t.get("op_ms_trimmed") or (trimmed_mean(t["all_times_ms"]) if t.get("all_times_ms") else None) \
-            or t.get("op_ms")
+        ms = score_time(t, rule) or (trimmed_mean(t["all_times_ms"]) if t.get("all_times_ms") else None)
         out[pkey(r.get("input", {}).get("params"))] = ms
     return out
 
@@ -2798,7 +3551,7 @@ def cmd_ab(a):
             if not res or bad:
                 msg = first_error(res) or (err or "").strip()[-1500:] or f"exit {code}"
                 sys.exit(f"round {i + 1}, {side.upper()} failed: {msg}")
-            got[side] = round_times(res)
+            got[side] = round_times(res, score_rule(cfg))
         rounds.append(got)
 
     summary = ab_summary(rounds, shapes)
@@ -2831,7 +3584,9 @@ def cmd_status(a):
           f"docs {'on' if cfg.get('docs') else 'off'}), "
           f"{len(attempts) - 1}{'/' + str(cfg['budget']) if cfg.get('budget') else ''} "
           f"iterations used, target {cfg['target']:.0%}")
-    print(settings_line(cfg))
+    ok = [x for x in attempts if x.get("verdict") == "ok"]
+    last = load_obs(run_dir, ok[-1]["iteration"]) if ok else None
+    print(settings_line(cfg, measured_clock((last or {}).get("sizes"))))
     if cfg.get("kind") == "problem":
         per = {}
         for x in attempts[1:]:
@@ -2846,13 +3601,33 @@ def cmd_status(a):
         print(f"skipped DSL {sk['dsl']} after iteration {sk.get('after_iteration')}: {sk.get('reason', '')}"
               + (f" (evidence: {sk['evidence']})" if sk.get("evidence") else ""))
     ab = load_ab(run_dir)
-    since, short, flat = plateau(cfg, attempts, ab)
+    sizes_by_it = load_sizes(run_dir, attempts)
+    st = plateau_state(cfg, attempts, ab, sizes_by_it)
+    since, short, flat = st["since"], st["short"], st["flat"]
     print(f"{since} eval(s) since {plateau_text(cfg)}"
           + (f"; DSLs with under {PLATEAU_MIN_PER_DSL} evals (and not skipped): {', '.join(short)}" if short else "")
-          + ("; plateau reached" if flat else ""))
+          + ((f"; plateau reached ({st['needed']} evals" + (", rule 3 early stop" if st["needed"] < PLATEAU_EVALS
+                                                           else "") + ")") if flat else ""))
+    if plateau_rule3_text(st):
+        print(plateau_rule3_text(st))
     for r in ab:
         print(f"A/B {r.get('a')} vs {r.get('b')} ({r.get('rounds')} rounds, {r.get('time', '')}): "
               f"{(r.get('overall') or {}).get('verdict', '')}")
+        split = ab_split_text(r)
+        if split:
+            print(f"  per shape: {split}")
+    adj = ab_best(attempts, ab, cfg.get("train_shapes"))
+    if adj:
+        sb = next(x for x in attempts if x.get("iteration") == adj["score_best"])
+        print(f"best score: iteration {adj['score_best']} ({sb.get('dsl')}, {sb['score']:.1%})")
+        print(ab_best_text(adj))
+        opps = st["opportunities"] if "opportunities" in st else shape_opportunities(sizes_by_it, adj["best"], ab)
+        if opps:
+            print(f"per-shape leads over the best (iteration {adj['best']}):")
+            for o in opps:
+                print(f"  {opportunity_text(o)}")
+        else:
+            print(f"per-shape leads over the best (iteration {adj['best']}): none beyond the CIs")
 
     refs = load_references(run_dir)
     for lib, ref in sorted(refs.items()):
@@ -2881,10 +3656,19 @@ def cmd_best(a):
     if not ok:
         sys.exit("no passing iteration yet")
     b = max(ok, key=lambda x: x["score"])
+    adj = ab_best(ok, load_ab(run_dir), cfg.get("train_shapes"))
+    ab_b = next(x for x in ok if x["iteration"] == adj["best"])
     print(json.dumps({"iteration": b["iteration"], "candidate": b["candidate"], "dsl": b.get("dsl"),
                       "score": b["score"], "op_ms": b["op_ms"], "hypothesis": b["hypothesis"],
                       "slot_source": cfg["slot_source"],
-                      "descriptor_file": cfg["descriptor_file"]}, indent=2))
+                      "descriptor_file": cfg["descriptor_file"],
+                      # the best once saved A/Bs are taken into account; the
+                      # same iteration as above unless an A/B showed another
+                      # one faster over every timed shape
+                      "ab_best": {"iteration": ab_b["iteration"], "candidate": ab_b["candidate"],
+                                  "dsl": ab_b.get("dsl"), "score": ab_b["score"], "op_ms": ab_b["op_ms"],
+                                  "hypothesis": ab_b["hypothesis"]},
+                      "ab_ties": adj["ties"]}, indent=2))
 
 
 def matching_learnings(category, dsl, limit=15):
@@ -3112,6 +3896,9 @@ def main(argv=None):
     rs = sub.add_parser("rescore", help="recompute scores from stored timings (e.g. after fixing the launch floor)")
     rs.add_argument("run")
     rs.add_argument("--launch-floor", type=float, help="launch floor in ms to use from now on")
+    rs.add_argument("--score-rule", type=int, choices=[1, 2],
+                    help="score the run under this rule from now on (recorded in run.json; "
+                         "default: the run's own rule)")
     rs.set_defaults(fn=cmd_rescore)
 
     c = sub.add_parser("compare", help="two measured iterations, or one and a library reference, side by side; free")

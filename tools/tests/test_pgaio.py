@@ -1126,6 +1126,14 @@ class TestInitFallback(unittest.TestCase):
                                 "device_name": "gpu"},
                 "inspect": None, "sass_text": ""}
 
+    @classmethod
+    def split_m(cls):
+        """ok_m from a build that reports the ideal read and write bytes."""
+        out = cls.ok_m()
+        for r in out["check_results"] + out["timing_results"]:
+            r["throughput"] = {**r["throughput"], "ideal_read_bytes": 266240.0, "ideal_write_bytes": 262144.0}
+        return out
+
     def old_build(self, cfg):
         """An arena build that knows neither --scratch-policy nor --counters."""
         m = self.ok_m()
@@ -1149,6 +1157,27 @@ class TestInitFallback(unittest.TestCase):
         cfg, calls, msg = self.init(self.old_build, ["--scratch-policy", "declared"])
         self.assertIsNone(cfg)
         self.assertIn("does not know --scratch-policy", msg)
+
+    def test_an_unknown_timing_mode_is_dropped(self):
+        def m(cfg):
+            out = self.ok_m()
+            if cfg.get("timing_mode"):
+                out.update(timing_results=[], timing_exit=1,
+                           timing_stderr="Error: unknown option '--timing-mode'\n")
+            return out
+        cfg, calls, msg = self.init(m)
+        self.assertIsNone(msg)
+        self.assertNotIn("timing_mode", cfg)
+        self.assertEqual([c.get("timing_mode") for c in calls], ["v2", None])
+
+    def test_score_rule_needs_the_ideal_split(self):
+        cfg, _, msg = self.init(lambda c: self.ok_m())
+        self.assertIsNone(msg)
+        self.assertEqual(cfg["score_rule"], 1)       # this build reports no ideal read/write bytes
+
+        cfg, _, msg = self.init(lambda c: self.split_m())
+        self.assertEqual(cfg["score_rule"], 2)
+        self.assertEqual(cfg["timing_mode"], "v2")
 
     def test_tensor_core_baseline_says_why(self):
         def m(cfg):
@@ -1194,3 +1223,467 @@ class TestArenaTimeout(unittest.TestCase):
     def test_normal_exit_is_untouched(self):
         rc, out, err = pgaio.run_with_timeout([sys.executable, "-c", "print('{}')"], None, 30)
         self.assertEqual((rc, out.strip(), err), (0, "{}", ""))
+
+
+class TestScoreRule2(unittest.TestCase):
+    ENV = {"peak_dram_gbps": 1000.0, "peak_fp32_gflops": 100000.0, "launch_floor_ms": 0.003,
+           "roundtrip_floor_ms": 0.004, "l2_cache_bytes": 100e6}
+
+    def res(self, op_ms, gbps, ideal_r=None, ideal_w=None, dram_w=None, params=None):
+        tp = {"bandwidth_gbps": gbps, "gflops": 0.0}
+        if ideal_w is not None:
+            tp.update(ideal_read_bytes=ideal_r, ideal_write_bytes=ideal_w)
+        r = {"input": {"params": params or {"n": 1}}, "timing": {"op_ms": op_ms, "gpu_ms": op_ms},
+             "throughput": tp}
+        if dram_w is not None:
+            r["counters"] = {"available": True, "dram_write_bytes": dram_w}
+        return r
+
+    def test_rule_1_is_unchanged_without_the_key(self):
+        # a run.json without "score_rule" is rule 1; new fields change nothing
+        self.assertEqual(pgaio.score_rule({}), 1)
+        self.assertEqual(pgaio.score_rule({"score_rule": 2}), 2)
+        r = self.res(0.008, 400.0)                    # 3.2 MB in 8 us
+        a = pgaio.size_sol(r, self.ENV)
+        self.assertEqual(a["bound"], "latency")       # max(3.2 us memory, 4 us round trip)
+        self.assertAlmostEqual(a["roof_ms"], 0.004)
+        r2 = self.res(0.008, 400.0, 2e6, 2e6, 1e6)
+        b = pgaio.size_sol(r2, self.ENV)
+        self.assertAlmostEqual(a["fraction"], b["fraction"])
+        self.assertNotIn("parked_ms", b)
+
+    def test_rule_1_matches_the_layernorm_run(self):
+        import json
+        run = pgaio.RUNS_DIR / "layernorm-1"
+        if not (run / "obs" / "018.json").exists():
+            self.skipTest("no layernorm-1 run in this checkout")
+        cfg = json.loads((run / "run.json").read_text())
+        obs = json.loads((run / "obs" / "018.json").read_text())
+        env = {**cfg["environment"], "launch_floor_ms": cfg["launch_floor_ms"],
+               "roundtrip_floor_ms": cfg["roundtrip_floor_ms"]}
+        per = [pgaio.size_sol(r, env, pgaio.score_rule(cfg)) for r in obs["raw"]["timing_results"]]
+        self.assertEqual([p["fraction"] for p in per], [p["fraction"] for p in obs["sizes"]])
+        self.assertEqual(pgaio.geomean([p["fraction"] for p in per]), obs["score"])
+
+    def test_rule_2_adds_the_launch_to_the_floor(self):
+        r = self.res(0.008, 500.0)
+        s = pgaio.size_sol(r, self.ENV, 2)
+        # launch 3 us + max(memory 4 us, compute 0, round trip - launch 1 us)
+        self.assertEqual(s["bound"], "memory")
+        self.assertAlmostEqual(s["roof_ms"], 0.007)
+        self.assertAlmostEqual(s["fraction"], 0.875)
+        tiny = pgaio.size_sol(self.res(0.008, 1.0), self.ENV, 2)
+        self.assertEqual(tiny["bound"], "latency")
+        self.assertAlmostEqual(tiny["roof_ms"], 0.004)   # the round trip, as in rule 1
+        # exact ideal bytes when arena reports them
+        s = pgaio.size_sol(self.res(0.008, 499.0, 2e6, 2e6), self.ENV, 2)
+        self.assertAlmostEqual(s["ideal_bytes"], 4e6)
+
+    def test_rule_2_charges_parked_writes_above_l2(self):
+        # 400 MB moved, 200 MB of writes ideal, 150 MB reached DRAM
+        r = self.res(0.5, 800.0, 200e6, 200e6, 150e6)
+        s1 = pgaio.size_sol(r, self.ENV)
+        s2 = pgaio.size_sol(r, self.ENV, 2)
+        self.assertNotIn("parked_ms", s1)
+        self.assertAlmostEqual(s2["parked_write_bytes"], 50e6)
+        self.assertAlmostEqual(s2["parked_ms"], 0.05)      # 50 MB at 1000 GB/s
+        self.assertAlmostEqual(s2["op_ms"], 0.55)
+        self.assertAlmostEqual(s2["op_ms_raw"], 0.5)
+        self.assertAlmostEqual(s2["fraction"], (0.003 + 0.4) / 0.55)
+        self.assertIn("writes parked in L2: 50 MB, charged 0.0500 ms", pgaio.parked_text(s2))
+        self.assertIn("writes parked in L2", pgaio.size_line(s2))
+        # below L2 the write-back cache holds part of any kernel's output:
+        # flagged nowhere, charged nowhere
+        small = pgaio.size_sol(self.res(0.05, 800.0, 20e6, 20e6, 1e6), self.ENV, 2)
+        self.assertFalse(small["larger_than_l2"])
+        self.assertNotIn("parked_ms", small)
+        # more DRAM writes than ideal is no credit
+        over = pgaio.size_sol(self.res(0.5, 800.0, 200e6, 200e6, 250e6), self.ENV, 2)
+        self.assertNotIn("parked_ms", over)
+
+    def test_parked_writes_shift_the_ci(self):
+        p = {"roof_ms": 0.4, "fraction": 0.4 / 0.55, "parked_ms": 0.05, "spread": {"ci_ms": [0.49, 0.51]}}
+        lo, hi = pgaio.score_ci([p])
+        self.assertAlmostEqual(lo, 0.4 / 0.56)
+        self.assertAlmostEqual(hi, 0.4 / 0.54)
+
+    def test_rule_2_caps_a_shape_at_its_roof(self):
+        # 3.9 us against a 4 us latency roof: at the roof, not past it
+        s2 = pgaio.size_sol(self.res(0.0039, 1.0), self.ENV, 2)
+        self.assertEqual(s2["fraction"], 1.0)
+        self.assertGreater(s2["fraction_raw"], 1.0)
+        self.assertGreater(pgaio.size_sol(self.res(0.0039, 1.0), self.ENV, 1)["fraction"], 1.0)
+
+    def test_rule_2_roof_below_l2_counts_reads_only(self):
+        # 20 MB read + 20 MB written, under the L2: only the reads set the roof
+        r = self.res(0.05, 800.0, 20e6, 20e6, 1e6)
+        s2 = pgaio.size_sol(r, self.ENV, 2)
+        self.assertFalse(s2["larger_than_l2"])
+        self.assertAlmostEqual(s2["roof_bytes"], 20e6)
+        self.assertAlmostEqual(s2["ideal_bytes"], 40e6)
+        self.assertAlmostEqual(s2["roof_ms"], 0.003 + 0.02)    # launch + 20 MB at 1000 GB/s
+        # rule 1 is unchanged
+        self.assertNotIn("roof_bytes", pgaio.size_sol(r, self.ENV, 1))
+
+    def test_rule_2_scores_the_fastest_half(self):
+        times = [8.0, 8.1, 8.2, 8.3, 14.0, 14.2, 8.15, 13.9]
+        self.assertAlmostEqual(pgaio.lower_half_mean(times), (8.0 + 8.1 + 8.15 + 8.2) / 4)
+        self.assertAlmostEqual(pgaio.lower_half_mean([3.0, 1.0, 2.0]), 1.5)
+        t = {"op_ms": 9.0, "op_ms_trimmed": 10.0, "all_times_ms": times}
+        self.assertEqual(pgaio.score_time(t, 1), 10.0)
+        self.assertAlmostEqual(pgaio.score_time(t, 2), pgaio.lower_half_mean(times))
+        self.assertEqual(pgaio.round_times([{"input": {"params": {"n": 1}}, "timing": t}], 2),
+                         {pgaio.pkey({"n": 1}): pgaio.lower_half_mean(times)})
+        sp = pgaio.spread(times, estimator=pgaio.score_estimator(2))
+        self.assertAlmostEqual(sp["trimmed_ms"], pgaio.lower_half_mean(times))
+
+    def test_rule_2_runs_time_with_mode_v2(self):
+        self.assertIn("--timing-mode", pgaio.run_flags({"timing_mode": "v2"}, timing=True))
+        self.assertNotIn("--timing-mode", pgaio.run_flags({"timing_mode": "v2"}, timing=False))
+        self.assertNotIn("--timing-mode", pgaio.run_flags({}, timing=True))
+
+    def test_score_time_hook(self):
+        t = {"op_ms": 0.01, "op_ms_trimmed": 0.009}
+        self.assertEqual(pgaio.score_time(t, 1), 0.009)
+        self.assertEqual(pgaio.score_time(t, 2), 0.009)    # no all_times_ms: the trimmed mean
+        self.assertEqual(pgaio.score_time({"op_ms": 0.01}, 2), 0.01)
+
+    def test_writeback_diagnosis_under_any_rule(self):
+        r = self.res(0.5, 800.0, 200e6, 200e6, 150e6, params={"rows": 16384})
+        for rule, says in ((1, "rescore --score-rule 2"), (2, "score rule 2 charges it")):
+            obs = {"sizes": [pgaio.size_sol(r, self.ENV, rule)], "score_rule": rule}
+            lines = pgaio.diagnose_writeback(obs)
+            self.assertEqual(len(lines), 1)
+            self.assertIn("rows=16384", lines[0])
+            self.assertIn("150 of 200 MB", lines[0])
+            self.assertIn(says, lines[0])
+        ok = {"sizes": [pgaio.size_sol(self.res(0.5, 800.0, 200e6, 200e6, 190e6), self.ENV, 2)]}
+        self.assertEqual(pgaio.diagnose_writeback(ok), [])
+
+    def test_rescore_moves_a_run_to_rule_2(self):
+        import contextlib
+        import io
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            run = Path(d) / "r"
+            (run / "obs").mkdir(parents=True)
+            raw = [self.res(0.5, 800.0, 200e6, 200e6, 150e6), self.res(0.008, 500.0, 2e6, 2e6)]
+            env = dict(self.ENV)
+            cfg = {"name": "r", "kind": "problem", "category": "softmax", "target": 1.0,
+                   "launch_floor_ms": env.pop("launch_floor_ms"), "roundtrip_floor_ms": env.pop("roundtrip_floor_ms"),
+                   "environment": env, "dsls": ["cuda"]}
+            (run / "run.json").write_text(json.dumps(cfg))
+            atts = [{"iteration": 0, "verdict": "ok", "score": 0.5, "dsl": "cuda", "hypothesis": "b",
+                     "candidate": "x"}]
+            (run / "attempts.jsonl").write_text(json.dumps(atts[0]) + "\n")
+            (run / "obs" / "000.json").write_text(json.dumps({"verdict": "ok", "raw": {"timing_results": raw}}))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                pgaio.main(["rescore", str(run)])
+            s1 = json.loads((run / "attempts.jsonl").read_text())["score"]
+            self.assertAlmostEqual(s1, pgaio.geomean([0.4 / 0.5, 0.004 / 0.008]))
+            self.assertNotIn("score_rule", json.loads((run / "run.json").read_text()))
+            with contextlib.redirect_stdout(out):
+                pgaio.main(["rescore", str(run), "--score-rule", "2"])
+            cfg2 = json.loads((run / "run.json").read_text())
+            self.assertEqual(cfg2["score_rule"], 2)
+            self.assertEqual(cfg2["score_rule_changes"][0]["from"], 1)
+            s2 = json.loads((run / "attempts.jsonl").read_text())["score"]
+            # below L2 only the 2 MB of reads count: launch 3 us + 2 us
+            self.assertAlmostEqual(s2, pgaio.geomean([0.403 / 0.55, 0.005 / 0.008]))
+            self.assertIn("score rule 1 -> 2", out.getvalue())
+            self.assertIn("Rescored under score rule 2", (run / "journal.md").read_text())
+
+
+    def test_rescore_refuses_rule_2_without_the_ideal_split(self):
+        # timings from a build without ideal read/write bytes would count the
+        # writes at DRAM speed below L2 and put good kernels above 100%
+        import contextlib
+        import io
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            run = Path(d) / "r"
+            (run / "obs").mkdir(parents=True)
+            env = dict(self.ENV)
+            cfg = {"name": "r", "kind": "problem", "category": "softmax", "target": 1.0,
+                   "launch_floor_ms": env.pop("launch_floor_ms"), "roundtrip_floor_ms": env.pop("roundtrip_floor_ms"),
+                   "environment": env, "dsls": ["cuda"]}
+            (run / "run.json").write_text(json.dumps(cfg))
+            att = {"iteration": 0, "verdict": "ok", "score": 0.5, "dsl": "cuda", "hypothesis": "b", "candidate": "x"}
+            (run / "attempts.jsonl").write_text(json.dumps(att) + "\n")
+            (run / "obs" / "000.json").write_text(json.dumps(
+                {"verdict": "ok", "raw": {"timing_results": [self.res(0.008, 500.0)]}}))
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                pgaio.main(["rescore", str(run), "--score-rule", "2"])
+            self.assertIn("ideal read and write bytes", str(e.exception.code))
+            self.assertNotIn("score_rule", json.loads((run / "run.json").read_text()))
+            self.assertEqual(json.loads((run / "attempts.jsonl").read_text())["score"], 0.5)
+
+    def test_ideal_split(self):
+        self.assertTrue(pgaio.ideal_split([self.res(0.008, 500.0, 2e6, 2e6)]))
+        self.assertFalse(pgaio.ideal_split([self.res(0.008, 500.0)]))
+        self.assertFalse(pgaio.ideal_split([]))
+
+
+class TestABBest(unittest.TestCase):
+    SHAPES = [{"n": 1}, {"n": 2}]
+
+    def a(self, i, score, verdict="ok"):
+        return {"iteration": i, "dsl": "cuda", "score": score, "verdict": verdict, "time": f"t{i:02d}"}
+
+    def ab(self, a, b, faster=None, per=(None, None), ratios=(1.0, 1.0), time="t99", shapes=None):
+        rows = [{"params": s, "faster": f, "ratio": r} for s, f, r in zip(shapes or self.SHAPES, per, ratios)]
+        return {"a": a, "b": b, "time": time, "overall": {"faster": faster}, "shapes": rows}
+
+    def test_score_best_without_ab(self):
+        atts = [self.a(0, 0.5), self.a(1, 0.7), self.a(2, 0.6)]
+        adj = pgaio.ab_best(atts, [], self.SHAPES)
+        self.assertEqual((adj["score_best"], adj["best"], adj["ties"]), (1, 1, []))
+        self.assertIsNone(pgaio.ab_best([self.a(0, None, "incorrect")]))
+
+    def test_ab_replaces_and_chains(self):
+        atts = [self.a(0, 0.5), self.a(1, 0.7), self.a(2, 0.69), self.a(3, 0.68)]
+        ab = [self.ab(1, 2, "b"), self.ab(3, 2, "a", time="t98")]
+        adj = pgaio.ab_best(atts, sorted(ab, key=lambda r: r["time"]), self.SHAPES)
+        self.assertEqual(adj["best"], 3)
+        self.assertEqual(adj["chain"], [{"from": 1, "to": 2}, {"from": 2, "to": 3}])
+        self.assertIn("iteration 3", pgaio.ab_best_text(adj))
+        self.assertIn("1 -> 2 -> 3", pgaio.ab_best_text(adj))
+
+    def test_ties_and_partial_ab(self):
+        # 16 vs 18 in the layernorm run: unresolved overall, 16 faster at the large shapes
+        atts = [self.a(0, 0.5), self.a(16, 0.736), self.a(18, 0.748), self.a(19, 0.738)]
+        ab = [self.ab(16, 18, None, per=("a", None), ratios=(1.027, 0.96)),
+              self.ab(19, 18, "a", shapes=[{"n": 1}], per=("a",))]       # one shape: not a score gain
+        adj = pgaio.ab_best(atts, ab, self.SHAPES)
+        self.assertEqual((adj["best"], adj["ties"]), (18, [16]))
+        self.assertIn("tied with the best (A/B): 16", pgaio.ab_best_text(adj))
+        text = pgaio.ab_split_text(ab[0])
+        self.assertIn("16 faster at n=1 (2.6%)", text)
+        self.assertIn("dispatch opportunity", text)
+        both = self.ab(16, 18, None, per=("a", "b"), ratios=(1.03, 0.95))
+        self.assertIn("18 faster at n=2 (5.0%)", pgaio.ab_split_text(both))
+        self.assertIn("each wins somewhere", pgaio.ab_split_text(both))
+        self.assertEqual(pgaio.ab_split_text(self.ab(1, 2, "b", per=("b", "b"), ratios=(0.9, 0.9))), "")
+
+    def test_relation_prefers_resolved_results(self):
+        ab = [self.ab(1, 2, "b", time="t1"), self.ab(1, 2, None, time="t2")]
+        self.assertEqual(pgaio.ab_relation(ab, 1, 2, self.SHAPES), 2)
+        self.assertEqual(pgaio.ab_relation([self.ab(1, 2)], 2, 1, self.SHAPES), "tie")
+        self.assertIsNone(pgaio.ab_relation([], 1, 2))
+
+    def rows(self, ms, half=0.0):
+        return [{"params": s, "op_ms": t, "spread": {"ci_ms": [t - half, t + half]}}
+                for s, t in zip(self.SHAPES, ms)]
+
+    def test_shape_opportunities(self):
+        sizes = {1: self.rows([1.0, 2.0], 0.01), 2: self.rows([0.9, 2.2], 0.01), 3: self.rows([0.98, 2.1], 0.02)}
+        opps = pgaio.shape_opportunities(sizes, 1)
+        self.assertEqual(len(opps), 1)
+        o = opps[0]
+        self.assertEqual((o["iteration"], o["params"], o["evidence"]), (2, {"n": 1}, "eval"))
+        self.assertAlmostEqual(o["gain"], 0.1)
+        self.assertIn("iteration 2 is 10% faster than the best (1) at n=1", pgaio.opportunity_text(o))
+        self.assertIn("size-dispatched manifest", pgaio.opportunity_text(o))
+        # within both CIs: not a lead
+        self.assertEqual(pgaio.shape_opportunities({1: self.rows([1.0, 2.0], 0.06),
+                                                    2: self.rows([0.9, 2.2], 0.06)}, 1), [])
+        # an A/B that found no difference at that shape closes it
+        ab = [self.ab(2, 1, None)]
+        self.assertEqual(pgaio.shape_opportunities(sizes, 1, ab), [])
+        # an A/B that found it faster opens one even where the evals overlap
+        ab = [self.ab(3, 1, None, per=(None, "a"), ratios=(1.0, 0.97))]
+        opps = pgaio.shape_opportunities({1: self.rows([1.0, 2.0], 0.1), 3: self.rows([1.0, 2.0], 0.1)}, 1, ab)
+        self.assertEqual([(o["iteration"], o["params"], o["evidence"]) for o in opps], [(3, {"n": 2}, "ab")])
+        self.assertAlmostEqual(opps[0]["gain"], 1 - 1 / 0.97)
+
+
+class TestPlateauRule3(unittest.TestCase):
+    SHAPES = [{"n": 1}]
+
+    def a(self, i, score, dsl="cuda"):
+        return {"iteration": i, "dsl": dsl, "score": score, "verdict": "ok", "time": f"t{i:02d}",
+                "score_ci": [score - 0.01, score + 0.01]}
+
+    def ab(self, a, b, faster=None, time="t99"):
+        return {"a": a, "b": b, "time": time, "overall": {"faster": faster},
+                "shapes": [{"params": {"n": 1}, "faster": faster, "ratio": 1.0}]}
+
+    def cfg(self, rule=3):
+        return {"kind": "problem", "dsls": ["cuda"], "plateau_rule": rule, "train_shapes": self.SHAPES}
+
+    def atts(self, n):
+        return [self.a(0, 0.5), self.a(1, 0.7)] + [self.a(i, 0.69) for i in range(2, 2 + n)]
+
+    def test_new_runs_get_rule_3(self):
+        self.assertEqual(pgaio.PLATEAU_RULE, 3)
+
+    def test_early_stop_needs_every_condition(self):
+        atts = self.atts(6)
+        abs_ = [self.ab(1, 2, time="t03"), self.ab(1, 3, time="t05")]
+        sizes = {i: [{"params": {"n": 1}, "op_ms": 1.0}] for i in range(8)}
+        st = pgaio.plateau_state(self.cfg(), atts, abs_, sizes)
+        self.assertEqual((st["since"], st["needed"], st["flat"], st["early"]), (6, 6, True, True))
+        self.assertIn("early stop at 6 applies", pgaio.plateau_rule3_text(st))
+        # rule 2 keeps waiting for 10 with the same history
+        self.assertEqual(pgaio.plateau(self.cfg(2), atts, abs_, sizes), (6, [], False))
+        # only one A/B since the last gain
+        st = pgaio.plateau_state(self.cfg(), atts, abs_[:1], sizes)
+        self.assertFalse(st["flat"])
+        self.assertIn("need 2 without a winner", pgaio.plateau_rule3_text(st))
+        # an A/B from before the last gain does not count
+        st = pgaio.plateau_state(self.cfg(), atts, [self.ab(0, 1, time="t00"), abs_[1]], sizes)
+        self.assertEqual(st["ab_since_gain"], 1)
+        # an open lead at some shape
+        lead = dict(sizes)
+        lead[4] = [{"params": {"n": 1}, "op_ms": 0.9}]
+        st = pgaio.plateau_state(self.cfg(), atts, abs_, lead)
+        self.assertFalse(st["flat"])
+        self.assertEqual(st["opportunities"][0]["iteration"], 4)
+        self.assertIn("1 open per-shape lead", pgaio.plateau_rule3_text(st))
+        # a short DSL
+        st = pgaio.plateau_state({**self.cfg(), "dsls": ["cuda", "warp"]}, atts, abs_, sizes)
+        self.assertFalse(st["flat"])
+        self.assertIn("short of the minimum: warp", pgaio.plateau_rule3_text(st))
+        # at 10 the run may stop as before even with leads open
+        st = pgaio.plateau_state(self.cfg(), self.atts(10), [], lead)
+        self.assertEqual((st["needed"], st["flat"], st["early"]), (10, True, False))
+
+    def test_an_ab_win_over_the_best_is_a_gain(self):
+        atts = self.atts(6)
+        abs_ = [self.ab(1, 2, time="t03"), self.ab(1, 3, "b", time="t05")]
+        st = pgaio.plateau_state(self.cfg(), atts, abs_, {})
+        self.assertEqual(st["since"], 4)      # iteration 3 counted as a gain by its A/B: 4..7 since
+
+    def test_rule_1_and_2_unchanged(self):
+        atts = self.atts(10)
+        self.assertEqual(pgaio.plateau({"kind": "problem", "dsls": ["cuda"]}, atts), (10, [], True))
+        self.assertEqual(pgaio.plateau(self.cfg(2), self.atts(9), []), (9, [], False))
+
+
+class TestPlanResources(unittest.TestCase):
+    DATA = {"device": {"limits": {"max_threads_per_block": 1024, "max_shared_per_block_optin": 101376,
+                                  "regs_per_block": 65536}},
+            "plans": [{"params": {"rows": 64, "cols": 1024}, "error": "",
+                       "launches": [{"index": 0, "entry": "ln_rows", "applies": True, "grid": [64, 1, 1],
+                                     "block": [256, 1, 1], "shared_mem_bytes": 1024,
+                                     "resources": {"registers": 40, "static_shared_bytes": 4096,
+                                                   "max_threads_per_block": 1024},
+                                     "problems": []}]},
+                      {"params": {"rows": 4096, "cols": 16384}, "error": "",
+                       "launches": [{"index": 0, "entry": "ln_rows", "applies": True, "grid": [4096, 1, 1],
+                                     "block": [1024, 1, 1], "shared_mem_bytes": 131072,
+                                     "resources": {"registers": 72, "static_shared_bytes": 4096,
+                                                   "max_threads_per_block": 896},
+                                     "problems": ["block of 1024 threads exceeds the kernel's limit of 896 "
+                                                  "(72 registers)"]}]}]}
+
+    def test_render_shows_resources_and_problems(self):
+        text = "\n".join(pgaio.render_plan(self.DATA))
+        self.assertIn("device limits: max_shared_per_block_optin 101376, max_threads_per_block 1024", text)
+        self.assertIn("smem 1024 dynamic + 4096 static = 5120 B, 40 regs, max 1024 threads/block", text)
+        self.assertIn("PROBLEM: block of 1024 threads exceeds", text)
+
+    def test_problems_fail_the_plan(self):
+        probs = pgaio.plan_problems(self.DATA)
+        self.assertEqual(len(probs), 1)
+        self.assertTrue(probs[0].startswith("rows=4096 cols=16384: launch #0: block of 1024"))
+        self.assertEqual(pgaio.plan_error(self.DATA), probs[0])
+        ok = {"plans": self.DATA["plans"][:1]}
+        self.assertEqual(pgaio.plan_error(ok), "")
+        self.assertEqual(pgaio.plan_resources(ok), {0: "ln_rows 40 regs, 4096 B static + 1024 B dynamic smem"})
+
+    def test_old_plans_render_as_before(self):
+        self.assertEqual(pgaio.device_limits_text({"plans": []}), "")
+        self.assertEqual(pgaio.plan_problems(TestPlan.DATA), [])
+
+
+class TestClockLock(unittest.TestCase):
+    def test_shortfall(self):
+        lock = {"applied": True, "requested_mhz": 3090, "achieved_mhz": 2820}
+        t = pgaio.clock_lock_text("3090", lock)
+        self.assertIn("locked at 3090 MHz, achieved 2820", t)
+        self.assertIn("--lock-clocks auto", t)
+        self.assertEqual(pgaio.clock_lock_text("3090", {**lock, "achieved_mhz": 3080}), "")
+        # older builds: the sampled clock stands in
+        self.assertIn("measured 2820", pgaio.clock_lock_text("3090", {"applied": True}, 2820))
+        self.assertEqual(pgaio.clock_lock_text("auto", {"applied": True}, 2820), "")
+
+    def test_settings_line(self):
+        cfg = {"lock_clocks": "3090", "environment": {"clock_lock": {"applied": True, "requested_mhz": 3090,
+                                                                     "achieved_mhz": 2820}}}
+        line = pgaio.settings_line(cfg)
+        self.assertIn("clocks locked at 3090 (applied, achieved 2820 MHz)", line)
+        self.assertIn("WARNING: clock locked at 3090 MHz, achieved 2820", line)
+        self.assertIn("score rule 1", line)
+        self.assertNotIn("WARNING", pgaio.settings_line({"scratch_policy": "declared"}))
+        self.assertEqual(pgaio.measured_clock([{"clock": {"sm_clock_mean_mhz": 2812}},
+                                               {"clock": {"sm_clock_mean_mhz": 2820}}]), 2820)
+        self.assertIsNone(pgaio.measured_clock([{}]))
+
+
+class TestSassWidths(unittest.TestCase):
+    def test_mem_op_parts(self):
+        self.assertEqual(pgaio.mem_op_parts("LDG.E.128.CONSTANT"), ("LDG", 128, ["CONSTANT"]))
+        self.assertEqual(pgaio.mem_op_parts("STG.E"), ("STG", 32, []))
+        self.assertEqual(pgaio.mem_op_parts("STG.E.EL.128"), ("STG", 128, ["EL"]))
+        self.assertEqual(pgaio.mem_op_parts("LD.E.64.STRONG.GPU"), ("LD", 64, ["STRONG.GPU"]))
+        self.assertEqual(pgaio.mem_op_parts("LDGSTS.E.BYPASS.LTC128B.128"), ("LDGSTS", 128, ["BYPASS", "LTC128B"]))
+        self.assertEqual(pgaio.mem_op_parts("LDG.E.U8"), ("LDG", 8, []))
+        for other in ("LDC", "LDSM.16.M88.4", "STL", "LDL", "FFMA"):
+            self.assertIsNone(pgaio.mem_op_parts(other))
+
+    def test_listing(self):
+        text = """Function : a
+        /*0000*/                   LDC R1, c[0x0][0x37c] ;
+        /*0010*/              @P0  LDG.E.128.CONSTANT R4, desc[UR4][R2.64] ;
+        /*0020*/                   LDG.E R8, desc[UR4][R2.64] ;
+        /*0030*/                   STG.E.EL.128 desc[UR4][R2.64], R4 ;
+		Function : b
+        /*0000*/                   LDS R1, [R2] ;
+"""
+        w = pgaio.sass_widths(text)
+        self.assertEqual([e["entry"] for e in w], ["a", "b"])
+        self.assertEqual(w[0]["ops"], {"LDG": {"128": 1, "32": 1}, "STG": {"128": 1}})
+        self.assertEqual(w[0]["hints"], {"LDG": {"CONSTANT": 1}, "STG": {"EL": 1}})
+        self.assertEqual(pgaio.widths_text(w[0]), "LDG 128b x1 32b x1 (CONSTANT x1), STG 128b x1 (EL x1)")
+        self.assertEqual(pgaio.widths_text(w[1]), "LDS 32b x1")
+        self.assertEqual(pgaio.widths_text({"ops": {}, "hints": {}}), "no global/shared loads or stores")
+
+    def test_real_sass(self):
+        p = pgaio.RUNS_DIR / "layernorm-1" / "obs" / "017.sass"
+        if not p.exists():
+            self.skipTest("no layernorm-1 run in this checkout")
+        w = pgaio.sass_widths(p.read_text())
+        self.assertTrue(w)
+        total = {}
+        for e in w:
+            for op, ws in e["ops"].items():
+                for k, v in ws.items():
+                    total[(op, k)] = total.get((op, k), 0) + v
+        # the same counts as grep over the listing: 96 LDG.E, 48 LDG.E.128,
+        # 32 STG.E, 6 STG.E.128 + 12 STG.E.EL.128
+        self.assertEqual(total[("LDG", "32")], 96)
+        self.assertEqual(total[("LDG", "128")], 48)
+        self.assertEqual(total[("STG", "128")], 18)
+        self.assertEqual(sum(e["hints"].get("STG", {}).get("EL", 0) for e in w), 12)
+
+
+class TestApiVersions(unittest.TestCase):
+    def test_lookup_prints_versions_first(self):
+        s = pgaio.API_LOOKUP
+        self.assertIn('dist_version("cuda-tile"', s)
+        self.assertIn('tool_version("tileiras")', s)
+        self.assertIn('tool_version("nvcc")', s)
+        self.assertIn("is the test of what compiles", s)
+        self.assertLess(s.index("installed: triton"), s.index("mods = "))
+        compile(s, "api_lookup", "exec")
+
+
+class TestInitRecordsRules(TestInitFallback):
+    def test_new_runs_record_both_rules(self):
+        cfg, calls, msg = self.init(lambda c: self.split_m())
+        self.assertIsNone(msg)
+        self.assertEqual((cfg["plateau_rule"], cfg["score_rule"]), (3, 2))

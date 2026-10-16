@@ -17,6 +17,15 @@ come from ncu, which by default locks clocks to base and replays the kernel
 once per counter pass: every duration here is labelled "locked clock,
 replayed" and is not comparable to eval's op_ms.
 
+For memory-bound kernels the summary also has DRAM, L2 and L1/tex
+throughput as a share of peak, achieved occupancy, waves and L2 slice
+balance (busiest slice over the mean), all from `--set full`. Its time
+breakdown puts the iteration's own eval timing at the shape (op_ms, the
+kernels' gpu_ms and the launch and gap time between them, real clock)
+next to ncu's view of the kernel body (duration, and the tail: average
+over the longest SM's active cycles), labelled by where each number came
+from.
+
 arena's own CUPTI profiler cannot run while ncu holds the counters, so no
 --profile is passed; arena warns and carries on.
 
@@ -84,12 +93,15 @@ UNITS = {
     "msecond": ("ms", 1.0), "s": ("ms", 1e3), "second": ("ms", 1e3), "nsecond": ("ms", 1e-6),
     "hz": ("mhz", 1e-6), "khz": ("mhz", 1e-3), "mhz": ("mhz", 1.0), "ghz": ("mhz", 1e3),
     "cycle/second": ("mhz", 1e-6), "cycle/nsecond": ("mhz", 1e3), "cycle/usecond": ("mhz", 1.0),
+    "byte/s": ("gbps", 1e-9), "kbyte/s": ("gbps", 1e-6), "mbyte/s": ("gbps", 1e-3),
+    "gbyte/s": ("gbps", 1.0), "tbyte/s": ("gbps", 1e3), "byte/second": ("gbps", 1e-9),
+    "gbyte/second": ("gbps", 1.0),
 }
 
 
 def to_base(value, unit, kind):
-    """value in `unit` converted to the base unit of `kind` ("bytes", "ms"
-    or "mhz"). A missing unit is taken as already in the base unit."""
+    """value in `unit` converted to the base unit of `kind` ("bytes", "ms",
+    "mhz" or "gbps"). A missing unit is taken as already in the base unit."""
     if value is None:
         return None
     u = (unit or "").strip().lower()
@@ -220,6 +232,227 @@ def summarize_metrics(launches):
     }
 
 
+def _ratio(a, b):
+    return a / b if a is not None and b else None
+
+
+def _round(v, nd=4):
+    return round(v, nd) if v is not None else None
+
+
+def first_metric(launch, names, kind=None):
+    """The first of `names` this launch has a value for."""
+    for n in names:
+        v = metric(launch, n, kind)
+        if v is not None:
+            return v
+    return None
+
+
+# Throughputs as a fraction of peak; the first name ncu exported wins.
+DRAM_PCT = ("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
+            "dram__throughput.avg.pct_of_peak_sustained_elapsed")
+L2_PCT = ("lts__throughput.avg.pct_of_peak_sustained_elapsed",)
+L1_PCT = ("l1tex__throughput.avg.pct_of_peak_sustained_active",
+          "l1tex__throughput.avg.pct_of_peak_sustained_elapsed")
+OCCUPANCY = ("sm__warps_active.avg.pct_of_peak_sustained_active",)
+OCC_LIMITS = ("launch__occupancy_limit_blocks", "launch__occupancy_limit_registers",
+              "launch__occupancy_limit_shared_mem", "launch__occupancy_limit_warps",
+              "launch__occupancy_limit_barriers")
+
+
+def launch_detail(launch):
+    """Shape, waves, SM balance and memory throughput of one profiled launch.
+
+    waves = grid / (blocks per SM x SMs), blocks per SM being the tightest
+    occupancy limit. sm_tail = sm__cycles_active avg / max: 1.0 when every
+    SM was busy as long as the busiest one, lower when a few SMs still run
+    after the others are done (a tail, or uneven work). sm_busy = average
+    SM active cycles / elapsed cycles: the rest is ramp up, drain and idle
+    SMs. l2_slice_max_over_avg = sectors in the busiest L2 slice / the mean
+    slice: 1.0 is perfectly spread, a hot slice shows up above it."""
+    def pct(names):
+        v = first_metric(launch, names)
+        return _round(v / 100.0) if v is not None else None
+
+    grid = metric(launch, "launch__grid_size")
+    sms = first_metric(launch, ["launch__sm_count", "device__attribute_multiprocessor_count"])
+    limits = [v for v in (metric(launch, n) for n in OCC_LIMITS) if v]
+    per_sm = min(limits) if limits else None
+    waves = grid / (per_sm * sms) if grid and per_sm and sms else metric(
+        launch, "launch__waves_per_multiprocessor")
+    act_avg, act_max = metric(launch, "sm__cycles_active.avg"), metric(launch, "sm__cycles_active.max")
+    elapsed = metric(launch, "sm__cycles_elapsed.avg")
+    sec_avg, sec_max = metric(launch, "lts__t_sectors.avg"), metric(launch, "lts__t_sectors.max")
+    sec_min = metric(launch, "lts__t_sectors.min")
+    hot = metric(launch, "lts__t_sectors.max.pct_of_peak_sustained_elapsed")
+    return {
+        "kernel": launch["kernel"],
+        "duration_ms": metric(launch, "gpu__time_duration.sum", "ms"),
+        "grid": int(grid) if grid is not None else None,
+        "block": int(b) if (b := metric(launch, "launch__block_size")) is not None else None,
+        "sm_count": int(sms) if sms is not None else None,
+        "blocks_per_sm": int(per_sm) if per_sm is not None else None,
+        "waves": _round(waves, 3),
+        "sm_active_avg_cycles": act_avg,
+        "sm_active_max_cycles": act_max,
+        "sm_elapsed_cycles": elapsed,
+        "sm_tail": _round(_ratio(act_avg, act_max)),
+        "sm_busy": _round(_ratio(act_avg, elapsed)),
+        "dram_pct": pct(DRAM_PCT),
+        "dram_gbps": _round(metric(launch, "dram__bytes.sum.per_second", "gbps"), 1),
+        "l2_pct": pct(L2_PCT),
+        "l1_pct": pct(L1_PCT),
+        "occupancy": pct(OCCUPANCY),
+        "l2_slice_sectors": {"avg": sec_avg, "max": sec_max, "min": sec_min}
+        if sec_avg is not None else None,
+        "l2_slice_max_over_avg": _round(_ratio(sec_max, sec_avg)),
+        "l2_hot_slice_pct": _round(hot / 100.0) if hot is not None else None,
+    }
+
+
+def memory_summary(launches):
+    """The memory-bound view of one operation, over its profiled launches:
+    throughputs as a fraction of peak (duration-weighted), hit rates,
+    achieved occupancy, waves and L2 slice balance (sectors in the busiest
+    slice over the mean slice, summed over launches). None when ncu
+    exported none of it."""
+    if not launches:
+        return None
+    durs = [metric(l, "gpu__time_duration.sum", "ms") or 0.0 for l in launches]
+    total = sum(durs)
+    weights = [d / total if total > 0 else 1.0 / len(launches) for d in durs]
+
+    def wavg(names, scale=1.0):
+        vals = [(first_metric(l, names), w) for l, w in zip(launches, weights)]
+        vals = [(v, w) for v, w in vals if v is not None]
+        wsum = sum(w for _, w in vals)
+        return _round(sum(v * w for v, w in vals) / wsum * scale) if vals and wsum > 0 else None
+
+    def total_of(name):
+        vals = [metric(l, name) for l in launches]
+        vals = [v for v in vals if v is not None]
+        return sum(vals) if vals else None
+
+    details = [launch_detail(l) for l in launches]
+    sec_max, sec_avg = total_of("lts__t_sectors.max"), total_of("lts__t_sectors.avg")
+    sec_min = total_of("lts__t_sectors.min")
+    cyc_max, cyc_avg = total_of("lts__cycles_active.max"), total_of("lts__cycles_active.avg")
+    waves = [d["waves"] for d in details if d["waves"] is not None]
+    out = {
+        "dram_pct": wavg(DRAM_PCT, 0.01),
+        # bytes over time: the duration-weighted mean of each launch's rate
+        "dram_gbps": _round(sum(d["dram_gbps"] * w for d, w in zip(details, weights)), 1)
+        if all(d["dram_gbps"] is not None for d in details) else None,
+        "l2_pct": wavg(L2_PCT, 0.01),
+        "l2_hit_rate": wavg(("lts__t_sector_hit_rate.pct",), 0.01),
+        "l1_pct": wavg(L1_PCT, 0.01),
+        "l1_hit_rate": wavg(("l1tex__t_sector_hit_rate.pct",), 0.01),
+        "occupancy": wavg(OCCUPANCY, 0.01),
+        "waves": _round(max(waves), 3) if waves else None,
+        "l2_slices": first_metric(launches[0], ["device__attribute_l2s_count"]),
+        "l2_slice_max_over_avg": _round(_ratio(sec_max, sec_avg)),
+        "l2_slice_min_over_avg": _round(_ratio(sec_min, sec_avg)),
+        "l2_hot_slice_pct": wavg(("lts__t_sectors.max.pct_of_peak_sustained_elapsed",), 0.01),
+        "l2_active_max_over_avg": _round(_ratio(cyc_max, cyc_avg)),
+    }
+    if out["l2_slices"] is not None:
+        out["l2_slices"] = int(out["l2_slices"])
+    return out if any(v is not None for v in out.values()) else None
+
+
+EVAL_NOTE = "eval: real clock, CUDA events (op_ms) and summed kernel durations (gpu_ms), cold L2"
+
+
+def eval_timing(obs, params):
+    """The iteration's own eval timing at `params`, from its obs/<NNN>.json:
+    op_ms (the measured time by the run's score statistic, "op_stat":
+    the interquartile mean under score rule 1, the mean of the fastest half
+    under rule 2, without rule 2's parked-write charge, kept apart as
+    parked_ms), the median op time, gpu_ms (kernel durations of one
+    profiled run), arena's overhead_ms (median op time - gpu_ms, at least
+    0), launch_count and the mean SM clock. None when eval did not time the
+    shape."""
+    size = next((s for s in (obs or {}).get("sizes") or [] if s.get("params") == params), None)
+    if not size or not size.get("op_ms"):
+        return None
+    t = next((r.get("timing") or {} for r in ((obs.get("raw") or {}).get("timing_results") or [])
+              if (r.get("input") or {}).get("params") == params), {})
+    gpu = size.get("gpu_ms") if size.get("gpu_ms") is not None else t.get("gpu_ms")
+    rule = obs.get("score_rule", 1)
+    out = {"op_ms": size.get("op_ms_raw") or size["op_ms"],
+           "op_stat": "mean of the fastest half" if rule >= 2 else "interquartile mean",
+           "op_ms_median": t.get("op_ms"), "gpu_ms": gpu, "overhead_ms": t.get("overhead_ms"),
+           "launch_count": t.get("launch_count"),
+           "sm_clock_mhz": (size.get("clock") or {}).get("sm_clock_mean_mhz")}
+    if size.get("parked_ms"):
+        out["parked_ms"] = size["parked_ms"]
+    return out
+
+
+def _time(ms):
+    if ms is None:
+        return "-"
+    return f"{ms * 1e3:.1f} us" if abs(ms) < 1.0 else f"{ms:.3f} ms"
+
+
+def time_breakdown(evalt, details, duration_ms=None, clock_mhz=None, note="locked clock, replayed"):
+    """Where an operation's time goes. From eval (real clock): op_ms, the
+    kernels' share (gpu_ms) and launch and gaps (op_ms - gpu_ms). From ncu
+    (its clock, replayed): the duration and, per launch, the SM tail
+    (average over the longest SM's active cycles) and waves."""
+    out = {}
+    if evalt:
+        # gpu_ms is a median-like single profiled run, so launch and gaps
+        # come from the median op time (arena's overhead_ms when it has it),
+        # never the score statistic, which can sit below gpu_ms
+        gpu = evalt.get("gpu_ms")
+        op = evalt.get("op_ms_median") or evalt.get("op_ms")
+        gap = evalt.get("overhead_ms")
+        if gap is None and op is not None and gpu is not None:
+            gap = max(0.0, op - gpu)
+        out["eval"] = dict(evalt, launch_gap_ms=gap, kernel_share=_round(_ratio(gpu, op)),
+                           note=EVAL_NOTE)
+    acts = [(d["sm_active_avg_cycles"], d["sm_active_max_cycles"], d["sm_elapsed_cycles"])
+            for d in details or []]
+    acts = [a for a in acts if None not in a]
+    tail = _round(_ratio(sum(a[0] for a in acts), sum(a[1] for a in acts))) if acts else None
+    busy = _round(_ratio(sum(a[0] for a in acts), sum(a[2] for a in acts))) if acts else None
+    peak = _round(_ratio(sum(a[1] for a in acts), sum(a[2] for a in acts))) if acts else None
+    waves = [d["waves"] for d in details or [] if d.get("waves") is not None]
+    if duration_ms is not None or acts:
+        out["ncu"] = {"duration_ms": duration_ms, "clock_mhz": clock_mhz, "sm_tail": tail,
+                      "sm_busy": busy, "busiest_sm_busy": peak,
+                      "waves": _round(max(waves), 3) if waves else None, "note": note}
+    if not out:
+        return None
+    parts = []
+    e = out.get("eval")
+    if e:
+        clk = f", {e['sm_clock_mhz']:.0f} MHz" if e.get("sm_clock_mhz") else ""
+        n = e.get("launch_count")
+        stat = f"{e['op_stat']}, " if e.get("op_stat") else ""
+        med = f", median {_time(e['op_ms_median'])}" if e.get("op_ms_median") else ""
+        parts.append(f"op {_time(e['op_ms'])} (eval, {stat}real clock{clk}{med}): "
+                     f"kernels {_time(e.get('gpu_ms'))}, "
+                     f"launch and gaps {_time(e.get('launch_gap_ms'))}"
+                     + (f" ({n} launch{'es' if n != 1 else ''})" if n is not None else "")
+                     + (f"; the score adds {_time(e['parked_ms'])} for writes parked in L2"
+                        if e.get("parked_ms") else ""))
+    n = out.get("ncu")
+    if n:
+        clk = f" at {n['clock_mhz']:.0f} MHz" if n.get("clock_mhz") else ""
+        s = f"in the kernel (ncu{clk}, {note}: {_time(n['duration_ms'])})"
+        if tail is not None:
+            s += (f", SMs busy on average {tail:.0%} of the longest SM's time (tail); "
+                  f"the longest SM active {peak:.0%} of elapsed cycles")
+        if n.get("waves") is not None:
+            s += f"; {n['waves']:.2f} waves"
+        parts.append(s)
+    out["text"] = "; ".join(parts)
+    return out
+
+
 SOURCE_STALL = re.compile(r"^stall_([a-z_]+)$")
 OPCODE = re.compile(r"^\s*(?:@!?U?P[T0-9]+\s+)?([A-Z][A-Z0-9_.]*)")
 
@@ -310,8 +543,9 @@ def clock_note(clock_control):
 
 
 def summarize(raw_text, source_text, iteration=None, reference=None, params=None,
-              clock_control="base"):
-    """summary.json from the raw and source exports."""
+              clock_control="base", evalt=None):
+    """summary.json from the raw and source exports. evalt is eval's own
+    timing at this shape (eval_timing), for the time breakdown."""
     launches = parse_raw_csv(raw_text)
     instrs = parse_source_csv(source_text or "")
     kernels = []
@@ -336,6 +570,12 @@ def summarize(raw_text, source_text, iteration=None, reference=None, params=None
         "top_instructions": top_instructions(instrs),
         "hot_loop_opcodes": hot_loop_opcodes(instrs),
     })
+    # Added later: older summary.json files lack these keys.
+    details = [launch_detail(l) for l in launches]
+    out["memory"] = memory_summary(launches)
+    out["launch_details"] = details
+    out["time_breakdown"] = time_breakdown(evalt, details, m.get("duration_ms"), m.get("clock_mhz"),
+                                           clock_note(clock_control))
     return out
 
 
@@ -376,6 +616,7 @@ def render_summary(s):
         lines.append(f"shared memory: {_big(wf)} wavefronts, {_big(bc)} bank conflicts"
                      + (f" ({bc / wf:.1%} of wavefronts)" if bc is not None else ""))
     lines.append(f"DRAM {_big(s.get('dram_bytes'), 'B')}, L2 {_big(s.get('l2_sectors'))} sectors")
+    lines += render_memory(s)
     if s.get("top_instructions"):
         lines.append("top instructions by stall samples (offset, opcode, share, main stall):")
         multi = len(s.get("kernels") or []) > 1
@@ -386,6 +627,56 @@ def render_summary(s):
         lines.append(f"hot loop opcode mix (instructions holding {HOT_COVER:.0%} of samples): " +
                      ", ".join(f"{k} x{v}" for k, v in list(s["hot_loop_opcodes"].items())[:12]))
     return "\n".join(lines)
+
+
+def render_memory(s):
+    """summary.txt lines for the memory and time sections (empty for
+    summaries written before they existed)."""
+    lines = []
+    m = s.get("memory") or {}
+    if m:
+        parts = []
+        if m.get("dram_pct") is not None:
+            parts.append(f"DRAM {_pct(m['dram_pct'])} of peak"
+                         + (f" ({m['dram_gbps']:.0f} GB/s)" if m.get("dram_gbps") is not None else ""))
+        if m.get("l2_pct") is not None:
+            parts.append(f"L2 {_pct(m['l2_pct'])} of peak"
+                         + (f" (hit rate {_pct(m['l2_hit_rate'])})" if m.get("l2_hit_rate") is not None else ""))
+        if m.get("l1_pct") is not None:
+            parts.append(f"L1/tex {_pct(m['l1_pct'])} of peak"
+                         + (f" (hit rate {_pct(m['l1_hit_rate'])})" if m.get("l1_hit_rate") is not None else ""))
+        if m.get("occupancy") is not None:
+            parts.append(f"achieved occupancy {_pct(m['occupancy'])}")
+        if m.get("waves") is not None:
+            d = (s.get("launch_details") or [{}])[0]
+            parts.append(f"{m['waves']:.2f} waves" + (
+                f" ({d['grid']} blocks / ({d['blocks_per_sm']} per SM x {d['sm_count']} SMs))"
+                if len(s.get("launch_details") or []) == 1 and d.get("blocks_per_sm") else ""))
+        if parts:
+            lines.append(f"memory ({s['note']}): " + ", ".join(parts))
+        r = m.get("l2_slice_max_over_avg")
+        if r is not None:
+            n = f" ({m['l2_slices']})" if m.get("l2_slices") else ""
+            line = f"L2 slices{n}: busiest {r:.2f}x the mean slice's sectors"
+            if m.get("l2_slice_min_over_avg") is not None:
+                line += f", quietest {m['l2_slice_min_over_avg']:.2f}x"
+            if m.get("l2_hot_slice_pct") is not None:
+                line += f"; busiest slice at {_pct(m['l2_hot_slice_pct'])} of its peak"
+            if m.get("l2_active_max_over_avg") is not None:
+                line += f"; active cycles busiest {m['l2_active_max_over_avg']:.2f}x the mean"
+            lines.append(line)
+    t = s.get("time_breakdown") or {}
+    if t.get("text"):
+        lines.append("time: " + t["text"])
+    details = s.get("launch_details") or []
+    if len(details) > 1:
+        lines.append("launches (ncu): kernel, duration, waves, SM tail (avg/max active), DRAM, L2:")
+        for d in details:
+            lines.append(f"  {d['kernel']}  {_time(d.get('duration_ms'))}  "
+                         f"{'-' if d.get('waves') is None else format(d['waves'], '.2f')} waves  "
+                         f"tail {_pct(d.get('sm_tail'))}  DRAM {_pct(d.get('dram_pct'))}  "
+                         f"L2 {_pct(d.get('l2_pct'))}")
+    return lines
 
 
 def diff_summaries(cur, ref, min_points=0.02):
@@ -414,6 +705,28 @@ def diff_summaries(cur, ref, min_points=0.02):
         a, b = cur.get(key), ref.get(key)
         if a is not None and b is not None and (a or b):
             out.append(f"  {word}: {_big(a)} vs {_big(b)}")
+    ma, mb = cur.get("memory") or {}, ref.get("memory") or {}
+    for key, word in (("dram_pct", "DRAM throughput (of peak)"), ("l2_pct", "L2 throughput (of peak)"),
+                      ("l2_hit_rate", "L2 hit rate"), ("l1_pct", "L1/tex throughput (of peak)"),
+                      ("occupancy", "achieved occupancy"), ("l2_hot_slice_pct", "busiest L2 slice (of peak)")):
+        a, b = ma.get(key), mb.get(key)
+        if a is not None and b is not None:
+            out.append(f"  {word}: {_pct(a)} vs {_pct(b)}")
+    for key, word in (("l2_slice_max_over_avg", "L2 busiest slice / mean"), ("waves", "waves")):
+        a, b = ma.get(key), mb.get(key)
+        if a is not None and b is not None:
+            out.append(f"  {word}: {a:.2f} vs {b:.2f}")
+    na = (cur.get("time_breakdown") or {}).get("ncu") or {}
+    nb = (ref.get("time_breakdown") or {}).get("ncu") or {}
+    if na.get("sm_tail") is not None and nb.get("sm_tail") is not None:
+        out.append(f"  SM tail (avg/max active cycles): {_pct(na['sm_tail'])} vs {_pct(nb['sm_tail'])}")
+    ea = (cur.get("time_breakdown") or {}).get("eval") or {}
+    eb = (ref.get("time_breakdown") or {}).get("eval") or {}
+    for key, word in (("op_ms", "op (eval)"), ("gpu_ms", "kernels (eval)"),
+                      ("launch_gap_ms", "launch and gaps (eval)")):
+        a, b = ea.get(key), eb.get(key)
+        if a is not None and b is not None:
+            out.append(f"  {word}: {_time(a)} vs {_time(b)}")
     x, y = cur.get("hot_loop_opcodes") or {}, ref.get("hot_loop_opcodes") or {}
     changed = [(k, x.get(k, 0), y.get(k, 0)) for k in sorted(set(x) | set(y)) if x.get(k, 0) != y.get(k, 0)]
     if changed:
@@ -609,15 +922,18 @@ def kernel_names(launched):
     return list(dict.fromkeys(n for n in names if n))
 
 
-def reference_sizes(results, env):
-    """Per-shape SOL of a reference's timing results, scored like observe()."""
+def reference_sizes(results, env, rule=1):
+    """Per-shape SOL of a reference's timing results, scored like observe()
+    under the run's score rule. op_ms is the measured time by that rule's
+    statistic, without rule 2's parked-write charge (which stays in the
+    fraction), so it compares with a candidate's measured time."""
     sizes = []
     for r in results:
-        s = pgaio.size_sol(r, env)
+        s = pgaio.size_sol(r, env, rule)
         names = kernel_names(r.get("launched_kernels")) or None
         if names is None and r.get("sub_kernels"):
             names = [k.get("name") for k in r["sub_kernels"]]
-        sizes.append({"params": s["params"], "op_ms": s["op_ms"], "fraction": s["fraction"],
+        sizes.append({"params": s["params"], "op_ms": s.get("op_ms_raw") or s["op_ms"], "fraction": s["fraction"],
                       "bound": s["bound"], "roof_ms": s["roof_ms"],
                       "verified": r.get("verified"), "launched_kernels": names})
     return sizes
@@ -630,8 +946,9 @@ def percent_of_reference(ref_sizes, cand_sizes):
     out = []
     for r in ref_sizes:
         c = by.get(json.dumps(r["params"], sort_keys=True))
-        if c and c.get("op_ms") and r.get("op_ms"):
-            out.append((r["params"], r["op_ms"], c["op_ms"], r["op_ms"] / c["op_ms"]))
+        cm = (c or {}).get("op_ms_raw") or (c or {}).get("op_ms")    # measured, as for the reference
+        if cm and r.get("op_ms"):
+            out.append((r["params"], r["op_ms"], cm, r["op_ms"] / cm))
     return out
 
 
@@ -790,9 +1107,18 @@ def cmd_profile(a):
               f"{(out_dir / 'ncu.log').relative_to(pgaio.REPO)})", file=sys.stderr)
 
     src = out_dir / "source.csv"
+    evalt = None
+    if iteration is not None:
+        obs_path = run_dir / "obs" / f"{iteration:03d}.json"
+        try:
+            evalt = eval_timing(json.loads(obs_path.read_text()), params)
+        except (OSError, json.JSONDecodeError):
+            evalt = None
+        if evalt:
+            evalt["source"] = str(obs_path.relative_to(run_dir))
     s = summarize(raw.read_text(), src.read_text() if src.exists() else "",
                   iteration=iteration, reference=a.reference, params=params,
-                  clock_control=a.clock_control)
+                  clock_control=a.clock_control, evalt=evalt)
     s.update({"time": pgaio.now(), "ncu_filter": kernel_filter(names)[1],
               "launches_per_op": len(names)})
     (out_dir / "summary.json").write_text(json.dumps(s, indent=1))
@@ -841,7 +1167,8 @@ def cmd_reference(a):
     if failed:
         sys.exit(f"{kernel} failed: {failed[0].get('error', '')[-2000:]}")
     env = run_env(cfg, (data or {}).get("environment", {}))
-    sizes = reference_sizes(results, env)
+    rule = pgaio.score_rule(cfg)
+    sizes = reference_sizes(results, env, rule)
     out = {"lib": a.lib, "kernel": kernel, "time": pgaio.now(), "sizes": sizes,
            "score": pgaio.geomean([s["fraction"] for s in sizes]),
            "environment": {k: env.get(k) for k in ("device_name", "arch", "peak_dram_gbps",
@@ -849,6 +1176,8 @@ def cmd_reference(a):
                                                    "roundtrip_floor_ms", "driver_version",
                                                    "cuda_toolkit_version")},
            "note": "reference only: timed like eval, never an iteration or a score of the run"}
+    if rule >= 2:
+        out["score_rule"] = rule
     path = run_dir / "references" / f"{a.lib}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=1))

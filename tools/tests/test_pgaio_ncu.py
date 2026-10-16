@@ -200,6 +200,176 @@ class TestSummary(unittest.TestCase):
         self.assertIn("a different shape", ncu.diff_summaries(cur, other)[0])
 
 
+def ln_metrics(duration_us="7.040000", dram="35.292982", gbps="598.363636", l2="17.902680",
+               act_avg="6418.505319", act_max="7263.000000", sec_max="7423.000000", grid="1024"):
+    """Memory and launch metrics of a layernorm kernel (ln_block128x2p at
+    rows=1024 cols=1024 on an RTX PRO 6000 Blackwell), from a real `--set
+    full` raw export."""
+    return {
+        "gpu__time_duration.sum": ("us", duration_us),
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": ("%", dram),
+        "dram__bytes.sum.per_second": ("Gbyte/s", gbps),
+        "lts__throughput.avg.pct_of_peak_sustained_elapsed": ("%", l2),
+        "lts__t_sector_hit_rate.pct": ("%", "26.268971"),
+        "l1tex__throughput.avg.pct_of_peak_sustained_active": ("%", "23.082195"),
+        "l1tex__t_sector_hit_rate.pct": ("%", "40.820312"),
+        "sm__warps_active.avg.pct_of_peak_sustained_active": ("%", "40.306422"),
+        "launch__grid_size": ("", grid),
+        "launch__block_size": ("", "128"),
+        "launch__sm_count": ("SM", "188"),
+        "launch__waves_per_multiprocessor": ("", "0.45"),
+        "launch__occupancy_limit_blocks": ("block", "24.000000"),
+        "launch__occupancy_limit_registers": ("block", "12.000000"),
+        "launch__occupancy_limit_shared_mem": ("block", "28.000000"),
+        "launch__occupancy_limit_warps": ("block", "12.000000"),
+        "launch__occupancy_limit_barriers": ("block", "24.000000"),
+        "sm__cycles_active.avg": ("cycle", act_avg),
+        "sm__cycles_active.max": ("cycle", act_max),
+        "sm__cycles_elapsed.avg": ("cycle", "10422.553191"),
+        "lts__t_sectors.avg": ("sector", "5020.062500"),
+        "lts__t_sectors.max": ("sector", sec_max),
+        "lts__t_sectors.min": ("sector", "4213.000000"),
+        "lts__t_sectors.max.pct_of_peak_sustained_elapsed": ("%", "26.465345"),
+        "lts__cycles_active.avg": ("cycle", "12431.921875"),
+        "lts__cycles_active.max": ("cycle", "13022.000000"),
+        "device__attribute_l2s_count": ("", "96"),
+    }
+
+
+# obs/018.json of the layernorm run, cut down to what eval_timing reads.
+OBS = {
+    "sizes": [{"params": {"cols": 1024, "rows": 64}, "op_ms": 0.0057, "gpu_ms": 0.0038},
+              {"params": {"cols": 1024, "rows": 1024}, "op_ms": 0.0085, "gpu_ms": 0.0074,
+               "clock": {"sm_clock_mean_mhz": 2812.0}}],
+    "raw": {"timing_results": [
+        {"input": {"params": {"cols": 1024, "rows": 1024}},
+         "timing": {"op_ms": 0.0084, "gpu_ms": 0.0074, "launch_count": 1, "overhead_ms": 0.001}}]},
+}
+
+
+class TestMemoryAndTime(unittest.TestCase):
+    PARAMS = {"rows": 1024, "cols": 1024}
+
+    def launches(self, *kernels):
+        return ncu.parse_raw_csv(raw_csv(list(kernels) or [("ln_block128x2p", ln_metrics())]))
+
+    def test_bandwidth_units(self):
+        self.assertAlmostEqual(ncu.to_base(598.36, "Gbyte/s", "gbps"), 598.36)
+        self.assertAlmostEqual(ncu.to_base(1.2, "Tbyte/s", "gbps"), 1200.0)
+
+    def test_launch_detail(self):
+        d = ncu.launch_detail(self.launches()[0])
+        self.assertEqual((d["grid"], d["block"], d["sm_count"], d["blocks_per_sm"]), (1024, 128, 188, 12))
+        self.assertAlmostEqual(d["waves"], round(1024 / (12 * 188), 3))
+        self.assertAlmostEqual(d["sm_tail"], round(6418.505319 / 7263, 4))
+        self.assertAlmostEqual(d["sm_busy"], round(6418.505319 / 10422.553191, 4))
+        self.assertAlmostEqual(d["dram_pct"], 0.3529)
+        self.assertAlmostEqual(d["dram_gbps"], 598.4)
+        self.assertAlmostEqual(d["l2_slice_max_over_avg"], round(7423 / 5020.0625, 4))
+        self.assertAlmostEqual(d["duration_ms"], 0.00704)
+
+    def test_memory_summary(self):
+        m = ncu.memory_summary(self.launches())
+        self.assertAlmostEqual(m["dram_pct"], 0.3529)
+        self.assertAlmostEqual(m["l2_pct"], 0.179)
+        self.assertAlmostEqual(m["l2_hit_rate"], 0.2627)
+        self.assertAlmostEqual(m["l1_pct"], 0.2308)
+        self.assertAlmostEqual(m["occupancy"], 0.4031)
+        self.assertEqual(m["l2_slices"], 96)
+        self.assertAlmostEqual(m["l2_slice_min_over_avg"], round(4213 / 5020.0625, 4))
+        self.assertAlmostEqual(m["l2_hot_slice_pct"], 0.2647)
+        self.assertIsNone(ncu.memory_summary([]))
+        # a profile without these metrics (an older or narrower set) has none
+        self.assertIsNone(ncu.memory_summary(ncu.parse_raw_csv(raw_csv([("k", metrics())]))))
+
+    def test_memory_summary_weights_by_duration(self):
+        m = ncu.memory_summary(self.launches(("a", ln_metrics(duration_us="30", dram="80", gbps="1000",
+                                                               sec_max="10040.125")),
+                                             ("b", ln_metrics(duration_us="10", dram="40", gbps="600"))))
+        self.assertAlmostEqual(m["dram_pct"], 0.7)
+        self.assertAlmostEqual(m["dram_gbps"], 900.0)
+        # slices: summed busiest over summed mean
+        self.assertAlmostEqual(m["l2_slice_max_over_avg"], round((10040.125 + 7423) / (2 * 5020.0625), 4))
+
+    def test_eval_timing(self):
+        e = ncu.eval_timing(OBS, self.PARAMS)
+        self.assertEqual(e, {"op_ms": 0.0085, "op_stat": "interquartile mean", "op_ms_median": 0.0084,
+                             "gpu_ms": 0.0074, "overhead_ms": 0.001, "launch_count": 1,
+                             "sm_clock_mhz": 2812.0})
+        self.assertIsNone(ncu.eval_timing(OBS, {"rows": 1, "cols": 1}))
+        self.assertIsNone(ncu.eval_timing(None, self.PARAMS))
+
+    def test_eval_timing_under_rule_2(self):
+        # the score statistic can sit below the profiled kernel time, and
+        # the parked-write charge is not launch overhead
+        obs = {"score_rule": 2,
+               "sizes": [{"params": self.PARAMS, "op_ms": 0.366, "op_ms_raw": 0.341, "parked_ms": 0.025,
+                          "gpu_ms": 0.3547},
+                         {"params": {"rows": 64, "cols": 1024}, "op_ms": 0.00385, "gpu_ms": 0.00429}],
+               "raw": {"timing_results": [
+                   {"input": {"params": self.PARAMS}, "timing": {"op_ms": 0.3525, "overhead_ms": 0.0}},
+                   {"input": {"params": {"rows": 64, "cols": 1024}}, "timing": {"op_ms": 0.0044}}]}}
+        e = ncu.eval_timing(obs, self.PARAMS)
+        self.assertEqual((e["op_ms"], e["op_stat"], e["parked_ms"]), (0.341, "mean of the fastest half", 0.025))
+        t = ncu.time_breakdown(e, [])
+        self.assertEqual(t["eval"]["launch_gap_ms"], 0.0)
+        self.assertIn("the score adds 25.0 us for writes parked in L2", t["text"])
+        t = ncu.time_breakdown(ncu.eval_timing(obs, {"rows": 64, "cols": 1024}), [])
+        self.assertAlmostEqual(t["eval"]["launch_gap_ms"], 0.0044 - 0.00429)
+        self.assertGreaterEqual(t["eval"]["launch_gap_ms"], 0.0)
+
+    def test_time_breakdown(self):
+        details = [ncu.launch_detail(l) for l in self.launches()]
+        t = ncu.time_breakdown(ncu.eval_timing(OBS, self.PARAMS), details, 0.00704, 1480.0)
+        self.assertAlmostEqual(t["eval"]["launch_gap_ms"], 0.001)
+        self.assertAlmostEqual(t["eval"]["kernel_share"], round(0.0074 / 0.0084, 4))
+        self.assertIn("real clock", t["eval"]["note"])
+        self.assertEqual(t["ncu"]["note"], "locked clock, replayed")
+        self.assertAlmostEqual(t["ncu"]["sm_tail"], round(6418.505319 / 7263, 4))
+        self.assertTrue(t["text"].startswith("op 8.5 us (eval, interquartile mean, real clock, 2812 MHz, "
+                                             "median 8.4 us): kernels 7.4 us, "
+                                             "launch and gaps 1.0 us (1 launch)"), t["text"])
+        self.assertIn("ncu at 1480 MHz, locked clock, replayed: 7.0 us", t["text"])
+        self.assertIn("SMs busy on average 88% of the longest SM's time (tail)", t["text"])
+        # a reference has no eval observation: ncu only
+        t = ncu.time_breakdown(None, details, 0.00704, 1480.0)
+        self.assertNotIn("eval", t)
+        self.assertTrue(t["text"].startswith("in the kernel"))
+        self.assertIsNone(ncu.time_breakdown(None, [], None))
+
+    def test_summary_render_and_diff(self):
+        p = self.PARAMS
+        cur = ncu.summarize(raw_csv([("ln_block128x2p", ln_metrics())]), "", iteration=18, params=p,
+                            evalt=ncu.eval_timing(OBS, p))
+        for key in ("memory", "launch_details", "time_breakdown"):
+            self.assertIn(key, cur)
+        text = ncu.render_summary(cur)
+        self.assertIn("memory (locked clock, replayed): DRAM 35% of peak (598 GB/s), L2 18% of peak "
+                      "(hit rate 26%)", text)
+        self.assertIn("0.45 waves (1024 blocks / (12 per SM x 188 SMs))", text)
+        self.assertIn("L2 slices (96): busiest 1.48x the mean slice's sectors", text)
+        self.assertIn("time: op 8.5 us (eval", text)
+        self.assertNotIn("\u2014", text)
+        ref = ncu.summarize(raw_csv([("ln_block128x2p", ln_metrics(dram="41.0", sec_max="5522.0"))]), "",
+                            iteration=16, params=p)
+        lines = ncu.diff_summaries(cur, ref)
+        self.assertIn("  DRAM throughput (of peak): 35% vs 41%", lines)
+        self.assertIn("  L2 busiest slice / mean: 1.48 vs 1.10", lines)
+        self.assertIn("  SM tail (avg/max active cycles): 88% vs 88%", lines)
+        # the reference side has no eval timing, so no eval rows
+        self.assertFalse(any("(eval)" in l for l in lines))
+
+    def test_old_summaries_still_render_and_diff(self):
+        p = self.PARAMS
+        cur = ncu.summarize(raw_csv([("ln_block128x2p", ln_metrics())]), "", iteration=18, params=p)
+        old = ncu.summarize(raw_csv([("sgemm_big", metrics())]), SOURCE, iteration=2, params=p)
+        for key in ("memory", "launch_details", "time_breakdown"):
+            old.pop(key)
+        self.assertNotIn("memory (", ncu.render_summary(old))
+        lines = ncu.diff_summaries(cur, old)
+        self.assertFalse(any("DRAM throughput" in l for l in lines))
+
+
 class TestCommandBuilding(unittest.TestCase):
     def test_shapes(self):
         self.assertEqual(ncu.parse_shape("K=2048,M=1024,N=512"), {"K": 2048, "M": 1024, "N": 512})
@@ -332,6 +502,24 @@ class TestReference(unittest.TestCase):
         self.assertEqual(s["launched_kernels"], ["cutlass_80_simt_sgemm"])
         r["launched_kernels"] = ["from_arena"]
         self.assertEqual(ncu.reference_sizes([r], env)[0]["launched_kernels"], ["from_arena"])
+
+    def test_sizes_follow_the_run_score_rule(self):
+        # a rule 2 run scores its references with the fastest-half mean too,
+        # so % of the library compares one statistic with the same one
+        env = {"peak_dram_gbps": 1000.0, "peak_fp32_gflops": 100000.0, "launch_floor_ms": 0.003,
+               "roundtrip_floor_ms": 0.004, "l2_cache_bytes": 100e6}
+        times = [0.010] * 6 + [0.020] * 4
+        r = {"input": {"params": {"n": 1}}, "timing": {"op_ms": 0.010, "op_ms_trimmed": 0.012,
+                                                        "all_times_ms": times},
+             "throughput": {"bandwidth_gbps": 400.0, "gflops": 0.0,
+                            "ideal_read_bytes": 2e6, "ideal_write_bytes": 2e6}}
+        self.assertAlmostEqual(ncu.reference_sizes([r], env)[0]["op_ms"], 0.012)
+        self.assertAlmostEqual(ncu.reference_sizes([r], env, 2)[0]["op_ms"], 0.010)
+
+    def test_percent_of_reference_uses_measured_times(self):
+        ref = [{"params": {"M": 1}, "op_ms": 0.9}]
+        cand = [{"params": {"M": 1}, "op_ms": 1.2, "op_ms_raw": 1.0}]
+        self.assertEqual(ncu.percent_of_reference(ref, cand), [({"M": 1}, 0.9, 1.0, 0.9)])
 
     def test_percent_of_reference(self):
         ref = [{"params": {"M": 1}, "op_ms": 0.9}, {"params": {"M": 2}, "op_ms": 2.0}]
