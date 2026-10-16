@@ -6,8 +6,9 @@
 #include <string>
 
 // Integer expressions for kernel manifests: grid and block sizes, scratch
-// sizes, scalar arguments. Small on purpose: integers, + - * / %, unary minus,
-// parentheses, variables, and cdiv(a, b), min(a, ...), max(a, ...).
+// sizes, scalar arguments, and a launch's "when". Small on purpose: integers,
+// + - * / %, unary minus, comparisons (< <= > >= == !=, giving 1 or 0),
+// && || !, parentheses, variables, and cdiv(a, b), min(a, ...), max(a, ...).
 //
 //   "cdiv(rows, ROWS_PER_PROGRAM)"    "num_warps * 32"    "64 + 16 * cdiv(n, 32)"
 //

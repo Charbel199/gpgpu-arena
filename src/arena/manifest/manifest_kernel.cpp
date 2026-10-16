@@ -1,22 +1,27 @@
 #include "arena/manifest/manifest_kernel.hpp"
 #include "arena/manifest/args.hpp"
 #include "arena/manifest/expr.hpp"
+#include "arena/paths.hpp"
 #include "arena/categories/reduce_base.hpp"
 #include "arena/categories/scan_base.hpp"
 #include "arena/categories/softmax_base.hpp"
 #include "arena/categories/matmul_base.hpp"
+#include "arena/categories/attention_base.hpp"
 #include "arena/device/utils.hpp"
 
 #include <nlohmann/json.hpp>
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <stdexcept>
 
 namespace arena {
 
 namespace fs = std::filesystem;
 using nlohmann::json;
+
+std::unique_ptr<KernelDescriptor> load_manifest_spec(const nlohmann::json& spec, const std::string& path);
 
 namespace {
 
@@ -60,9 +65,31 @@ public:
         std::vector<std::string> out;
         for (const auto& l : spec_.at("launches")) {
             out.push_back(l.contains("entry") ? l.at("entry").get<std::string>()
-                                              : this->compile_result_.kernel_name);
+                                              : result_for(l).kernel_name);
         }
         return out;
+    }
+
+    std::vector<std::string> entry_sources() const override {
+        std::vector<std::string> out;
+        for (const auto& l : spec_.at("launches")) out.push_back(launch_source(l));
+        return out;
+    }
+
+    // Launches may name their own source, relative to the manifest; the
+    // runner compiles those too. This is how a candidate combines kernels
+    // from several Triton, cuTile or Warp files (one kernel per file), or
+    // dispatches different sizes to different DSLs.
+    std::vector<std::string> extra_sources() const override {
+        std::vector<std::string> out;
+        for (const auto& l : spec_.at("launches")) {
+            const auto s = launch_source(l);
+            if (s != source_ && std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
+        }
+        return out;
+    }
+    void set_extra_compile_results(const std::map<std::string, CompileResult>& r) override {
+        extra_results_ = r;
     }
 
     void allocate(Context& ctx) override {
@@ -77,27 +104,48 @@ public:
         }
 
         module_ = loader_.load_module(module_path());
+        std::map<std::string, CUmodule> modules = {{source_, module_}};
+        for (const auto& [src, cr] : extra_results_) modules[src] = loader_.load_module(cr.module_path);
         const auto entries = entry_points();
         const auto& launches = spec_.at("launches");
         for (size_t i = 0; i < launches.size(); i++) {
             const auto& l = launches[i];
+            // "when": launch only if the expression is non-zero for this
+            // problem size, so one manifest can dispatch small and large
+            // inputs to different kernels.
+            if (l.contains("when")) {
+                int64_t on = 0;
+                try {
+                    on = manifest::eval_json(l.at("when"), variables_for(result_for(l)));
+                } catch (const std::exception& e) {
+                    throw std::runtime_error("manifest launch " + std::to_string(i) + " \"when\": " + e.what());
+                }
+                if (!on) continue;
+            }
             Launch launch;
-            launch.fn = loader_.get_function(module_, entries[i]);
+            const std::string src = launch_source(l);
+            launch.fn = loader_.get_function(modules.at(src), entries[i]);
+            // Expressions see the constants of the source this launch uses.
+            auto lvars = variables_for(result_for(l));
+            for (const auto& s : scratch_) lvars[s.name + "_bytes"] = (int64_t)s.size;
 
             manifest::ArgContext actx;
             for (const auto& [k, v] : this->named_buffers()) actx.buffers[k] = v;
             for (const auto& s : scratch_) actx.buffers[s.name] = s.ptr;
-            actx.vars = vars;
+            actx.vars = lvars;
             actx.param_sizes = param_sizes(launch.fn);
 
             try {
-                launch.cfg = launch_config(l, vars);
+                launch.cfg = launch_config(l, lvars);
                 launch.args = manifest::pack_args(l.at("args"), actx);
             } catch (const std::exception& e) {
                 throw std::runtime_error("manifest launch " + std::to_string(i) + " (" +
                                          entries[i] + "): " + e.what());
             }
             launches_.push_back(std::move(launch));
+        }
+        if (launches_.empty()) {
+            throw std::runtime_error("no manifest launch applies at this size (every \"when\" is 0)");
         }
     }
 
@@ -148,16 +196,32 @@ private:
     };
 
     // Names an expression can use: problem sizes, the SM count, and what the
-    // compiler reported, constants included.
-    manifest::Vars variables() const {
+    // compiler reported for the launch's source, constants included.
+    manifest::Vars variables_for(const CompileResult& cr) const {
         manifest::Vars v;
         for (const auto& [k, x] : this->problem_values()) v[k] = x;
-        for (const auto& [k, x] : this->compile_result_.constants) v[k] = x;
+        for (const auto& [k, x] : cr.constants) v[k] = x;
         v["sm_count"] = this->sm_count();
-        v["num_warps"] = this->compile_result_.num_warps;
-        v["block_dim"] = this->compile_result_.block_dim;
-        v["shared_memory"] = this->compile_result_.shared_memory;
+        v["num_warps"] = cr.num_warps;
+        v["block_dim"] = cr.block_dim;
+        v["shared_memory"] = cr.shared_memory;
         return v;
+    }
+    manifest::Vars variables() const { return variables_for(this->compile_result_); }
+
+    std::string launch_source(const json& l) const {
+        if (!l.contains("source")) return source_;
+        fs::path p = l.at("source").get<std::string>();
+        if (p.is_relative()) p = fs::path(path_).parent_path() / p;
+        return fs::weakly_canonical(p).string();
+    }
+
+    const CompileResult& result_for(const json& l) const {
+        const auto s = launch_source(l);
+        if (s == source_) return this->compile_result_;
+        auto it = extra_results_.find(s);
+        if (it == extra_results_.end()) throw std::runtime_error("launch source not compiled: " + s);
+        return it->second;
     }
 
     static KernelLoader::LaunchConfig launch_config(const json& l, const manifest::Vars& vars) {
@@ -205,11 +269,80 @@ private:
     json spec_;
     std::string path_, source_, name_;
     std::vector<ScratchSpec> scratch_;
+    std::map<std::string, CompileResult> extra_results_;
     KernelLoader loader_;
     CUmodule module_ = nullptr;
     std::vector<Launch> launches_;
 };
 
+}
+
+bool looks_like_manifest(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) return false;
+    try {
+        json j;
+        f >> j;
+        return j.is_object() && j.contains("category") && j.contains("source") && j.contains("launches");
+    } catch (...) {
+        return false;
+    }
+}
+
+ManifestScan scan_manifests(const std::string& dir, const std::vector<std::string>& taken) {
+    ManifestScan out;
+    std::set<std::string> names(taken.begin(), taken.end());
+    const std::string d = trim_path(dir);
+
+    std::error_code ec;
+    const fs::path root = fs::absolute(d, ec);
+    if (!fs::exists(root, ec)) {
+        out.errors.push_back("\"" + d + "\": no such folder");
+        return out;
+    }
+    if (!fs::is_directory(root, ec)) {
+        out.errors.push_back("\"" + d + "\": not a folder");
+        return out;
+    }
+
+    std::vector<fs::path> found;
+    auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const auto& p = it->path();
+        const std::string name = p.filename().string();
+        if (it->is_directory(ec)) {
+            if (name == "inspections" || name == "obs" || name == "work" || name == "__pycache__" ||
+                name.rfind("build", 0) == 0 || (!name.empty() && name[0] == '.')) {
+                it.disable_recursion_pending();
+            }
+            continue;
+        }
+        if (p.extension() == ".json" && looks_like_manifest(p.string())) found.push_back(p);
+    }
+    std::sort(found.begin(), found.end());
+
+    for (const auto& p : found) {
+        try {
+            auto d = load_manifest(p.string());
+            json spec;
+            std::ifstream(p) >> spec;
+            std::string name = spec.contains("name") ? spec["name"].get<std::string>()
+                             : p.parent_path().filename().string() + "/" + p.stem().string();
+            std::string unique = name;
+            for (int n = 2; names.count(unique); n++) unique = name + " #" + std::to_string(n);
+            names.insert(unique);
+            if (unique != d->name()) {
+                // the descriptor's name comes from the spec; rebuild with the unique one
+                spec["name"] = unique;
+                const fs::path tmp = p;
+                d = load_manifest_spec(spec, tmp.string());
+            }
+            out.kernels.push_back(std::move(d));
+        } catch (const std::exception& e) {
+            out.errors.push_back(p.string() + ": " + e.what());
+        }
+    }
+    return out;
 }
 
 std::unique_ptr<KernelDescriptor> load_manifest(const std::string& path) {
@@ -221,7 +354,10 @@ std::unique_ptr<KernelDescriptor> load_manifest(const std::string& path) {
     } catch (const json::exception& e) {
         throw std::runtime_error("manifest " + path + " is not valid JSON: " + e.what());
     }
+    return load_manifest_spec(spec, path);
+}
 
+std::unique_ptr<KernelDescriptor> load_manifest_spec(const json& spec, const std::string& path) {
     auto require = [&](const char* key) {
         if (!spec.contains(key)) throw std::runtime_error("manifest " + path + " has no \"" + key + "\"");
     };
@@ -237,6 +373,12 @@ std::unique_ptr<KernelDescriptor> load_manifest(const std::string& path) {
     src = fs::weakly_canonical(src);
     if (!fs::exists(src)) throw std::runtime_error("manifest source not found: " + src.string());
 
+    for (const auto& l : spec.at("launches")) {
+        if (!l.contains("source")) continue;
+        fs::path ls = l.at("source").get<std::string>();
+        if (ls.is_relative()) ls = mpath.parent_path() / ls;
+        if (!fs::exists(ls)) throw std::runtime_error("launch source not found: " + ls.string());
+    }
     const std::string name = spec.value("name", mpath.stem().string());
     const std::string category = spec.at("category").get<std::string>();
 
@@ -245,7 +387,8 @@ std::unique_ptr<KernelDescriptor> load_manifest(const std::string& path) {
     else if (category == "scan")    d = std::make_unique<ManifestKernel<ScanDescriptorBase>>(spec, mpath.string(), src.string(), name);
     else if (category == "softmax") d = std::make_unique<ManifestKernel<SoftmaxDescriptorBase>>(spec, mpath.string(), src.string(), name);
     else if (category == "matmul")  d = std::make_unique<ManifestKernel<MatmulDescriptorBase>>(spec, mpath.string(), src.string(), name);
-    else throw std::runtime_error("manifest category '" + category + "' is not one of reduce, scan, softmax, matmul");
+    else if (category == "attention") d = std::make_unique<ManifestKernel<AttentionDescriptorBase>>(spec, mpath.string(), src.string(), name);
+    else throw std::runtime_error("manifest category '" + category + "' is not one of reduce, scan, softmax, matmul, attention");
     d->set_descriptor_file(mpath.string());
     return d;
 }

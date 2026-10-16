@@ -14,7 +14,7 @@ public:
     Parser(const std::string& s, const Vars& vars) : s_(s), vars_(vars) {}
 
     int64_t parse() {
-        const int64_t v = sum();
+        const int64_t v = logical_or();
         skip_ws();
         if (pos_ != s_.size()) fail("unexpected '" + std::string(1, s_[pos_]) + "'");
         return v;
@@ -38,6 +38,44 @@ private:
     static int64_t div_checked(int64_t a, int64_t b, const Parser& p) {
         if (b == 0) p.fail("division by zero");
         return a / b;
+    }
+
+    // Comparisons and logic give 1 or 0, for a launch's "when".
+    int64_t logical_or() {
+        int64_t v = logical_and();
+        while (eat2("||")) { const int64_t r = logical_and(); v = (v || r) ? 1 : 0; }
+        return v;
+    }
+
+    int64_t logical_and() {
+        int64_t v = comparison();
+        while (eat2("&&")) { const int64_t r = comparison(); v = (v && r) ? 1 : 0; }
+        return v;
+    }
+
+    int64_t comparison() {
+        int64_t v = sum();
+        for (;;) {
+            if (eat2("<="))      v = v <= sum();
+            else if (eat2(">=")) v = v >= sum();
+            else if (eat2("==")) v = v == sum();
+            else if (eat2("!=")) v = v != sum();
+            else if (peek_single('<')) { pos_++; v = v < sum(); }
+            else if (peek_single('>')) { pos_++; v = v > sum(); }
+            else return v;
+        }
+    }
+
+    bool eat2(const char* op) {
+        skip_ws();
+        if (s_.compare(pos_, 2, op) == 0) { pos_ += 2; return true; }
+        return false;
+    }
+
+    // A one-character operator that is not the start of a two-character one.
+    bool peek_single(char c) {
+        skip_ws();
+        return pos_ < s_.size() && s_[pos_] == c && (pos_ + 1 >= s_.size() || s_[pos_ + 1] != '=');
     }
 
     int64_t sum() {
@@ -65,6 +103,10 @@ private:
 
     int64_t unary() {
         if (eat('-')) return -unary();
+        if (pos_ < s_.size() && s_[pos_] == '!' && (pos_ + 1 >= s_.size() || s_[pos_ + 1] != '=')) {
+            pos_++;
+            return unary() ? 0 : 1;
+        }
         if (eat('+')) return unary();
         return primary();
     }
@@ -72,7 +114,7 @@ private:
     int64_t primary() {
         skip_ws();
         if (eat('(')) {
-            const int64_t v = sum();
+            const int64_t v = logical_or();
             if (!eat(')')) fail("missing ')'");
             return v;
         }
@@ -100,7 +142,7 @@ private:
     int64_t call(const std::string& name) {
         std::vector<int64_t> args;
         if (!eat(')')) {
-            do { args.push_back(sum()); } while (eat(','));
+            do { args.push_back(logical_or()); } while (eat(','));
             if (!eat(')')) fail("missing ')' after arguments of " + name);
         }
         if (name == "cdiv") {

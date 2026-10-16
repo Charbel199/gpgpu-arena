@@ -130,3 +130,16 @@ TEST_CASE("manifest argument packing") {
         CHECK_THROWS(pack_args(json::parse(R"([{"cutile_array": "input", "shape": [1, 2], "strides": [1]}])"), ctx));
     }
 }
+
+TEST_CASE("manifest expressions: comparisons for when") {
+    const Vars v = {{"rows", 4096}, {"cols", 1000}};
+    CHECK(eval("rows * cols < 1048576", v) == 0);
+    CHECK(eval("rows * cols >= 1048576", v) == 1);
+    CHECK(eval("cols <= 1024 && rows > 1", v) == 1);
+    CHECK(eval("cols > 1024 || rows == 4096", v) == 1);
+    CHECK(eval("cols != 1000", v) == 0);
+    CHECK(eval("!(cols < 1024)", v) == 0);
+    CHECK(eval("1 + 2 < 4", v) == 1);           // arithmetic binds tighter
+    CHECK(eval("(rows < cols) * 7 + 1", v) == 1);
+    CHECK(eval("max(cols < 2000, 0)", v) == 1);
+}
