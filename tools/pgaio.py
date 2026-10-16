@@ -69,6 +69,7 @@ CATEGORIES = {
     "reduce":    {"check": {"n": [1, 1000, 1000003, 16777217]}},
     "scan":      {"check": {"n": [1, 1000, 1000003, 16777217]}},
     "softmax":   {"check": {"rows": [1, 333], "cols": [1000, 4097]}},
+    "layernorm": {"check": {"rows": [1, 333], "cols": [1, 1000, 4097]}},
     "matmul":    {"check": {"M": [129], "N": [257], "K": [63, 512]}},
     "attention": {"check": {"BH": [1, 3], "S": [1, 100, 257], "D": [64]}},
 }
@@ -89,6 +90,10 @@ SIZE_LADDERS = {
     },
     "softmax": {
         "small": [{"rows": 64, "cols": 1024}, {"rows": 1024, "cols": 1024}, {"rows": 4096, "cols": 512}],
+        "large": [{"rows": 16384, "cols": 4096}, {"rows": 4096, "cols": 16384}],
+    },
+    "layernorm": {
+        "small": [{"rows": 64, "cols": 1024}, {"rows": 1024, "cols": 1024}, {"rows": 4096, "cols": 768}],
         "large": [{"rows": 16384, "cols": 4096}, {"rows": 4096, "cols": 16384}],
     },
     "matmul": {
@@ -138,6 +143,7 @@ CATEGORY_BASELINE = {
     "reduce": "reduce_baseline",
     "scan": "scan_multiblock",
     "softmax": "softmax_naive",
+    "layernorm": "layernorm_naive",
     "matmul": "matmul_naive",
     "attention": "attention_naive",
 }

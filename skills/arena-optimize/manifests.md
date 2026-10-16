@@ -8,7 +8,7 @@ Run one with `$ARENA --manifest <file.json>` (plus the usual `-p`, `--dist`, `--
 
 | Field | Meaning |
 | --- | --- |
-| `category` | `reduce`, `scan`, `softmax`, `matmul` or `attention`. Fixes the buffers, sizes and verification. |
+| `category` | `reduce`, `scan`, `softmax`, `layernorm`, `matmul` or `attention`. Fixes the buffers, sizes and verification. |
 | `source` | Kernel file: `.cu`, `.triton.py`, `.cutile.py` or `.warp.py`. The extension picks the compiler. |
 | `name`, `description` | Optional labels. |
 | `scratch` | Optional list of `{"name": ..., "bytes": expr, "zero": true}` device buffers. `zero` is optional and only matters under `--scratch-policy declared` (below). |
@@ -36,7 +36,7 @@ Each launch:
 
 Integers with `+ - * / %`, comparisons `< <= > >= == !=` (1 or 0), `&& || !`, `c ? a : b`, parentheses, `cdiv(a, b)`, `min(...)`, `max(...)`. Precedence is C's, and `?:`, `&&` and `||` only evaluate the side they use, so `"M > 0 ? N / M : 0"` is fine at `M = 0`. Names available:
 
-- Problem sizes: `n` (reduce, scan), `rows`, `cols` (softmax), `M`, `K`, `N` (matmul), `BH`, `S`, `D` (attention).
+- Problem sizes: `n` (reduce, scan), `rows`, `cols` (softmax, layernorm), `M`, `K`, `N` (matmul), `BH`, `S`, `D` (attention).
 - `sm_count`.
 - What the compiler reported: `num_warps` (Triton), `block_dim` (cuTile's required threads per block), `shared_memory` (Triton's, and Warp's dynamic shared memory for tile kernels), and every constant: Triton constexprs, cuTile `ct.Constant` values, and upper-case `// arena: KEY=N` lines in a CUDA source.
 - `<scratch name>_bytes` for each scratch buffer.
@@ -45,7 +45,7 @@ Integers with `+ - * / %`, comparisons `< <= > >= == !=` (1 or 0), `&& || !`, `c
 
 | Entry | Passes |
 | --- | --- |
-| `"input"`, `"output"` (reduce, scan, softmax), `"a"`, `"b"`, `"c"` (matmul), `"q"`, `"k"`, `"v"`, `"o"` (attention), or a scratch name | a device pointer |
+| `"input"`, `"output"` (reduce, scan, softmax), `"input"`, `"gamma"`, `"beta"`, `"output"` (layernorm), `"a"`, `"b"`, `"c"` (matmul), `"q"`, `"k"`, `"v"`, `"o"` (attention), or a scratch name | a device pointer |
 | `"n"`, `"rows"`, `"cols"`, `"M"`, `"K"`, `"N"` | that size as int32 |
 | `"null"` | a null pointer |
 | `"..."` (last) | null pointers until the kernel's parameter count is reached; Triton adds hidden ones |

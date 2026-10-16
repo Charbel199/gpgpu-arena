@@ -361,7 +361,7 @@ void Gui::drain_pending_results() {
             int problem_size;
             if (pr.category == "matmul")
                 problem_size = pr.params.count("M") ? pr.params.at("M") : 0;
-            else if (pr.category == "softmax")
+            else if (pr.category == "softmax" || pr.category == "layernorm")
                 problem_size = pr.params.count("rows") ? pr.params.at("rows") : 0;
             else if (pr.category == "attention")
                 problem_size = pr.params.count("S") ? pr.params.at("S") : 0;
@@ -1091,7 +1091,7 @@ void Gui::render_problem_config() {
             }
             ImGui::Text("(%d x %d) x (%d x %d)", m, k, k, n);
         }
-    } else if (current_category_ == "softmax") {
+    } else if (current_category_ == "softmax" || current_category_ == "layernorm") {
         int rows = config_.params["rows"];
         int cols = config_.params["cols"];
         bool changed = false;
@@ -1656,7 +1656,7 @@ void Gui::render_benchmark_panel() {
                     }
 
                     const char* x_label = is_matmul() ? "Matrix Size" :
-                        (current_category_ == "softmax") ? "Rows" :
+                        (current_category_ == "softmax" || current_category_ == "layernorm") ? "Rows" :
                         (current_category_ == "attention") ? "Sequence Length" : "Elements";
                     const char* y_label;
                     switch (scaling_metric_) {

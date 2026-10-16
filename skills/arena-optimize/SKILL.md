@@ -1,6 +1,6 @@
 ---
 name: arena-optimize
-description: Profile and benchmark guided AI optimization (PGAIO) of a GPGPU Arena problem such as softmax, scan, reduce, matmul or attention, for small sizes, large sizes or both. Write as many candidate kernels as needed in CUDA, Triton, cuTile or Warp, compare their SASS for free, measure the promising ones against speed of light with correctness gates, profile them with Nsight Compute, and borrow ideas across DSLs. Runs until the target, a plateau or the user stops it. Use when asked to optimize or speed up an arena kernel or category, run PGAIO, or measure iterations-to-SOL.
+description: Profile and benchmark guided AI optimization (PGAIO) of a GPGPU Arena problem such as softmax, layernorm, scan, reduce, matmul or attention, for small sizes, large sizes or both. Write as many candidate kernels as needed in CUDA, Triton, cuTile or Warp, compare their SASS for free, measure the promising ones against speed of light with correctness gates, profile them with Nsight Compute, and borrow ideas across DSLs. Runs until the target, a plateau or the user stops it. Use when asked to optimize or speed up an arena kernel or category, run PGAIO, or measure iterations-to-SOL.
 ---
 
 # PGAIO: optimizing an arena problem
@@ -41,11 +41,11 @@ python3 tools/pgaio.py init --category softmax --sizes all --mode cross-dsl \
     --scratch-policy declared --docs off --model <your model id>
 ```
 
-Categories: `reduce`, `scan`, `softmax`, `matmul` and `attention` (`[BH, S, D]` fp32, non-causal, D = 64 in the timed and checked shapes).
+Categories: `reduce`, `scan`, `softmax`, `layernorm` (`[rows, cols]` fp32 forward with gamma and beta, biased variance, eps fixed at 1e-5 inside the kernel since manifests have no float arguments), `matmul` and `attention` (`[BH, S, D]` fp32, non-causal, D = 64 in the timed and checked shapes).
 
 `init` prints where the run lives and two files that update after every eval: `journal.md` (each iteration's hypothesis, result and code diff against the previous version in that DSL) and `progress.html` (the progression chart plus every iteration's code). The user follows the run through them, so keep hypotheses clear.
 
-`init` measures the category's plainest kernel as iteration 0 (softmax: `softmax_naive`; reduce: `reduce_baseline`; scan: `scan_multiblock`; matmul: `matmul_naive`; attention: `attention_naive`; override with `--baseline`), prints its observation and any learnings from earlier runs, and creates `pgaio/runs/<run>/` with `work/` for your drafts. Checks the baseline itself fails are dropped from the gate and listed. `--dsls cuda,triton` restricts the languages; `--budget` caps the total and `--budget-per-dsl` each language.
+`init` measures the category's plainest kernel as iteration 0 (softmax: `softmax_naive`; layernorm: `layernorm_naive`; reduce: `reduce_baseline`; scan: `scan_multiblock`; matmul: `matmul_naive`; attention: `attention_naive`; override with `--baseline`), prints its observation and any learnings from earlier runs, and creates `pgaio/runs/<run>/` with `work/` for your drafts. Checks the baseline itself fails are dropped from the gate and listed. `--dsls cuda,triton` restricts the languages; `--budget` caps the total and `--budget-per-dsl` each language.
 
 Options worth knowing:
 

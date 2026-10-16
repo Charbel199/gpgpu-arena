@@ -68,6 +68,7 @@ Where instructions sit relative to barriers matters as much as which ones exist.
 - **reduce:** vectorized loads, a warp-shuffle reduction, and one atomic per block on a persistent grid. For small n, a single block with no atomics.
 - **scan:** single-pass decoupled look-back; per-tile scans in registers with warp shuffles. For small n, one block.
 - **softmax:** one pass with the row in registers, or an online softmax for long rows. For short rows, one warp per row.
+- **layernorm:** read the row once into registers, take the mean, then the centred sum of squares from registers (or Welford), then normalize. gamma and beta are the same for every row, so a block that handles several rows loads them once. For short rows, one warp per row.
 - **matmul:** shared-memory tiling, then register blocking, then pipelining (and tensor cores unless the run forbids them). For FP32 on CUDA cores, see the next section.
 - **attention:** fused online-softmax attention (FlashAttention style), tiling queries and streaming K and V.
 

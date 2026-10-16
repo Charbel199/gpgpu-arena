@@ -160,12 +160,15 @@ against a CPU reference summed in `double` and reports max and mean relative
 error next to the tolerance it was judged against.
 
 Verification covers the whole output, so a kernel cannot pass by computing
-only the parts that get checked. Reduce and softmax check every value, scan
-every element, and matmul one element in every output tile plus the full
-last row and column, at positions that change with the seed. Scan and matmul
-measure each error against the sum of the magnitudes that went into it, the
-scale summation error grows with, because a mixed-sign prefix or dot product
-can land near zero where a plain relative error fails a correct kernel.
+only the parts that get checked. Reduce, softmax and layernorm check every
+value, scan every element, and matmul one element in every output tile plus
+the full last row and column, at positions that change with the seed. Scan
+and matmul measure each error against the sum of the magnitudes that went
+into it, the scale summation error grows with, because a mixed-sign prefix or
+dot product can land near zero where a plain relative error fails a correct
+kernel. Layernorm measures it against |gamma| (|x| + mean|x|) rstd + |beta|
+for the same reason, and its inputs include near-constant rows where eps
+decides the answer.
 
 There are two errors because they answer different questions.
 
@@ -375,7 +378,7 @@ both links to `skills/`, and `AGENTS.md` lists them.
 | `arena-optimize` | The PGAIO loop |
 
 `tools/pgaio.py` is the environment for that loop. A run targets a problem
-(reduce, scan, softmax, matmul or attention) at a size regime, and the agent
+(reduce, scan, softmax, layernorm, matmul or attention) at a size regime, and the agent
 writes as many candidates as it wants, in any DSL:
 
 ```bash

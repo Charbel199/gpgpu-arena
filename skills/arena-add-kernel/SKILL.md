@@ -10,7 +10,7 @@ A kernel is two files in `kernels/<category>/<input dtype>/`:
 1. The GPU source, compiled at run time: `name.cu`, `name.triton.py`, `name.cutile.py` or `name.warp.py`.
 2. A C++ descriptor, `name.cpp` (or `name.triton.cpp` and so on), compiled into the binary. It names the kernel and decides its launch config, its arguments and how it is verified.
 
-The folder is named after the input dtype because that is what shapes the code (`float*` against `__half*`). Variants that share an input type but differ in output type go in the same source file. Categories today: `reduce`, `scan`, `softmax`, `matmul`, `attention`. Their shared logic (allocation, input generation, CPU reference, verification, FLOP and byte counts) lives in `include/arena/categories/<category>_base.hpp`, so a descriptor normally only adds what is specific to it.
+The folder is named after the input dtype because that is what shapes the code (`float*` against `__half*`). Variants that share an input type but differ in output type go in the same source file. Categories today: `reduce`, `scan`, `softmax`, `layernorm`, `matmul`, `attention`. Their shared logic (allocation, input generation, CPU reference, verification, FLOP and byte counts) lives in `include/arena/categories/<category>_base.hpp`, so a descriptor normally only adds what is specific to it.
 
 Descriptors are found by `file(GLOB_RECURSE kernels/*.cpp)` in CMake, so a new descriptor needs a re-run of CMake. The Docker entrypoint does this on every start; natively, run `cmake -S . -B build && cmake --build build -j`.
 

@@ -5,6 +5,7 @@
 #include "arena/categories/reduce_base.hpp"
 #include "arena/categories/scan_base.hpp"
 #include "arena/categories/softmax_base.hpp"
+#include "arena/categories/layernorm_base.hpp"
 #include "arena/categories/matmul_base.hpp"
 #include "arena/categories/attention_base.hpp"
 #include "arena/device/utils.hpp"
@@ -505,9 +506,10 @@ std::unique_ptr<KernelDescriptor> load_manifest_spec(const json& spec, const std
     if (category == "reduce")       d = std::make_unique<ManifestKernel<ReduceDescriptorBase>>(spec, mpath.string(), src.string(), name);
     else if (category == "scan")    d = std::make_unique<ManifestKernel<ScanDescriptorBase>>(spec, mpath.string(), src.string(), name);
     else if (category == "softmax") d = std::make_unique<ManifestKernel<SoftmaxDescriptorBase>>(spec, mpath.string(), src.string(), name);
+    else if (category == "layernorm") d = std::make_unique<ManifestKernel<LayerNormDescriptorBase>>(spec, mpath.string(), src.string(), name);
     else if (category == "matmul")  d = std::make_unique<ManifestKernel<MatmulDescriptorBase>>(spec, mpath.string(), src.string(), name);
     else if (category == "attention") d = std::make_unique<ManifestKernel<AttentionDescriptorBase>>(spec, mpath.string(), src.string(), name);
-    else throw std::runtime_error("manifest category '" + category + "' is not one of reduce, scan, softmax, matmul, attention");
+    else throw std::runtime_error("manifest category '" + category + "' is not one of reduce, scan, softmax, layernorm, matmul, attention");
     d->set_descriptor_file(mpath.string());
     return d;
 }
