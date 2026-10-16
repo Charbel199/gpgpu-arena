@@ -4,14 +4,14 @@ What to try, in roughly the order it pays off, keyed to what limits the kernel a
 
 ## 1. Latency-bound shapes (small problems)
 
-The roof is the latency floor: an empty launch plus one cold DRAM round trip, about 4 µs. A kernel at 10 µs on a 16 KB input is losing to fixed costs, not bandwidth. Reaching the floor is realistic for simple kernels (a reduce of 4096 elements does).
+The roof is the latency floor: an empty launch plus one cold DRAM round trip, about 3 to 3.7 µs on an RTX PRO 6000. A kernel at 10 µs on a 16 KB input is losing to fixed costs, not bandwidth. Reaching the floor is realistic for simple kernels (a reduce of 4096 elements does).
 
 - **One launch.** A second kernel, or a memset before it, costs another launch floor plus a gap. Fold the work into one kernel, finishing with atomics or a last-block-done counter in scratch.
 - **Right-size the grid.** Thousands of blocks for a few thousand elements is mostly scheduling. Use one block, or a few, for small inputs, choosing the grid with an expression on the size.
 - **Avoid block-wide synchronization.** Each `__syncthreads` round on a tiny input is pure latency. Prefer warp-level work: one warp per row for short rows, and shuffles (`__shfl_xor_sync`, `tl.reduce` on a small block) over shared-memory trees.
 - **Short dependency chains.** Unroll fixed small loops, and keep the critical path (load, reduce, store) short.
 - **Dispatch by size, and across DSLs.** A manifest launch can carry `"when": "n < 1048576"` and its own `"source"`, so one candidate can use a CUDA kernel for small inputs and a Triton one for mid sizes. In the scan and softmax runs the mixed candidate beat every single-DSL one. Such candidates count as DSL `mixed`.
-- **Expect a ceiling at mid sizes.** A shape around L2 size (a few MB to 16 MB) pays both the latency floor and the transfer, while the roof counts only the larger of the two, so around 60% can already be close to the best achievable.
+- **Mid sizes.** A shape around L2 size (a few MB to 16 MB) pays both the launch and the transfer. Score rule 2 (new runs) counts the launch plus the larger of the transfer and the rest of the round trip, and below L2 it counts only the read bytes, since the output stays in L2 inside the timed window. The best layernorm kernel scores about 70% at mid shapes under rule 2. In a rule 1 run the roof counts only the larger of the two, so around 60% can already be close to the best achievable.
 
 ## 2. Memory-bound shapes (large problems, low arithmetic intensity)
 
@@ -20,7 +20,7 @@ The roof is moving the ideal bytes once at peak DRAM bandwidth.
 1. **Touch each byte once.** Multi-pass algorithms (max, then sum, then normalize) re-read their input. Keep the data in registers or shared memory between passes, or use online formulations: running max and rescaled sum for softmax, decoupled look-back for scan.
 2. **Wide, coalesced accesses.** In SASS you want `LDG.E.128` / `STG.E.128`. Scalar `LDG.E` on fp32 means 4x the load instructions. Check alignment and contiguity; see the DSL notes below.
 3. **Enough bytes in flight.** DRAM needs many outstanding loads per SM. Raise occupancy, issue several independent loads per thread before using them, or prefetch the next tile while computing the current one: persistent blocks, async copies, TMA.
-4. **Cache policy.** `evict_first` on streamed input and streaming stores (`st.global.cs`) free L2 for what is reused. An `evict_last` on the output only helps while it fits in L2; at the large shapes it does not, so do not count on it.
+4. **Cache policy.** `evict_first` on streamed input and streaming stores (`st.global.cs`) free L2 for what is reused. An `evict_last` output store mostly parks output in L2, to be written back after the timer stops; in the layernorm run that was most of its 4% gain (DRAM writes 237 to 226 MB). Score rule 2 charges parked output at DRAM speed at shapes larger than L2, so do not count on it there.
 5. **Avoid atomics contention.** One global atomic per element serializes. Reduce within the warp and block first; one atomic per block is fine.
 
 ## 3. Compute-bound shapes (matmul, attention)
@@ -68,9 +68,21 @@ Where instructions sit relative to barriers matters as much as which ones exist.
 - **reduce:** vectorized loads, a warp-shuffle reduction, and one atomic per block on a persistent grid. For small n, a single block with no atomics.
 - **scan:** single-pass decoupled look-back; per-tile scans in registers with warp shuffles. For small n, one block.
 - **softmax:** one pass with the row in registers, or an online softmax for long rows. For short rows, one warp per row.
-- **layernorm:** read the row once into registers, take the mean, then the centred sum of squares from registers (or Welford), then normalize. gamma and beta are the same for every row, so a block that handles several rows loads them once. For short rows, one warp per row.
+- **layernorm:** read the row once into registers, take the mean, then the centred sum of squares from registers (or Welford), then normalize. Load gamma and beta together with x, not after the reductions. For short rows, one warp per row. See the layernorm section below.
 - **matmul:** shared-memory tiling, then register blocking, then pipelining (and tensor cores unless the run forbids them). For FP32 on CUDA cores, see the next section.
 - **attention:** fused online-softmax attention (FlashAttention style), tiling queries and streaming K and V.
+
+## Layernorm and other row normalizations
+
+From the layernorm-1 run on an RTX PRO 6000 (fp32). Under score rule 2 its best kernel scores 80.3% (mid shapes about 70%, large about 83%) against 57.9% for the naive baseline.
+
+- Keep the row in registers and load gamma and beta with x, so the row pays one cold DRAM round trip. Every DSL then reached about 82% of DRAM at 16384 x 4096 and 4096 x 16384. Loading gamma and beta first took 64 x 1024 from 8.2 to 5.7 µs.
+- At small row counts a 128-thread block per row beat a warp per row by 10% (64 rows, A/B); at 4096 x 768 a warp per row won (17 µs against 19.4). Dispatch on the shape.
+- An `evict_last` output store gained about 4% in CUDA and Triton, mostly by leaving output in L2 past the timer (see section 2); rule 2 charges it at shapes larger than L2.
+- Not worth trying again: evict-first `.cs` accesses, `L2::256B` prefetch, an evict_first input policy, a 0.5 evict_last fraction, block geometry, a merged Chan reduction for mean and variance, several rows per warp sharing gamma and beta (fewer warps in flight at 1024 rows), and softmax's persistent next-row prefetch (2.0 to 2.7% slower: register double buffering cuts bytes in flight).
+- Triton: power-of-two tiles mask 25% of lanes at 768 columns; loading the row as three 256-wide chunks took 4096 x 768 from 18.9 to 17.0 µs.
+- cuTile on tileiras 13.1: 255 registers x 256 threads leaves one block per SM, so persistent grids beat non-persistent ones. `allow_tma=False` gives scalar `LDG`.
+- Warp allocates every shared tile statically (196 KB failed to launch; `check` now reports it). `tile_map` results store as scalar `STG`; assigning back into the shared x tile gives `STG.E.128`, which only helped at 768 columns.
 
 ## Matmul, FP32 on CUDA cores (sm_120)
 

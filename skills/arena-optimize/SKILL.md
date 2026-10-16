@@ -28,7 +28,17 @@ Without a budget the run ends at the target, on a plateau (section 2), or when t
 
 If the problem is not one of the categories, say so and stop: a new problem needs a category with its reference, checks and byte counts first (arena-add-kernel), since that is what makes the score mean anything.
 
-A run scores each candidate at every timed shape and combines them with a geometric mean, so a kernel that is fast at large sizes but slow at small ones cannot hide it. At small shapes the roof is the latency floor: an empty launch plus one cold DRAM read and one write (about 4 µs on an RTX PRO 6000), not bandwidth. Read the per-shape table in every observation, and optimize the shapes furthest from their roof first.
+A run scores each candidate at every timed shape and combines them with a geometric mean, so a kernel that is fast at large sizes but slow at small ones cannot hide it. At small shapes the roof is the latency floor: an empty launch plus one cold DRAM read and one write (about 3 to 3.7 µs on an RTX PRO 6000), not bandwidth. Read the per-shape table in every observation, and optimize the shapes furthest from their roof first.
+
+New runs use score rule 2 and record `"score_rule": 2` in `run.json`. Older runs keep rule 1; `pgaio.py rescore <run> --score-rule 2` moves one over only when its timings carry the ideal read/write bytes (older runs are refused). Under rule 2:
+
+- The floor at each shape is the launch plus the largest of the memory time, the compute time and the round trip minus the launch, so mid shapes are scored against a floor they can reach.
+- Below the L2 size, the memory time counts only the ideal read bytes. The output of any kernel stays in the write-back L2 inside the timed window there, and counting writes at DRAM speed put good kernels above 100%.
+- At shapes larger than L2, output left in L2 past the timed window (by an evict_last store, for example) is charged at DRAM speed, from arena's `throughput.ideal_write_bytes` and the DRAM write counter: a following kernel would pay for that write-back. The diagnosis flags it at those shapes under either rule. Below L2 nothing is flagged or charged.
+- The timing statistic is the mean of the fastest half of the runs. Other GPU clients (the compositor, other processes) make 10 to 25% of small-shape runs land several microseconds late. When the diagnosis reports two clusters of timings, the slow one is usually that, and the fastest-half mean leaves it out as long as it is under half the runs.
+
+For scale, layernorm under rule 2: the naive baseline scores 57.9% and the best kernel of the first layernorm run 80.3% (mid shapes about 70%, large about 83%).
+- Timing uses arena's `--timing-mode v2`: the start event is recorded after the untimed L2 flush has finished. An event queued behind the flush is stamped on a 2.048 µs grid, which made small-shape medians jump in 2 µs steps. The round-trip floor is measured the same way.
 
 Run everything from the repo root. By default `pgaio.py` drives arena through Docker (`docker compose run --rm -T cli`), which has all four DSLs. For a native build pass `--arena build/arena` (any build dir) to `init` or set `ARENA_CMD`.
 
@@ -41,11 +51,11 @@ python3 tools/pgaio.py init --category softmax --sizes all --mode cross-dsl \
     --scratch-policy declared --docs off --model <your model id>
 ```
 
-Categories: `reduce`, `scan`, `softmax`, `layernorm` (`[rows, cols]` fp32 forward with gamma and beta, biased variance, eps fixed at 1e-5 inside the kernel since manifests have no float arguments), `matmul` and `attention` (`[BH, S, D]` fp32, non-causal, D = 64 in the timed and checked shapes).
+Categories: `reduce`, `scan`, `softmax`, `layernorm` (`[rows, cols]` fp32 forward with gamma and beta, biased variance, eps = 1e-5, which a manifest passes as `"eps"` or `{"f32": "eps"}`, or the kernel bakes in), `matmul` and `attention` (`[BH, S, D]` fp32, non-causal, D = 64 in the timed and checked shapes).
 
 `init` prints where the run lives and two files that update after every eval: `journal.md` (each iteration's hypothesis, result and code diff against the previous version in that DSL) and `progress.html` (the progression chart plus every iteration's code). The user follows the run through them, so keep hypotheses clear.
 
-`init` measures the category's plainest kernel as iteration 0 (softmax: `softmax_naive`; layernorm: `layernorm_naive`; reduce: `reduce_baseline`; scan: `scan_multiblock`; matmul: `matmul_naive`; attention: `attention_naive`; override with `--baseline`), prints its observation and any learnings from earlier runs, and creates `pgaio/runs/<run>/` with `work/` for your drafts. Checks the baseline itself fails are dropped from the gate and listed. `--dsls cuda,triton` restricts the languages; `--budget` caps the total and `--budget-per-dsl` each language.
+`init` measures the category's plainest kernel as iteration 0 (softmax: `softmax_naive`; layernorm: `layernorm_naive`; reduce: `reduce_baseline`; scan: `scan_multiblock`; matmul: `matmul_naive`; attention: `attention_naive`; override with `--baseline`), prints its observation and any learnings from earlier runs (hypotheses to test, not rules: persistent next-row prefetching gave softmax 92% of SOL and made layernorm 2.7% slower), and creates `pgaio/runs/<run>/` with `work/` for your drafts. Checks the baseline itself fails are dropped from the gate and listed. `--dsls cuda,triton` restricts the languages; `--budget` caps the total and `--budget-per-dsl` each language.
 
 Options worth knowing:
 
@@ -54,7 +64,7 @@ Options worth knowing:
 - `--docs on|off`: whether a CUDA documentation tool is available (section 5). Record it truthfully.
 - `--scratch-policy declared`: use it for new runs. Scratch entries marked `"zero": true` are zeroed inside the timed op, so the candidate pays for the memset; the rest are filled with `0xFF`, so a kernel that quietly depends on zeros fails. The default, `legacy`, zeroes all scratch for free outside timing and stays only so old runs remain comparable. See [manifests.md](manifests.md).
 - `--forbid-tensor-cores`: when the user asks for a true FP32 or CUDA-core comparison. A candidate whose SASS has tensor instructions is `rejected_guard`.
-- `--lock-clocks <MHz|auto>`: arena locks the SM clock for each measurement, which gives steadier rankings; absolute numbers are lower than at boost. It needs root; through Docker, `init` adds `--cap-add SYS_ADMIN` to the run's arena command for this. If the lock fails, arena warns, runs unlocked and the observation records it.
+- `--lock-clocks <MHz|auto>`: arena locks the SM clock for each measurement, which gives steadier rankings; absolute numbers are lower than at boost. It needs root; through Docker, `init` adds `--cap-add SYS_ADMIN` to the run's arena command for this. If the lock fails, arena warns, runs unlocked and the observation records it. A lock is a ceiling, not a fixed clock: `environment.clock_lock.achieved_mhz` is the mean SM clock over the timed windows, and locking above what the board sustains does not raise it (this board ran 2817 MHz when locked at 3090). pgaio warns when that happens and suggests `auto`.
 - `--counters basic|full`: `full` (the default) adds issue active, pipe use, eligible warps, stall reasons, shared wavefronts and bank conflicts, and L2 sectors to every eval. It costs replay passes, so evals are slower; timing is not affected.
 
 ## 2. The loop
@@ -70,12 +80,12 @@ For each idea:
    python3 tools/pgaio.py sass <run> pgaio/runs/<run>/work/v3.json
    ```
 
-   This first runs `check` (below), then compiles the draft and prints registers, spills, the SASS instruction mix and its most frequent opcodes, the difference against the best so far, and a `diff` command for the two SASS listings. It saves `kernel.sass` and whatever else the compiler produced into `inspections/NNN_<draft>/`: `kernel.ptx` (CUDA, Triton), `kernel.ttgir` (Triton's IR, where layouts, vector widths and pipelining are decided) and `kernel.warp_gen.cu` (the CUDA C++ Warp generated). It never runs or times the kernel, so it costs nothing. Use it as often as you like: to check that a change compiled the way you meant (128-bit loads, warp shuffles instead of shared memory, no spills), and to compare how the same idea compiles in different DSLs.
+   This first runs `check` (below), then compiles the draft and prints registers, spills, the SASS instruction mix and its most frequent opcodes, the difference against the best so far, and a `diff` command for the two SASS listings. It also prints, per entry, the global and shared load and store widths (`LDG`, `STG`, `LDS`, `STS` and so on, counted at 32, 64 and 128 bits) and their cache hints (`EF`, `EL`, `LU`, `LTC128B`, `CONSTANT`, `STRONG.GPU`), so you do not need to grep the listing for them. It saves `kernel.sass` and whatever else the compiler produced into `inspections/NNN_<draft>/`: `kernel.ptx` (CUDA, Triton), `kernel.ttgir` (Triton's IR, where layouts, vector widths and pipelining are decided) and `kernel.warp_gen.cu` (the CUDA C++ Warp generated), plus the same for every source and define variant of the manifest as `<stem>[_DEFINES].ptx` and so on. It never runs or times the kernel, so it costs nothing. Use it as often as you like: to check that a change compiled the way you meant (128-bit loads, warp shuffles instead of shared memory, no spills), and to compare how the same idea compiles in different DSLs.
 
    `--show LDG,STG,BAR` lists the SASS lines starting with those mnemonics in program order, with addresses: where loads sit relative to barriers, whether a prefetch was hoisted or sunk, without reading the whole listing.
    Before measuring, confirm in this output that the change you meant actually happened. In the PGAIO runs so far, iterations were wasted on kernels whose SASS already showed the idea had not taken effect: `__ldg` removed but the load still `.CONSTANT`, a Triton load still scalar because an `if` merged its alignment, a tile spilling hundreds of `LDL`/`STL`. A `SPILLS:` line means shrink the tile or raise `num_warps` first.
 
-   `python3 tools/pgaio.py check <run> <manifest>` on its own runs `arena --plan` over every timed and checked shape and prints each launch's grid, block, shared memory, scratch sizes and arguments, or the first expression error. It is free. Use it before the first eval of every new manifest: an expression error, or a `when` that leaves some checked size without a launch, otherwise costs a whole iteration.
+   `python3 tools/pgaio.py check <run> <manifest>` on its own runs `arena --plan` over every timed and checked shape and prints each launch's grid, block, shared memory, scratch sizes, arguments, registers and shared memory use, or the first expression error. It also checks resources: static plus dynamic shared memory against the per-block opt-in limit (99 KB on this GPU), threads per block against what the function allows at its register count, and grid and block sizes. A problem fails `check`; at run time the same message replaces CUDA's bare "invalid argument". It is free. Use it before the first eval of every new manifest: an expression error, a resource problem, or a `when` that leaves some checked size without a launch otherwise costs a whole iteration.
 3. Measure it when you expect it to help:
 
    ```bash
@@ -90,7 +100,7 @@ For each idea:
    python3 tools/pgaio.py profile <run> --reference cublas     # once per run, for matmul
    ```
 
-   This runs Nsight Compute on arena for an iteration that passed eval and saves `profiles/<NNN>/summary.json` (plus csv exports and `report.ncu-rep`): stall reasons, pipe use, bank conflicts, the instructions carrying the most stalls with their SASS offsets, the hot loop's opcode mix, and a diff against the best or the reference. Form the next hypothesis from the stall diff and those instructions. ncu durations are at a locked base clock with replay, labelled as such, and never a score. Replay restores memory, so self-resetting state (split-K semaphores) profiles fine. It is free.
+   This runs Nsight Compute on arena for an iteration that passed eval and saves `profiles/<NNN>/summary.json` (plus csv exports and `report.ncu-rep`): stall reasons, pipe use, bank conflicts, the instructions carrying the most stalls with their SASS offsets, the hot loop's opcode mix, and a diff against the best or the reference. The summary also has a memory section (DRAM, L2 and L1 throughput as a share of peak, hit rates, occupancy, waves, and L2 slice balance: the busiest slice against the mean and against its own peak) and a time breakdown (the eval's op time split into kernels and launch gaps, plus ncu's SM tail); the diff covers both. Use them on memory-bound kernels: in the layernorm run the busiest L2 slice was 1.48x the mean but at only 26% of its peak, which ruled out an L2 hot spot. Form the next hypothesis from the stall diff and those instructions. ncu durations are at a locked base clock with replay, labelled as such, and never a score. Replay restores memory, so self-resetting state (split-K semaphores) profiles fine. It is free.
 5. Compare any two measured iterations, free: `python3 tools/pgaio.py compare <run> 2 7`, or `compare <run> 7 ref:cublas`. It shows both CIs, stalls, pipes, clocks and, when both have profiles, the ncu stall diff.
 6. Decide what the result says about the hypothesis before the next one. A slower result rules something out; say what.
 
@@ -98,13 +108,13 @@ When small and large shapes want different kernels, write both and dispatch with
 
 State hypotheses as cause and effect, citing the evidence: "Triton's SASS uses 4 shuffles and no shared memory per reduction where my CUDA kernel uses 10 shared ops and 9 syncs; a warp-shuffle reduction in CUDA should cut the syncs and gain a few percent."
 
-Look up a DSL's API in the installed version, free: `python3 tools/pgaio.py api cutile load`, `api warp tile_load`, `api triton max`; without a name it lists what the module exports. Prefer this to guessing, since cuTile and Warp change between releases.
+Look up a DSL's API in the installed version, free: `python3 tools/pgaio.py api cutile load`, `api warp tile_load`, `api triton max`; without a name it lists what the module exports. Prefer this to guessing, since cuTile and Warp change between releases. It prints the installed versions first (in the container: triton 3.8.0, cuda-tile 1.6.0 with tileiras 13.1, warp-lang 1.18.0, nvcc 13.1). Online docs may describe newer ones, such as cuTile's `check_bounds=False` and `num_worker_warps`, which need tileiras 13.4; `sass` or `check` is the test of what compiles here.
 
 Moving ideas between DSLs is the point. When one DSL produces better SASS for the same algorithm, look at what it emitted and write the same thing in the other. When a DSL's abstraction blocks an idea, say so and move on.
 
 Verdicts: `ok`, `incorrect` (a gated check failed; size, distribution, seed and error are listed), `compile_error`, `runtime_error` (includes a manifest whose arguments do not match the kernel; the message says which), `rejected_guard`. `pgaio.py status <run>` shows the history and the budget left per DSL.
 
-Stop when the target is reached, the budget (if any) is spent, or the run reaches a plateau: `eval` and `status` count the evals since the best last made a real gain, and once that reaches 10 with every allowed DSL given at least 3 evals (or skipped, below), they say you may stop. In runs started now (plateau rule 2), an eval is a gain only if it beats the best by more than 0.5 points and by more than the two CIs' half-widths combined, or if an `ab` over every timed shape (no `--shape`) shows it faster than the best; an `ab` limited with `--shape` is for diagnosis and does not count. Older runs keep rule 1 (0.5 points). Before stopping on a plateau, look at the per-shape table: if one size range is far from its roof, an idea aimed at it (a size-dispatched kernel) is worth trying first. The user can stop the run at any time.
+Stop when the target is reached, the budget (if any) is spent, or the run reaches a plateau: `eval` and `status` count the evals since the best last made a real gain, and once that reaches 10 with every allowed DSL given at least 3 evals (or skipped, below), they say you may stop. An eval is a gain only if it beats the best by more than 0.5 points and by more than the two CIs' half-widths combined, or if an `ab` over every timed shape (no `--shape`) shows it faster than the best; an `ab` limited with `--shape` is for diagnosis and does not count. Runs started now use plateau rule 3: the same gain test, but the run may stop at 6 evals since the last gain when every DSL has its minimum or is skipped, at least 2 `ab`s since the last gain found nothing faster than the A/B-adjusted best, and no shape has an open lead. `status` says which of these still hold. Do not spend evals on low-odds ideas just to reach the count; close the open leads with `ab` instead. Older runs keep rule 2 (the gain test, stop at 10) or rule 1 (0.5 points). Before stopping on a plateau, look at the per-shape table: if one size range is far from its roof, an idea aimed at it (a size-dispatched kernel) is worth trying first. The user can stop the run at any time.
 
 When a DSL is a dead end, mark it rather than spending evals to reach the minimum of 3:
 
@@ -128,7 +138,7 @@ These keep the score meaningful, and the harness enforces most of them.
 - Measure through `pgaio.py eval` only. `sass`, `check`, `profile` and `ab` on evaluated iterations are free and allowed. Choosing what to submit from timings taken outside pgaio (arena run directly, ncu durations, your own scripts) is not.
 - Scratch: under `legacy`, scratch is zeroed for free outside timing. Do not build on that in a `declared` run; mark every buffer the kernel needs zeroed with `"zero": true`. A kernel that spin-waits on an undeclared buffer (split-K semaphores, look-back flags) hangs on the `0xFF` fill instead of failing.
 
-The timed size is chosen to be several times the L2 (softmax: 16384 x 4096, 512 MB in and out against 128 MB of L2). Cache-policy hints such as an evict_last store are allowed, but they cannot hide most of the output in L2 at this size; if the diagnosis says DRAM moved well under the ideal bytes, say so in the summary rather than presenting the SOL as pure bandwidth.
+The timed size is chosen to be several times the L2 (softmax: 16384 x 4096, 512 MB in and out against 128 MB of L2). Cache-policy hints such as an evict_last store are allowed, but an evict_last output store mostly parks output in L2, to be written back after the timer stops. Score rule 2 charges that output at DRAM speed at shapes larger than L2. Under rule 1, if the diagnosis says DRAM moved well under the ideal bytes, say so in the summary rather than presenting the SOL as pure bandwidth.
 
 Every eval prints a 95% CI for the score and the spread at each shape. A difference inside the CIs is noise, not a result. When a candidate lands within the CI of the best, time the two directly instead of reading the numbers:
 
@@ -136,13 +146,15 @@ Every eval prints a 95% CI for the score and the spread at each shape. A differe
 python3 tools/pgaio.py ab <run> 15 16 [--shape K=4096,M=4096,N=4096] [--rounds 6]
 ```
 
-It alternates the two in rounds and reports the ratio with a CI. It is free, but only takes iterations that passed eval; drafts cannot be timed outside eval. Float atomics make summation order nondeterministic, so an atomic-heavy kernel can land on either side of a tolerance by a hair.
+It alternates the two in rounds and reports the ratio with a CI. It is free, but only takes iterations that passed eval; drafts cannot be timed outside eval.
+
+Saved A/Bs feed back into the run. `status`, `eval`, `best` and the journal show an "A/B-adjusted best": it follows every saved `ab` over all train shapes that found a faster iteration, and lists ties. "vs best" comparisons and the SASS delta use it; scores do not change. `status` also lists per-shape leads, iterations faster than the best at some shape beyond the CIs (or per an `ab`), as dispatch opportunities, each with the `ab --shape` command that confirms or closes it. Float atomics make summation order nondeterministic, so an atomic-heavy kernel can land on either side of a tolerance by a hair.
 
 Each eval also samples SM clock and power during the timed runs, and for compute-bound shapes prints the SOL at the measured clock next to the nominal one. The nominal SOL stays the score. Power and input data move the clock: on the RTX PRO 6000, cuBLAS SGEMM runs at 2.2 to 2.4 GHz and 520 to 580 W, and was 6% faster at 8192 on uniform [0,1) inputs than on randn.
 
 ## 4. Finish
 
-1. `python3 tools/pgaio.py status <run>` and `python3 tools/pgaio.py best <run>`. When the run has a reference, `status` shows it and `report` adds a "vs reference" column; if the best has not been profiled, `profile` it so the summary can say what still limits it.
+1. `python3 tools/pgaio.py status <run>` and `python3 tools/pgaio.py best <run>`. When the run has a reference, `status` shows it and `report` adds a "vs reference" column; if the best has not been profiled, `profile` it so the summary can say what still limits it. `best` prints the best score and, under `ab_best`, the A/B-adjusted best with its ties; when they differ, report both.
 2. Record one to three insights for future runs, with evidence:
 
    ```bash
@@ -159,7 +171,7 @@ Each eval also samples SM clock and power during the timed runs, and for compute
 
 Before `init`, check whether a CUDA documentation tool is connected: an MCP tool whose name mentions Nsight Copilot, CUDA docs or similar.
 
-- If one is connected, pass `--docs on` and use it to check API signatures (cuTile and Warp change between versions), architecture limits for the GPU in `environment.arch`, and unfamiliar PTX or SASS instructions. A lookup is cheaper than a failed compile.
+- If one is connected, pass `--docs on` and use it to check API signatures (cuTile and Warp change between versions, and the docs may describe a newer one than `api` reports installed), architecture limits for the GPU in `environment.arch`, and unfamiliar PTX or SASS instructions. A lookup is cheaper than a failed compile.
 - If none is connected, tell the user once that a CUDA documentation MCP server would help (NVIDIA's Nsight Copilot CUDA server, for those with access) and that adding one takes effect in a new session. Do not add it yourself. Then continue with `--docs off`.
 
 ## Single-slot runs

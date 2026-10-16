@@ -10,7 +10,7 @@ A kernel is two files in `kernels/<category>/<input dtype>/`:
 1. The GPU source, compiled at run time: `name.cu`, `name.triton.py`, `name.cutile.py` or `name.warp.py`.
 2. A C++ descriptor, `name.cpp` (or `name.triton.cpp` and so on), compiled into the binary. It names the kernel and decides its launch config, its arguments and how it is verified.
 
-The folder is named after the input dtype because that is what shapes the code (`float*` against `__half*`). Variants that share an input type but differ in output type go in the same source file. Categories today: `reduce`, `scan`, `softmax`, `layernorm`, `matmul`, `attention`. Their shared logic (allocation, input generation, CPU reference, verification, FLOP and byte counts) lives in `include/arena/categories/<category>_base.hpp`, so a descriptor normally only adds what is specific to it.
+The folder is named after the input dtype because that is what shapes the code (`float*` against `__half*`). Variants that share an input type but differ in output type go in the same source file. Categories today: `reduce`, `scan`, `softmax`, `layernorm`, `matmul`, `attention`. Their shared logic (allocation, input generation, CPU reference, verification, FLOP and byte counts, and the read/write split of those bytes in `ideal_bytes()`, which PGAIO's score rule 2 needs) lives in `include/arena/categories/<category>_base.hpp`, so a descriptor normally only adds what is specific to it.
 
 Descriptors are found by `file(GLOB_RECURSE kernels/*.cpp)` in CMake, so a new descriptor needs a re-run of CMake. The Docker entrypoint does this on every start; natively, run `cmake -S . -B build && cmake --build build -j`.
 
@@ -77,10 +77,10 @@ A kernel does not need a descriptor to be run, timed or inspected: a JSON manife
 
 ## Promoting a PGAIO candidate
 
-`python3 tools/pgaio.py best <run>` gives the best candidate's folder: a source and, in a problem run, the manifest that launches it.
+`python3 tools/pgaio.py best <run>` gives the best candidate's folder: a source and, in a problem run, the manifest that launches it. When its `ab_best` names another iteration, a saved A/B found that one faster over every timed shape; promote it instead.
 
 1. Copy the source to `kernels/<category>/<dtype>/<new name>.<ext>`. For CUDA, give the entry point a unique name.
-2. Write `<new name>.cpp` from the manifest: `grid`, `block` and `shared_mem` become `get_launch_config()`, `args` become `get_kernel_args()`, scratch buffers are allocated in `allocate()` and zeroed in `reset()`. Start from the closest descriptor in the table above; `kernels/scan/fp32/multiblock.cpp` shows scratch, `kernels/reduce/fp32/reduce.warp.cpp` the Warp structs (`include/arena/warp_abi.hpp`), `kernels/matmul/fp32/matmul.cutile.cpp` the cuTile expansion. In a single-slot run, copy the slot's descriptor instead and change `name()`, `description()`, `source_path()` and, for CUDA, `function_name()`.
+2. Write `<new name>.cpp` from the manifest: `grid`, `block` and `shared_mem` become `get_launch_config()`, `args` become `get_kernel_args()`, scratch buffers are allocated in `allocate()` and zeroed in `reset()`. A descriptor compiles its source once, so launches with different `defines` need the constants fixed in a copy of the source per variant. Start from the closest descriptor in the table above; `kernels/scan/fp32/multiblock.cpp` shows scratch, `kernels/reduce/fp32/reduce.warp.cpp` the Warp structs (`include/arena/warp_abi.hpp`), `kernels/matmul/fp32/matmul.cutile.cpp` the cuTile expansion. In a single-slot run, copy the slot's descriptor instead and change `name()`, `description()`, `source_path()` and, for CUDA, `function_name()`.
 3. Rebuild, then run the checks above. The new kernel now shows up in the GUI and in category runs next to the original.
 
 Do this after a PGAIO run has finished, never during one: `kernels/` is protected while a run is active, and changing it rejects the iteration.

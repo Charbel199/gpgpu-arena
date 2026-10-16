@@ -126,13 +126,22 @@ together or compare one against another.
 
 GFLOPS and GB/s divide by `op_ms`. Hardware counters divide by `gpu_ms`.
 
-`op_ms` is a median. Microsecond kernels' event timings cluster near
-multiples of about 2 µs on some GPUs, so results also carry `op_ms_trimmed`,
-the mean of the middle half of the runs, which moves smoothly where the
-median steps. Each run also reports two floors in `environment`:
+`op_ms` is a median. By default (`--timing-mode v1`) the start event is
+queued behind the untimed reset and L2 flush, and on some GPUs such an event
+is stamped on a 2.048 µs grid, so microsecond kernels read as 4.096, 6.144,
+8.192 µs. Results also carry `op_ms_trimmed`, the mean of the middle half of
+the runs, which moves more smoothly. `--timing-mode v2` waits for the reset
+to finish before recording the start event, which keeps its full resolution;
+new PGAIO runs use it. Each run also reports two floors in `environment`:
 `launch_floor_ms` (an empty kernel launch, about 2.2 µs on an RTX PRO 6000)
 and `roundtrip_floor_ms` (a launch plus one cold DRAM read and one write,
-about 4.1 µs), the least a kernel that reads its input from memory can take.
+about 3 to 3.7 µs), the least a kernel that reads its input from memory can
+take.
+
+Each result's `throughput` also splits the ideal bytes into
+`ideal_read_bytes` and `ideal_write_bytes` (null when the category does not
+say), so a scorer can count only reads below the L2 size and tell output left in
+L2 past the timed window from a real speedup above it.
 
 By default the timed loop runs with whatever the previous launch left in L2.
 A working set smaller than L2 (128 MB on an RTX PRO 6000) is then served from
@@ -402,7 +411,10 @@ stopped. A plateau is 10 evals without a real gain, after every DSL had 3
 evals or was marked a dead end with `skip-dsl`. In runs started now a gain
 must beat the best by more than 0.5 points and by more than the two scores'
 confidence intervals, or be shown faster by `ab`; older runs keep the plain
-0.5 point rule. Asking an agent only needs the problem, for example
+0.5 point rule. New runs may also stop after 6 evals without a gain once 2
+A/Bs found nothing faster than the A/B-adjusted best (the best after saved
+A/Bs) and no shape has an open lead, an iteration faster than the best at
+that shape. Asking an agent only needs the problem, for example
 "optimize softmax for small inputs, any DSL", and the skill fills in the
 rest.
 
@@ -470,7 +482,13 @@ readable and comparable:
 | `init --lock-clocks <MHz\|auto>` | Opt-in. Steadier rankings, lower absolute numbers than boost. Needs root (and `SYS_ADMIN` in Docker); falls back to unlocked with a warning, recorded in the run. |
 | `init --scratch-policy declared` | Opt-in. Zeroing scratch marked `"zero": true` moves inside the timed op, so `op_ms` includes the memset; other scratch is filled with `0xFF`. The default `legacy` keeps the old behaviour. |
 | `matmul_cublas` | A new reference kernel. It never becomes a run's best and does not count as an iteration. |
-| Plateau rule 2 | New runs only; runs without the setting keep rule 1. |
+| Plateau rule 2 | Runs that recorded it. Runs without the setting keep rule 1. |
+| Plateau rule 3 | New runs only: the run may stop at 6 evals without a gain, instead of 10, once every DSL has its minimum, 2 A/Bs found nothing faster and no shape has an open lead. Older runs keep their rule. |
+| `--timing-mode v2` | Opt-in per run; new PGAIO runs use it. The start event is recorded after the untimed L2 flush finishes, so it is no longer stamped on a 2.048 µs grid. Small-shape `op_ms` is not comparable between `v1` and `v2`. |
+| Round-trip floor fix | `roundtrip_floor_ms` now waits for its L2 flush the same way. It read exactly 4.096 µs before and about 3 to 3.7 µs now. It changes the floors recorded by new runs; old runs keep their stored floors. |
+| Score rule 2 | New PGAIO runs only (`"score_rule": 2`); old runs keep rule 1. `pgaio.py rescore <run> --score-rule 2` moves a run over only if its timings carry arena's ideal read/write bytes (runs timed by this build); older runs are refused, and references timed before it need `pgaio.py reference` again. The floor is launch + max(memory, compute, round trip - launch), so mid shapes can reach it. Below the L2 size the memory time counts only the ideal read bytes, since output stays in the write-back L2 inside the timed window. Above it, output left in L2 past the timed window (cache hints) is charged at DRAM speed. Timing is the mean of the fastest half of the runs, so a slow tail from other GPU clients does not move it while it is under half the runs, and uses `--timing-mode v2`. Layernorm under rule 2: naive baseline 57.9%, best kernel of the first run 80.3%. |
+| `throughput.ideal_read_bytes`, `ideal_write_bytes` | Reporting only: the split of the bytes `bandwidth_gbps` already counts. |
+| `environment.clock_lock.achieved_mhz` | Reporting only: the mean SM clock over the timed windows. A lock is a ceiling, so it can sit below the requested clock (2817 MHz when locked at 3090 on an RTX PRO 6000); arena and pgaio warn when it does. |
 
 ## Tests
 
